@@ -1,4 +1,4 @@
-"""FastAPI application for SoloLedger SMS Webhook and Reconciliation endpoints."""
+"""FastAPI application for SoloLedger SMS Webhook, NTS Merchant Cache, and Reconciliation."""
 
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -8,7 +8,15 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
 from sololedger import __version__
 from sololedger.config import settings
 from sololedger.db import get_connection, init_db
-from sololedger.models import ReconcileBatchRequest, SmsWebhookPayload
+from sololedger.merchant_service import (
+    apply_merchant_tax_status_to_ledger,
+    get_or_verify_merchant,
+)
+from sololedger.models import (
+    MerchantVerifyRequest,
+    ReconcileBatchRequest,
+    SmsWebhookPayload,
+)
 from sololedger.notifier import send_telegram_memo_prompt
 from sololedger.reconciler import reconcile_single_item
 from sololedger.sms_parser import parse_korean_card_sms
@@ -133,6 +141,58 @@ async def receive_card_sms_webhook(
             "is_vehicle_expense": rule_result["is_vehicle_expense"],
             "reconcile_status": status_code,
         }
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/merchants/verify")
+async def verify_merchant_endpoint(
+    request: MerchantVerifyRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Verify merchant business registration status via 30-day TTL cache or NTS API."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        try:
+            status = await get_or_verify_merchant(
+                cursor,
+                biz_reg_no=request.biz_reg_no,
+                merchant_name=request.merchant_name,
+                default_account_code=request.default_account_code,
+                force_refresh=request.force_refresh,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+
+        updated_tx_count = apply_merchant_tax_status_to_ledger(cursor, status)
+        conn.commit()
+        return {
+            "status": "verified",
+            "merchant": status.model_dump(),
+            "updated_transactions": updated_tx_count,
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/merchants")
+async def list_merchants(
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """List cached merchants and their NTS verification status."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT * FROM merchants ORDER BY nts_verified_at DESC")
+        rows = [dict(r) for r in cursor.fetchall()]
+        return {"count": len(rows), "items": rows}
     finally:
         conn.close()
 

@@ -27,6 +27,18 @@ class Settings:
         return os.getenv("TELEGRAM_CHAT_ID", "")
 
     @property
+    def nts_api_service_key(self) -> str:
+        return os.getenv("NTS_API_SERVICE_KEY", "")
+
+    @property
+    def nts_api_base_url(self) -> str:
+        return os.getenv("NTS_API_BASE_URL", "https://api.odcloud.kr/api/nts-businessman/v1")
+
+    @property
+    def nts_cache_ttl_days(self) -> int:
+        return int(os.getenv("NTS_CACHE_TTL_DAYS", "30"))
+
+    @property
     def schema_path(self) -> Path:
         custom = os.getenv("SOLOLEDGER_SCHEMA_PATH")
         return Path(custom) if custom else DEFAULT_SCHEMA_PATH

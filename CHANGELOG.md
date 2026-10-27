@@ -6,3 +6,4 @@
 |------|------|-----------|----------------|-----------|
 | 2026-10-27 | `feat` | `.agents/, .env.example, .githooks/, .gitignore (+13 files)` | SoloLedger 초기 아키텍처, 코어 모듈(SMS 파서·세무 규칙·3단계 대사·FastAPI) 및 하네스 엔지니어링(자동 검증·변경 로깅·커밋/푸시 가드) 구축 | `PASSED` |
 | 2026-10-27 | `docs` | `README.md, logs/last_verification.json, logs/verification_history.jsonl, docs/DEVELOPMENT_PLAN.md` | SoloLedger 5단계(Phase 1~5) 마스터 개발 계획서(docs/DEVELOPMENT_PLAN.md) 작성 및 README 목차 갱신 | `PASSED` |
+| 2026-10-27 | `feat` | `.env.example, docs/DEVELOPMENT_PLAN.md, logs/last_verification.json, logs/verification_history.jsonl (+8 files)` | Phase 2(v0.2.0) 국세청 사업자 상태조회 API 연동, 사업자번호 체크섬 검증 및 30일 TTL 캐시 엔진 구현 | `PASSED` |

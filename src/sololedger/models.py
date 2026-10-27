@@ -55,3 +55,32 @@ class ReconcileBatchRequest(BaseModel):
     """Batch request for reconciling transactions."""
 
     items: List[ReconcileItem]
+
+
+class NtsStatusResult(BaseModel):
+    """Normalized result from NTS business registration status lookup or cache."""
+
+    biz_reg_no: str
+    merchant_name: Optional[str] = None
+    tax_type_code: str = "UNKNOWN"  # GENERAL, SIMPLIFIED, EXEMPT, UNREGISTERED, UNKNOWN
+    biz_status: str = "ACTIVE"  # ACTIVE, SUSPENDED, CLOSED
+    is_valid_checksum: bool = False
+    is_pg_provider: bool = False
+    default_account_code: Optional[str] = None
+    raw_tax_type_msg: Optional[str] = None
+    closed_dt: Optional[str] = None
+    from_cache: bool = False
+    nts_verified_at: Optional[str] = None
+
+
+class MerchantVerifyRequest(BaseModel):
+    """Request payload for verifying and caching a merchant's NTS tax status."""
+
+    biz_reg_no: str = Field(..., description="10-digit business registration number (with or without hyphens)")
+    merchant_name: str = Field(default="미상가맹점", description="Merchant display name")
+    default_account_code: Optional[str] = Field(
+        default=None, description="Optional default account code for recurring visits"
+    )
+    force_refresh: bool = Field(
+        default=False, description="Force NTS API lookup even if 30-day cache is valid"
+    )
