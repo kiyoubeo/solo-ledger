@@ -17,3 +17,4 @@
 | 날짜 | 파일 | 변경 내용 |
 |------|------|-----------|
 | 2026-10-27 | .agents/, .env.example, .githooks/, .gitignore (+13 files) | [feat] SoloLedger 초기 아키텍처, 코어 모듈(SMS 파서·세무 규칙·3단계 대사·FastAPI) 및 하네스 엔지니어링(자동 검증·변경 로깅·커밋/푸시 가드) 구축 |
+| 2026-10-27 | README.md, logs/last_verification.json, logs/verification_history.jsonl, docs/DEVELOPMENT_PLAN.md | [docs] SoloLedger 5단계(Phase 1~5) 마스터 개발 계획서(docs/DEVELOPMENT_PLAN.md) 작성 및 README 목차 갱신 |

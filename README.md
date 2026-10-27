@@ -51,7 +51,8 @@ SoloLedger/
 ├── .agents/                    # Antigravity 에이전트 규칙, 스킬, 라이프사이클 훅
 ├── .githooks/                  # Git pre-commit 무결성 검증 훅
 ├── docs/
-│   └── ARCHITECTURE_SPEC.md    # 전체 시스템 아키텍처 및 도메인 설계 명세서
+│   ├── ARCHITECTURE_SPEC.md    # 전체 시스템 아키텍처 및 도메인 설계 명세서
+│   └── DEVELOPMENT_PLAN.md     # 단계별(Phase 1~5) 마스터 개발 계획서
 ├── logs/
 │   ├── dev_changes.jsonl       # 모든 개발 변경사항 구조화 로그 (JSONL)
 │   ├── verification_history.jsonl # 하네스 검증 실행 이력 로그 (JSONL)
