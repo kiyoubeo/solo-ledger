@@ -1,0 +1,27 @@
+{
+  "edit-audit-logger": {
+    "enabled": true,
+    "PostToolUse": [
+      {
+        "matcher": "write_file|edit_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/post_tool_audit.ps1",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
+  "commit-push-verify-stop-guard": {
+    "enabled": true,
+    "Stop": [
+      {
+        "type": "command",
+        "command": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/stop_guard.ps1",
+        "timeout": 15
+      }
+    ]
+  }
+}

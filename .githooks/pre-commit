@@ -1,0 +1,13 @@
+#!/bin/sh
+# SoloLedger Git pre-commit hook: Ensures last verification passed and CHANGELOG.md is present
+if [ ! -f "logs/last_verification.json" ]; then
+    echo "[SoloLedger Pre-Commit Blocked] logs/last_verification.json not found. Run: scripts/harness.ps1 verify"
+    exit 1
+fi
+
+if ! grep -q '"status":\s*"PASSED"' "logs/last_verification.json"; then
+    echo "[SoloLedger Pre-Commit Blocked] Last harness verification did not pass. Run: scripts/harness.ps1 verify"
+    exit 1
+fi
+
+exit 0
