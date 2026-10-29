@@ -82,11 +82,14 @@ def test_nas_backup_api_and_cli_incremental_sync(client, test_db_path, tmp_path)
 
 
 def test_server_service_script_and_setup_guide_exist():
-    """Verify 24/7 laptop/mini-PC server provisioning script and setup guide."""
+    """Verify 24/7 laptop/mini-PC server provisioning script, setup guide, and user manual."""
     service_script = PROJECT_ROOT / "scripts" / "server_service.ps1"
     guide_doc = PROJECT_ROOT / "docs" / "SERVER_SETUP_GUIDE.md"
+    manual_doc = PROJECT_ROOT / "docs" / "USER_MANUAL.md"
     assert service_script.exists()
     assert guide_doc.exists()
+    assert manual_doc.exists()
+    assert "TEST MODE" in manual_doc.read_text(encoding="utf-8")
 
     proc = subprocess.run(
         [
