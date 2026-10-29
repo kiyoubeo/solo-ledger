@@ -44,6 +44,20 @@ class Settings:
         return Path(custom) if custom else (PROJECT_ROOT / "archive")
 
     @property
+    def nas_backup_dir(self) -> Path:
+        custom = os.getenv("SOLOLEDGER_NAS_DIR")
+        if custom:
+            return Path(custom)
+        for candidate in (
+            Path(r"Z:\HDD1\Data"),
+            Path(r"Z:\HDD1\Home.ybkim"),
+            Path(r"Z:\HDD1\Home.admin"),
+        ):
+            if candidate.exists():
+                return candidate / "SoloLedger"
+        return Path(r"Z:\SoloLedger")
+
+    @property
     def gemini_api_key(self) -> str:
         return os.getenv("GEMINI_API_KEY", "")
 

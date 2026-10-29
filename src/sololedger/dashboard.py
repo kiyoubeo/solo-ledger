@@ -257,6 +257,7 @@ def render_dashboard_html(
       <p>귀속 연월: <strong>{summary['year_month']}</strong> | 귀속 연도: <strong>{summary['year']}</strong></p>
     </div>
     <div>
+      <button onclick="backupToNas()">NAS(Z:\\) 백업 동기화</button>
       <button onclick="exportTaxPack('{summary['year_month']}')">세무사 제출용 ZIP+CSV 생성</button>
     </div>
   </header>
@@ -335,6 +336,14 @@ def render_dashboard_html(
         method: 'POST',
         headers: {{ 'Content-Type': 'application/json' }},
         body: JSON.stringify({{ year_month: yearMonth }})
+      }});
+      window.location.reload();
+    }}
+    async function backupToNas() {{
+      await fetch('/api/v1/system/backup-nas', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{}})
       }});
       window.location.reload();
     }}

@@ -19,7 +19,7 @@ PHASE_TEST_MAPPING = {
     "Phase 2": ["tests/test_nts_client.py"],
     "Phase 3": ["tests/test_ocr_and_bot.py", "tests/test_receipt_dataset.py"],
     "Phase 4": ["tests/test_import_export.py"],
-    "Phase 5": ["tests/test_e2e_lifecycle.py"],
+    "Phase 5": ["tests/test_e2e_lifecycle.py", "tests/test_nas_sync.py"],
 }
 
 REQUIRED_PLAN_SECTIONS = [

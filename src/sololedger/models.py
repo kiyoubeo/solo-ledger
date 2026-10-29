@@ -159,3 +159,11 @@ class TransactionUpdateRequest(BaseModel):
     counterparty_info: Optional[str] = Field(
         default=None, description="Item summary or meeting attendee memo"
     )
+
+
+class NasBackupRequest(BaseModel):
+    """Request payload for backing up SQLite DB and evidence archive to NAS drive."""
+
+    nas_dir: Optional[str] = Field(
+        default=None, description="Optional override path for NAS backup root (defaults to Z:\\SoloLedger)"
+    )

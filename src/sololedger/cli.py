@@ -13,6 +13,7 @@ from sololedger.dashboard import build_dashboard_summary
 from sololedger.db import get_connection, init_db
 from sololedger.exporters import generate_tax_accountant_pack
 from sololedger.importers import decode_csv_bytes, import_and_reconcile_hometax_csv
+from sololedger.nas_sync import sync_to_nas
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -58,6 +59,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="Re-export transactions even if already marked exported",
+    )
+
+    # 5. backup-nas
+    nas_parser = subparsers.add_parser(
+        "backup-nas",
+        help="Safely back up SQLite DB and mirror receipt archive to NAS drive (default: Z:\\SoloLedger)",
+    )
+    nas_parser.add_argument(
+        "--nas-dir",
+        default=None,
+        help="Override NAS target directory path (defaults to SOLOLEDGER_NAS_DIR or Z:\\SoloLedger)",
     )
 
     return parser
@@ -129,6 +141,11 @@ def run_cli(argv: Optional[List[str]] = None) -> Dict[str, Any]:
             )
             conn.commit()
             return {"command": "export-pack", **outcome}
+
+        if args.command == "backup-nas":
+            target_dir = Path(args.nas_dir) if args.nas_dir else None
+            outcome = sync_to_nas(target_nas_dir=target_dir)
+            return {"command": "backup-nas", **outcome}
 
         raise ValueError(f"Unknown CLI command: {args.command}")
     finally:

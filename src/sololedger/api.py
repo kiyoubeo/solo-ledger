@@ -26,12 +26,14 @@ from sololedger.merchant_service import (
 from sololedger.models import (
     HometaxCsvImportRequest,
     MerchantVerifyRequest,
+    NasBackupRequest,
     ReceiptUploadRequest,
     ReconcileBatchRequest,
     SmsWebhookPayload,
     TaxPackExportRequest,
     TransactionUpdateRequest,
 )
+from sololedger.nas_sync import sync_to_nas
 from sololedger.notifier import send_telegram_memo_prompt
 from sololedger.ocr_engine import process_and_link_receipt
 from sololedger.reconciler import reconcile_single_item
@@ -450,6 +452,20 @@ async def dashboard_summary_endpoint(
         return build_dashboard_summary(cursor, year_month=year_month, year=year)
     finally:
         conn.close()
+
+
+@app.post("/api/v1/system/backup-nas")
+async def backup_nas_endpoint(
+    request: NasBackupRequest = Body(default_factory=NasBackupRequest),
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Safely back up the active SQLite database and mirror receipt archives to NAS storage."""
+    from pathlib import Path
+
+    _verify_api_key(x_api_key, sololedger_api_key)
+    target_dir = Path(request.nas_dir) if request.nas_dir else None
+    return sync_to_nas(target_nas_dir=target_dir)
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
