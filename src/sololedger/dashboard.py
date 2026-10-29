@@ -773,10 +773,15 @@ def render_dashboard_html(
             sel = "selected" if code_k == cur_code else ""
             acc_opts.append(f"<option value='{code_k}' {sel}>{code_k} {html.escape(code_v)}</option>")
         acc_select = f"<select id='acc-{tx_id}'>{''.join(acc_opts)}</select>"
+        t_dt = html.escape(str(item["transacted_at"]))
+        dt_link = (
+            f"<a href='javascript:void(0)' class='tx-date-link' "
+            f"onclick='openReceiptModal({tx_id})' title='클릭하여 영수증/매출전표 팝업 보기'>{t_dt} 🧾</a>"
+        )
         pending_rows_html.append(
             f"<tr data-tx-id='{tx_id}'>"
             f"<td>#{tx_id}</td>"
-            f"<td>{html.escape(str(item['transacted_at']))}</td>"
+            f"<td>{dt_link}</td>"
             f"<td><span class='badge card'>{c_lbl}</span></td>"
             f"<td><strong>{merchant}</strong></td>"
             f"<td class='num'>{amt_str}</td>"
@@ -803,10 +808,15 @@ def render_dashboard_html(
         ded_str = html.escape(str(tx["vat_deduction_type"]))
         memo_str = html.escape(str(tx.get("counterparty_info") or "-"))
         arch_str = html.escape(str(tx.get("archived_file_name") or "-"))
+        t_dt = html.escape(str(tx["transacted_at"]))
+        dt_link = (
+            f"<a href='javascript:void(0)' class='tx-date-link' "
+            f"onclick='openReceiptModal({tx_id})' title='클릭하여 영수증/매출전표 팝업 보기'>{t_dt} 🧾</a>"
+        )
         tx_rows_html.append(
             f"<tr>"
             f"<td>#{tx_id}</td>"
-            f"<td>{html.escape(str(tx['transacted_at']))}</td>"
+            f"<td>{dt_link}</td>"
             f"<td><span class='badge card'>{c_lbl}</span></td>"
             f"<td>{merchant}</td>"
             f"<td class='num'>{amt_str}</td>"
@@ -861,6 +871,25 @@ def render_dashboard_html(
     input[type="text"], input[type="date"], select {{
       padding: 5px 8px; border: 1px solid #cbd5e1; border-radius: 4px;
     }}
+    a.tx-date-link {{ color: #1d4ed8; font-weight: 600; text-decoration: underline;
+                      text-underline-offset: 3px; cursor: pointer; }}
+    a.tx-date-link:hover {{ color: #1e3a8a; background: #eff6ff; border-radius: 4px; }}
+    .modal-backdrop {{ display: none; position: fixed; inset: 0; background: rgba(15, 23, 42, 0.58);
+                       z-index: 9999; align-items: center; justify-content: center; padding: 16px; }}
+    .modal-backdrop.open {{ display: flex; }}
+    .receipt-modal {{ background: #ffffff; width: 100%; max-width: 480px; max-height: 90vh;
+                      overflow-y: auto; border-radius: 12px; box-shadow: 0 20px 40px rgba(0,0,0,0.28);
+                      border: 1px solid #cbd5e1; padding: 22px; }}
+    .slip-box {{ background: #fffef7; border: 1px dashed #94a3b8; border-radius: 8px;
+                 padding: 16px; font-size: 13px; line-height: 1.65; margin-bottom: 14px; }}
+    .slip-title {{ text-align: center; font-size: 16px; font-weight: 800; margin-bottom: 10px;
+                   border-bottom: 2px double #64748b; padding-bottom: 8px; }}
+    .slip-row {{ display: flex; justify-content: space-between; margin: 4px 0; }}
+    .slip-divider {{ border-top: 1px dashed #94a3b8; margin: 8px 0; }}
+    .slip-total {{ font-size: 17px; font-weight: 800; color: #1d4ed8; }}
+    .receipt-img-wrap {{ text-align: center; margin-top: 10px; background: #f8fafc;
+                         border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px; }}
+    .receipt-img-wrap img {{ max-width: 100%; max-height: 360px; border-radius: 6px; }}
   </style>
 </head>
 <body>
@@ -981,7 +1010,7 @@ def render_dashboard_html(
     <table>
       <thead>
         <tr>
-          <th>전표번호</th><th>거래일시</th><th>카드구분</th><th>가맹점명</th><th>합계금액</th>
+          <th>전표번호</th><th>거래일시 (클릭: 영수증 팝업)</th><th>카드구분</th><th>가맹점명</th><th>합계금액</th>
           <th>부가세</th><th>계정과목</th><th>공제구분</th><th>적요/참석자</th><th>증빙파일명</th>
         </tr>
       </thead>
@@ -991,6 +1020,26 @@ def render_dashboard_html(
     </table>
   </section>
 
+  <div id="receipt-modal-backdrop" class="modal-backdrop" onclick="onBackdropClick(event)">
+    <div class="receipt-modal">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+        <h3 id="modal-header-title" style="margin:0;">🧾 신용카드 매출전표 / 영수증</h3>
+        <button class="secondary" onclick="closeReceiptModal()">✕ 닫기</button>
+      </div>
+      <div id="modal-slip-content" class="slip-box">불러오는 중...</div>
+      <div id="modal-image-content" class="receipt-img-wrap"></div>
+      <input type="file" id="modal-receipt-input" accept="image/*,.pdf"
+             style="display:none" onchange="uploadReceiptForActiveTx(this)" />
+      <div style="display:flex; justify-content:flex-end; gap:6px; margin-top:14px;">
+        <button onclick="document.getElementById('modal-receipt-input').click()">
+          📷 이 전표에 영수증 첨부
+        </button>
+        <button class="secondary" onclick="window.print()">🖨️ 전표 인쇄</button>
+        <button class="secondary" onclick="closeReceiptModal()">닫기</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     const API_HEADERS = {{
       'Content-Type': 'application/json',
@@ -998,6 +1047,109 @@ def render_dashboard_html(
     }};
     const MIN_TX_DATE = '{min_d}';
     const MAX_TX_DATE = '{max_d}';
+    let activeModalTxId = null;
+
+    async function openReceiptModal(txId) {{
+      activeModalTxId = txId;
+      const backdrop = document.getElementById('receipt-modal-backdrop');
+      const slipEl = document.getElementById('modal-slip-content');
+      const imgEl = document.getElementById('modal-image-content');
+      backdrop.classList.add('open');
+      slipEl.innerHTML = '영수증 정보를 불러오는 중...';
+      imgEl.innerHTML = '';
+
+      const res = await fetch('/api/v1/transactions/' + txId + '/receipt');
+      if (!res.ok) {{
+        slipEl.innerHTML = '전표 정보를 찾을 수 없습니다.';
+        return;
+      }}
+      const d = await res.json();
+      document.getElementById('modal-header-title').textContent =
+        '🧾 신용카드 매출전표 (#' + d.tx_id + ')';
+
+      const fmt = (n) => Number(n || 0).toLocaleString('ko-KR') + '원';
+      const bizNo = d.biz_reg_no || '미등록 (SMS/RCS 수집 전표)';
+      const appNo = d.approval_no || '문자 승인전표';
+      const memo = d.counterparty_info || '-';
+      const arch = d.archived_file_name
+        ? ('by_card/' + d.card_folder + '/' + d.archived_file_name)
+        : '실물 영수증 미첨부 (전자 전표)';
+
+      slipEl.innerHTML =
+        '<div class="slip-title">[신용카드 매출전표 / 적격증빙]</div>' +
+        '<div class="slip-row"><span>카드종류</span><strong>' + d.card_label + '</strong></div>' +
+        '<div class="slip-row"><span>거래일시</span><strong>' + d.transacted_at + '</strong></div>' +
+        '<div class="slip-row"><span>승인번호</span><span>' + appNo + '</span></div>' +
+        '<div class="slip-divider"></div>' +
+        '<div class="slip-row"><span>가맹점명</span><strong>' + d.raw_merchant_name + '</strong></div>' +
+        '<div class="slip-row"><span>사업자번호</span><span>' + bizNo + '</span></div>' +
+        '<div class="slip-divider"></div>' +
+        '<div class="slip-row"><span>공급가액</span><span>' + fmt(d.supply_value) + '</span></div>' +
+        '<div class="slip-row"><span>부가세액(VAT)</span><span>' + fmt(d.vat_amount) +
+        ' (' + d.vat_deduction_type + ')</span></div>' +
+        '<div class="slip-row slip-total"><span>합계금액</span><span>' +
+        fmt(d.total_amount) + '</span></div>' +
+        '<div class="slip-divider"></div>' +
+        '<div class="slip-row"><span>회계계정</span><strong>' +
+        d.account_code + ' ' + d.account_name + '</strong></div>' +
+        '<div class="slip-row"><span>적요/품목</span><span>' + memo + '</span></div>' +
+        '<div class="slip-row"><span>대사상태</span><span>' + d.reconcile_status + '</span></div>' +
+        '<div class="slip-row"><span>보관경로</span><code style="font-size:11px;">' +
+        arch + '</code></div>';
+
+      if (d.has_receipt_file && d.is_renderable_image) {{
+        imgEl.innerHTML =
+          '<div style="margin-bottom:6px; font-weight:600; font-size:12px;">첨부된 실물 영수증 이미지</div>' +
+          '<img src="' + d.receipt_file_url + '" alt="영수증 이미지" />' +
+          '<div style="margin-top:6px;"><a href="' + d.receipt_file_url +
+          '" target="_blank">원본 파일 새 창으로 열기</a></div>';
+      }} else if (d.has_receipt_file) {{
+        imgEl.innerHTML =
+          '<div style="font-size:12px; color:#334155;">' +
+          '첨부 증빙 파일이 보관되어 있습니다: <code>' + d.archived_file_name + '</code><br/>' +
+          '<a href="' + d.receipt_file_url + '" target="_blank">첨부 증빙 파일 열기 / 다운로드</a>' +
+          '</div>';
+      }} else {{
+        imgEl.innerHTML =
+          '<div style="font-size:12px; color:#64748b;">' +
+          '실물 영수증 사진이 아직 첨부되지 않았습니다.<br/>' +
+          '하단 <b>[📷 이 전표에 영수증 첨부]</b> 버튼으로 영수증/쇼핑몰 캡처를 등록할 수 있습니다.' +
+          '</div>';
+      }}
+    }}
+
+    function closeReceiptModal() {{
+      document.getElementById('receipt-modal-backdrop').classList.remove('open');
+    }}
+
+    function onBackdropClick(ev) {{
+      if (ev.target && ev.target.id === 'receipt-modal-backdrop') {{
+        closeReceiptModal();
+      }}
+    }}
+
+    function uploadReceiptForActiveTx(inputEl) {{
+      if (!inputEl.files || !inputEl.files[0] || !activeModalTxId) return;
+      const file = inputEl.files[0];
+      const reader = new FileReader();
+      reader.onload = async function(ev) {{
+        const dataUrl = String(ev.target.result || '');
+        const b64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+        await fetch('/api/v1/receipts/upload', {{
+          method: 'POST',
+          headers: API_HEADERS,
+          body: JSON.stringify({{
+            file_name: file.name,
+            file_content_b64: b64,
+            source_channel: 'WEB_UPLOAD',
+            tx_id: activeModalTxId
+          }})
+        }});
+        await openReceiptModal(activeModalTxId);
+        window.location.reload();
+      }};
+      reader.readAsDataURL(file);
+    }}
     function applyFilters() {{
       const s = document.getElementById('start-date').value;
       const e = document.getElementById('end-date').value;

@@ -176,6 +176,17 @@ def test_import_phone_sms_api_endpoint(client):
     assert re_res.status_code == 200
     assert re_res.json()["status"] == "reapplied"
 
+    # Verify clickable transaction date opens receipt modal & /api/v1/transactions/{tx_id}/receipt works
+    tx_id = r_data["transactions"][0]["tx_id"]
+    slip_res = client.get(f"/api/v1/transactions/{tx_id}/receipt")
+    assert slip_res.status_code == 200
+    slip_data = slip_res.json()
+    assert slip_data["tx_id"] == tx_id
+    assert slip_data["raw_merchant_name"] == "씨유영등포신성점"
+    assert slip_data["card_label"] == "네이버현대카드"
+    assert f"openReceiptModal({tx_id})" in client.get("/dashboard?year_month=ALL").text
+
+
 
 
 

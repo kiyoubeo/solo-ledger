@@ -3,10 +3,11 @@
 import base64
 from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import BackgroundTasks, Body, FastAPI, Header, HTTPException, Query
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 
 from sololedger import __version__
 from sololedger.archiver import DuplicateReceiptError
@@ -41,7 +42,11 @@ from sololedger.notifier import send_telegram_memo_prompt
 from sololedger.ocr_engine import process_and_link_receipt
 from sololedger.phone_adb import import_phone_sms_to_ledger
 from sololedger.reconciler import reconcile_single_item
-from sololedger.sms_parser import parse_korean_card_sms
+from sololedger.sms_parser import (
+    format_card_label,
+    parse_korean_card_sms,
+    sanitize_card_folder_name,
+)
 from sololedger.tax_engine import calculate_supply_and_vat, evaluate_tax_rules
 from sololedger.telegram_bot import handle_telegram_update
 from sololedger.vehicle_tracker import get_vehicle_expense_summary
@@ -437,6 +442,125 @@ async def patch_transaction_endpoint(
             return {"status": "updated", "transaction": updated}
         except ValueError as e:
             raise HTTPException(status_code=404, detail=str(e)) from e
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/transactions/{tx_id}/receipt")
+async def get_transaction_receipt_detail(tx_id: int):
+    """Return electronic card sales slip details and attached receipt metadata for a transaction."""
+    init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT * FROM card_transactions WHERE tx_id = ?", (tx_id,))
+        tx_row = cursor.fetchone()
+        if tx_row is None:
+            raise HTTPException(status_code=404, detail=f"Transaction #{tx_id} not found.")
+        tx_dict = dict(tx_row)
+
+        cursor.execute(
+            """
+            SELECT * FROM receipt_ocr_metadata
+            WHERE tx_id = ?
+            ORDER BY receipt_id DESC
+            LIMIT 1
+            """,
+            (tx_id,),
+        )
+        rec_row = cursor.fetchone()
+        rec_dict = dict(rec_row) if rec_row else None
+
+        has_file = False
+        is_renderable_image = False
+        archived_name = rec_dict["archived_file_name"] if rec_dict else None
+        if rec_dict:
+            candidates = [
+                Path(rec_dict["original_file_path"]),
+                settings.archive_dir / "normalized" / str(archived_name or ""),
+            ]
+            for p in candidates:
+                if p.exists() and p.is_file():
+                    has_file = True
+                    head = p.read_bytes()[:12]
+                    if (
+                        head.startswith(b"\x89PNG")
+                        or head.startswith(b"\xff\xd8")
+                        or head.startswith(b"GIF8")
+                        or head.startswith(b"RIFF")
+                    ):
+                        is_renderable_image = True
+                    break
+
+        card_code = str(tx_dict.get("card_last4") or "0000")
+        return {
+            "tx_id": tx_id,
+            "card_last4": card_code,
+            "card_label": format_card_label(card_code),
+            "card_folder": sanitize_card_folder_name(card_code),
+            "transacted_at": tx_dict["transacted_at"],
+            "approval_no": tx_dict.get("approval_no"),
+            "raw_merchant_name": tx_dict["raw_merchant_name"],
+            "biz_reg_no": tx_dict.get("biz_reg_no"),
+            "total_amount": int(tx_dict["total_amount"]),
+            "supply_value": int(tx_dict["supply_value"]),
+            "vat_amount": int(tx_dict["vat_amount"]),
+            "account_code": tx_dict["account_code"],
+            "account_name": tx_dict["account_name"],
+            "vat_deduction_type": tx_dict["vat_deduction_type"],
+            "non_deduct_reason": tx_dict.get("non_deduct_reason"),
+            "counterparty_info": tx_dict.get("counterparty_info"),
+            "reconcile_status": tx_dict["reconcile_status"],
+            "has_receipt_file": has_file,
+            "is_renderable_image": is_renderable_image,
+            "archived_file_name": archived_name,
+            "receipt_file_url": f"/api/v1/transactions/{tx_id}/receipt-file" if has_file else None,
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/transactions/{tx_id}/receipt-file")
+async def serve_transaction_receipt_file(tx_id: int):
+    """Serve the archived receipt file (image, PDF, or text) linked to a transaction."""
+    init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT original_file_path, archived_file_name
+            FROM receipt_ocr_metadata
+            WHERE tx_id = ?
+            ORDER BY receipt_id DESC
+            LIMIT 1
+            """,
+            (tx_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"No receipt attached to #{tx_id}.")
+
+        candidates = [
+            Path(row["original_file_path"]),
+            settings.archive_dir / "normalized" / str(row["archived_file_name"] or ""),
+        ]
+        target_path = next((p for p in candidates if p.exists() and p.is_file()), None)
+        if target_path is None:
+            raise HTTPException(status_code=404, detail="Receipt file not found on disk.")
+
+        raw = target_path.read_bytes()
+        if raw.startswith(b"\x89PNG"):
+            media = "image/png"
+        elif raw.startswith(b"\xff\xd8"):
+            media = "image/jpeg"
+        elif raw.startswith(b"GIF8"):
+            media = "image/gif"
+        elif raw.startswith(b"%PDF"):
+            media = "application/pdf"
+        else:
+            media = "text/plain; charset=utf-8"
+        return Response(content=raw, media_type=media)
     finally:
         conn.close()
 

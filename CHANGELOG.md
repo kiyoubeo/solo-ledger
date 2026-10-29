@@ -24,3 +24,4 @@
 | 2026-10-29 | `fix` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/phone_adb.py` | 월별 카드대금 출금완료 안내 필터링 정교화 | `PASSED` |
 | 2026-10-29 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/dashboard.py (+1 files)` | 대시보드 조회 기간을 시작일~종료일(start_date~end_date) 날짜 범위 선택 방식으로 변경 | `PASSED` |
 | 2026-10-29 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, sql/schema.sql, src/sololedger/api.py (+5 files)` | Firefly III 확장 규칙·자동학습, Ledgerline 스마트 소명큐, Bigcapital 계정별 집계표 및 웹 파일 업로드 기능 적용 | `PASSED` |
+| 2026-10-29 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/dashboard.py (+1 files)` | 거래일시 클릭 시 전자 신용카드 매출전표 및 실물 영수증 팝업 모달 표시 기능 추가 | `PASSED` |
