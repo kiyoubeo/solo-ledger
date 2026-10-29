@@ -2,9 +2,11 @@
 
 import base64
 import sqlite3
+import subprocess
 from pathlib import Path
 
 from sololedger.cli import run_cli
+from sololedger.config import PROJECT_ROOT
 
 
 def test_nas_backup_api_and_cli_incremental_sync(client, test_db_path, tmp_path):
@@ -77,3 +79,27 @@ def test_nas_backup_api_and_cli_incremental_sync(client, test_db_path, tmp_path)
     assert cli_res["status"] == "synced"
     assert cli_res["synced_files_count"] == 0
     assert cli_res["skipped_existing_count"] >= 2
+
+
+def test_server_service_script_and_setup_guide_exist():
+    """Verify 24/7 laptop/mini-PC server provisioning script and setup guide."""
+    service_script = PROJECT_ROOT / "scripts" / "server_service.ps1"
+    guide_doc = PROJECT_ROOT / "docs" / "SERVER_SETUP_GUIDE.md"
+    assert service_script.exists()
+    assert guide_doc.exists()
+
+    proc = subprocess.run(
+        [
+            "powershell",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(service_script),
+            "status",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "SoloLedger-API-Server" in proc.stdout
+    assert "SoloLedger-Daily-NAS-Backup" in proc.stdout
