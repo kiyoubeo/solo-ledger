@@ -39,6 +39,15 @@ class Settings:
         return int(os.getenv("NTS_CACHE_TTL_DAYS", "30"))
 
     @property
+    def archive_dir(self) -> Path:
+        custom = os.getenv("SOLOLEDGER_ARCHIVE_DIR")
+        return Path(custom) if custom else (PROJECT_ROOT / "archive")
+
+    @property
+    def gemini_api_key(self) -> str:
+        return os.getenv("GEMINI_API_KEY", "")
+
+    @property
     def schema_path(self) -> Path:
         custom = os.getenv("SOLOLEDGER_SCHEMA_PATH")
         return Path(custom) if custom else DEFAULT_SCHEMA_PATH

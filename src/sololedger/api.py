@@ -1,11 +1,13 @@
-"""FastAPI application for SoloLedger SMS Webhook, NTS Merchant Cache, and Reconciliation."""
+"""FastAPI application for SoloLedger SMS Webhook, NTS Cache, Vision OCR, Telegram Bot, and Reconciliation."""
 
+import base64
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Any, Dict, Optional
 
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
+from fastapi import BackgroundTasks, Body, FastAPI, Header, HTTPException
 
 from sololedger import __version__
+from sololedger.archiver import DuplicateReceiptError
 from sololedger.config import settings
 from sololedger.db import get_connection, init_db
 from sololedger.merchant_service import (
@@ -14,13 +16,16 @@ from sololedger.merchant_service import (
 )
 from sololedger.models import (
     MerchantVerifyRequest,
+    ReceiptUploadRequest,
     ReconcileBatchRequest,
     SmsWebhookPayload,
 )
 from sololedger.notifier import send_telegram_memo_prompt
+from sololedger.ocr_engine import process_and_link_receipt
 from sololedger.reconciler import reconcile_single_item
 from sololedger.sms_parser import parse_korean_card_sms
 from sololedger.tax_engine import calculate_supply_and_vat, evaluate_tax_rules
+from sololedger.telegram_bot import handle_telegram_update
 
 
 @asynccontextmanager
@@ -141,6 +146,85 @@ async def receive_card_sms_webhook(
             "is_vehicle_expense": rule_result["is_vehicle_expense"],
             "reconcile_status": status_code,
         }
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/webhooks/telegram")
+async def receive_telegram_webhook(
+    update: Dict[str, Any] = Body(...),
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Webhook endpoint handling Telegram Bot (@SoloLedgerBot) callbacks and memo replies."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        result = handle_telegram_update(cursor, update)
+        conn.commit()
+        return result
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/receipts/upload")
+async def upload_receipt_endpoint(
+    request: ReceiptUploadRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Upload a receipt image, deduplicate by SHA-256, parse via Vision OCR, and link to ledger."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    try:
+        file_bytes = base64.b64decode(request.file_content_b64)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid base64 file content: {e}") from e
+
+    init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        try:
+            result = await process_and_link_receipt(
+                cursor,
+                file_bytes=file_bytes,
+                original_file_name=request.file_name,
+                source_channel=request.source_channel,
+                explicit_tx_id=request.tx_id,
+                ocr_override=request.ocr_override,
+            )
+            conn.commit()
+            return {"status": "archived", **result}
+        except DuplicateReceiptError as dup_err:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "duplicate_receipt",
+                    "message": str(dup_err),
+                    "file_hash_sha256": dup_err.file_hash,
+                    "existing_receipt_id": dup_err.existing_receipt_id,
+                },
+            ) from dup_err
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/receipts")
+async def list_receipts(
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """List archived receipt OCR metadata records."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT * FROM receipt_ocr_metadata ORDER BY receipt_id DESC")
+        rows = [dict(r) for r in cursor.fetchall()]
+        return {"count": len(rows), "items": rows}
     finally:
         conn.close()
 

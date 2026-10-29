@@ -10,11 +10,12 @@ venv/
 dist/
 build/
 
-# Local SQLite databases (production / runtime)
+# Local SQLite databases & receipt archive storage (production / runtime)
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
+archive/
 
 # Environment variables & secrets
 .env

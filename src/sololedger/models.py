@@ -1,6 +1,6 @@
 """Pydantic data models for SoloLedger."""
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -76,11 +76,48 @@ class NtsStatusResult(BaseModel):
 class MerchantVerifyRequest(BaseModel):
     """Request payload for verifying and caching a merchant's NTS tax status."""
 
-    biz_reg_no: str = Field(..., description="10-digit business registration number (with or without hyphens)")
+    biz_reg_no: str = Field(
+        ..., description="10-digit business registration number (with or without hyphens)"
+    )
     merchant_name: str = Field(default="미상가맹점", description="Merchant display name")
     default_account_code: Optional[str] = Field(
         default=None, description="Optional default account code for recurring visits"
     )
     force_refresh: bool = Field(
         default=False, description="Force NTS API lookup even if 30-day cache is valid"
+    )
+
+
+class OcrLineItem(BaseModel):
+    """Single purchased item extracted from a receipt or online order capture."""
+
+    item: str
+    qty: int = 1
+    price: int = 0
+
+
+class OcrExtractionResult(BaseModel):
+    """Structured receipt metadata extracted by Multimodal Vision LLM."""
+
+    biz_reg_no: Optional[str] = None
+    merchant_name: str = "미상가맹점"
+    approval_no: Optional[str] = None
+    transacted_at: str
+    total_amount: int
+    supply_value: Optional[int] = None
+    vat_amount: Optional[int] = None
+    line_items: List[OcrLineItem] = Field(default_factory=list)
+    confidence: float = 0.95
+    raw_response: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ReceiptUploadRequest(BaseModel):
+    """Request payload for uploading a receipt image and linking it to the ledger."""
+
+    file_name: str = Field(default="receipt.jpg", description="Original file name")
+    file_content_b64: str = Field(..., description="Base64-encoded image or PDF content")
+    source_channel: str = Field(default="WEB_UPLOAD", description="TELEGRAM_BOT or WEB_UPLOAD")
+    tx_id: Optional[int] = Field(default=None, description="Optional explicit transaction ID")
+    ocr_override: Optional[OcrExtractionResult] = Field(
+        default=None, description="Optional pre-parsed OCR payload"
     )
