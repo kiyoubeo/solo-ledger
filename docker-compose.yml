@@ -1,0 +1,25 @@
+services:
+  sololedger-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sololedger-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      SOLOLEDGER_DB_PATH: /app/data/sololedger_prod.db
+      SOLOLEDGER_ARCHIVE_DIR: /app/archive
+      SOLOLEDGER_API_KEY: ${SOLOLEDGER_API_KEY:-sololedger-dev-secret-key}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      NTS_API_SERVICE_KEY: ${NTS_API_SERVICE_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    volumes:
+      - ./data:/app/data
+      - ./archive:/app/archive
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

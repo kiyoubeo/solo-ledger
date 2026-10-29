@@ -37,7 +37,7 @@ flowchart TD
 | **Phase 2** | `v0.2.0` | 국세청 사업자등록 상태조회 API 연동, 사업자번호 체크섬 검증, `merchants` 30일 캐시, 과세유형별 공제 자동 전환 | `nts_client.py`, `merchant_service.py` | 8h | **완료 (`PASSED`)** |
 | **Phase 3** | `v0.3.0` | `@SoloLedgerBot` 양방향 콜백/답장 처리, Vision LLM 영수증·주문내역 OCR, SHA-256 중복 방지, 증빙 파일 정규화 보관 | `telegram_bot.py`, `ocr_engine.py`, `archiver.py` | 14h | **완료 (`PASSED`)** |
 | **Phase 4** | `v0.4.0` | 홈택스·카드사 엑셀/CSV 파서, 외화 결제 확정, 업무용승용차 1,500만 원 한도 집계, 세무사 제출용 CSV+ZIP 번들 생성기 | `importers.py`, `exporters.py`, `vehicle_tracker.py` | 12h | **완료 (`PASSED`)** |
-| **Phase 5** | `v1.0.0` | 경량 웹 대시보드(미분류·소명 관리/파일 업로드), 운영 CLI, Docker Compose 배포 및 백업 자동화 | `dashboard.py`, `cli.py`, `docker-compose.yml` | 8h | 예정 |
+| **Phase 5** | `v1.0.0` | 경량 웹 대시보드(미분류·소명 관리/파일 업로드), 운영 CLI, Docker Compose 배포 및 백업 자동화 | `dashboard.py`, `cli.py`, `docker-compose.yml` | 8h | **완료 (`PASSED`)** |
 
 ---
 
@@ -162,17 +162,18 @@ SoloLedger/
 │   ├── tax_engine.py               # [Phase 1 완료] 세무 자동 분류 규칙 엔진
 │   ├── reconciler.py               # [Phase 1 완료] 3단계 자동 대사 엔진
 │   ├── notifier.py                 # [Phase 1 완료] 텔레그램 알림 발송기
-│   ├── api.py                      # [Phase 1~5 확장] FastAPI 라우터 및 엔드포인트
-│   ├── nts_client.py               # [Phase 2 예정] 국세청 사업자 상태조회 API 및 체크섬 검증
-│   ├── merchant_service.py         # [Phase 2 예정] 가맹점 30일 TTL 캐시 서비스
-│   ├── archiver.py                 # [Phase 3 예정] 증빙 파일 SHA-256 해싱 및 정규화 아카이빙
-│   ├── ocr_engine.py               # [Phase 3 예정] 멀티모달 Vision LLM 영수증 파서
-│   ├── telegram_bot.py             # [Phase 3 예정] @SoloLedgerBot 콜백·답장·사진 핸들러
-│   ├── importers.py                # [Phase 4 예정] 홈택스·카드사 CSV/엑셀 배치 파서
-│   ├── vehicle_tracker.py          # [Phase 4 예정] 업무용승용차 연간 1,500만 원 한도 추적기
-│   ├── exporters.py                # [Phase 4 예정] 세무사 제출용 CSV 및 증빙 ZIP 생성기
-│   ├── dashboard.py                # [Phase 5 예정] 경량 웹 대시보드 뷰
-│   └── cli.py                      # [Phase 5 예정] 운영 및 정산 CLI 도구
+│   ├── api.py                      # [Phase 1~5 완료] FastAPI 라우터 및 엔드포인트
+│   ├── plan_verifier.py            # [하네스 완료] 개발 계획서-코드 정합성 검증 엔진
+│   ├── nts_client.py               # [Phase 2 완료] 국세청 사업자 상태조회 API 및 체크섬 검증
+│   ├── merchant_service.py         # [Phase 2 완료] 가맹점 30일 TTL 캐시 서비스
+│   ├── archiver.py                 # [Phase 3 완료] 증빙 파일 SHA-256 해싱 및 정규화 아카이빙
+│   ├── ocr_engine.py               # [Phase 3 완료] 멀티모달 Vision LLM 영수증 파서
+│   ├── telegram_bot.py             # [Phase 3 완료] @SoloLedgerBot 콜백·답장·사진 핸들러
+│   ├── importers.py                # [Phase 4 완료] 홈택스·카드사 CSV/엑셀 배치 파서
+│   ├── vehicle_tracker.py          # [Phase 4 완료] 업무용승용차 연간 1,500만 원 한도 추적기
+│   ├── exporters.py                # [Phase 4 완료] 세무사 제출용 CSV 및 증빙 ZIP 생성기
+│   ├── dashboard.py                # [Phase 5 완료] 경량 웹 대시보드 뷰 및 인라인 전표 수정
+│   └── cli.py                      # [Phase 5 완료] 운영 및 정산 CLI 도구
 └── tests/
     ├── conftest.py                 # [Phase 1 완료] 격리된 테스트 DB 픽스처
     ├── test_schema.py              # [Phase 1 완료] 스키마 및 시드 검증
@@ -180,10 +181,11 @@ SoloLedger/
     ├── test_tax_engine.py          # [Phase 1 완료] 세무 규칙 및 부가세 계산 검증
     ├── test_reconciler.py          # [Phase 1 완료] 3단계 대사 알고리즘 검증
     ├── test_api_webhook.py         # [Phase 1 완료] FastAPI 웹훅 및 대사 API 검증
-    ├── test_nts_client.py          # [Phase 2 예정] 국세청 API·캐시·체크섬 테스트
-    ├── test_ocr_and_bot.py         # [Phase 3 예정] OCR·중복차단·텔레그램 봇 테스트
-    ├── test_import_export.py       # [Phase 4 예정] 홈택스 임포트·차량한도·세무팩 익스포트 테스트
-    └── test_e2e_lifecycle.py       # [Phase 5 예정] 전 주기 End-to-End 통합 테스트
+    ├── test_plan_verifier.py       # [하네스 완료] 개발 계획서 정합성 검증 테스트
+    ├── test_nts_client.py          # [Phase 2 완료] 국세청 API·캐시·체크섬 테스트
+    ├── test_ocr_and_bot.py         # [Phase 3 완료] OCR·중복차단·텔레그램 봇 테스트
+    ├── test_import_export.py       # [Phase 4 완료] 홈택스 임포트·차량한도·세무팩 익스포트 테스트
+    └── test_e2e_lifecycle.py       # [Phase 5 완료] 전 주기 End-to-End 통합 테스트
 ```
 
 ---

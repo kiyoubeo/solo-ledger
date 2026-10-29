@@ -6,10 +6,16 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 
 from fastapi import BackgroundTasks, Body, FastAPI, Header, HTTPException, Query
+from fastapi.responses import HTMLResponse
 
 from sololedger import __version__
 from sololedger.archiver import DuplicateReceiptError
 from sololedger.config import settings
+from sololedger.dashboard import (
+    build_dashboard_summary,
+    render_dashboard_html,
+    update_transaction_classification,
+)
 from sololedger.db import get_connection, init_db
 from sololedger.exporters import generate_tax_accountant_pack
 from sololedger.importers import decode_csv_bytes, import_and_reconcile_hometax_csv
@@ -24,6 +30,7 @@ from sololedger.models import (
     ReconcileBatchRequest,
     SmsWebhookPayload,
     TaxPackExportRequest,
+    TransactionUpdateRequest,
 )
 from sololedger.notifier import send_telegram_memo_prompt
 from sololedger.ocr_engine import process_and_link_receipt
@@ -392,5 +399,70 @@ async def list_transactions(
         cursor.execute("SELECT * FROM card_transactions ORDER BY transacted_at DESC, tx_id DESC")
         rows = [dict(r) for r in cursor.fetchall()]
         return {"count": len(rows), "items": rows}
+    finally:
+        conn.close()
+
+
+@app.patch("/api/v1/transactions/{tx_id}")
+async def patch_transaction_endpoint(
+    tx_id: int,
+    request: TransactionUpdateRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Update a transaction's account classification, VAT deduction status, or memo."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        try:
+            updated = update_transaction_classification(
+                cursor,
+                tx_id=tx_id,
+                account_code=request.account_code,
+                account_name=request.account_name,
+                vat_deduction_type=request.vat_deduction_type,
+                non_deduct_reason=request.non_deduct_reason,
+                counterparty_info=request.counterparty_info,
+            )
+            conn.commit()
+            return {"status": "updated", "transaction": updated}
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/dashboard/summary")
+async def dashboard_summary_endpoint(
+    year_month: Optional[str] = Query(default=None),
+    year: Optional[int] = Query(default=None),
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Return aggregated dashboard summary metrics, pending items, and vehicle limit."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        return build_dashboard_summary(cursor, year_month=year_month, year=year)
+    finally:
+        conn.close()
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def render_dashboard_page(
+    year_month: Optional[str] = Query(default=None),
+    year: Optional[int] = Query(default=None),
+):
+    """Render the lightweight HTML5 management dashboard."""
+    init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        html_doc = render_dashboard_html(cursor, year_month=year_month, year=year)
+        return HTMLResponse(content=html_doc)
     finally:
         conn.close()

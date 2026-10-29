@@ -145,3 +145,17 @@ class TaxPackExportRequest(BaseModel):
         default=False,
         description="Include transactions that were already exported in a previous run",
     )
+
+
+class TransactionUpdateRequest(BaseModel):
+    """Request payload for manual or inline dashboard update of a transaction."""
+
+    account_code: Optional[str] = Field(default=None, description="Target account code (e.g., 811, 813, 830)")
+    account_name: Optional[str] = Field(default=None, description="Target account name")
+    vat_deduction_type: Optional[str] = Field(
+        default=None, description="DEDUCTIBLE, NON_DEDUCTIBLE, EXEMPT, or PENDING_CHECK"
+    )
+    non_deduct_reason: Optional[str] = Field(default=None, description="Reason code if non-deductible")
+    counterparty_info: Optional[str] = Field(
+        default=None, description="Item summary or meeting attendee memo"
+    )
