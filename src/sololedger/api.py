@@ -13,6 +13,7 @@ from sololedger.archiver import DuplicateReceiptError
 from sololedger.config import PROJECT_ROOT, settings
 from sololedger.dashboard import (
     build_dashboard_summary,
+    reapply_tax_rules_to_ledger,
     render_dashboard_html,
     reset_test_ledger,
     seed_demo_transactions,
@@ -430,6 +431,7 @@ async def patch_transaction_endpoint(
                 vat_deduction_type=request.vat_deduction_type,
                 non_deduct_reason=request.non_deduct_reason,
                 counterparty_info=request.counterparty_info,
+                apply_to_same_merchant=request.apply_to_same_merchant,
             )
             conn.commit()
             return {"status": "updated", "transaction": updated}
@@ -540,6 +542,24 @@ async def import_phone_sms_endpoint(
             device_serial=serial,
             raw_adb_output=raw_adb,
         )
+        conn.commit()
+        return outcome
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/system/reapply-rules")
+async def reapply_rules_endpoint(
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Re-apply expanded Firefly III tax rules and Ledgerline smart default memos to ledger."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        outcome = reapply_tax_rules_to_ledger(cursor)
         conn.commit()
         return outcome
     finally:

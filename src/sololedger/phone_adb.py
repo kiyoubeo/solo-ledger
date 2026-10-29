@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from sololedger.sms_parser import extract_rcs_text, parse_korean_card_sms
-from sololedger.tax_engine import calculate_supply_and_vat, evaluate_tax_rules
+from sololedger.tax_engine import (
+    calculate_supply_and_vat,
+    evaluate_tax_rules,
+    generate_default_memo,
+)
 
 _AD_EXCLUSION_KEYWORDS = (
     "무료거부",
@@ -187,6 +191,11 @@ def import_phone_sms_to_ledger(
         supply_value, vat_amount = calculate_supply_and_vat(
             parsed.total_amount, rule_eval["vat_deduction_type"]
         )
+        auto_memo = generate_default_memo(
+            rule_eval["account_code"],
+            parsed.raw_merchant_name,
+            bool(rule_eval.get("require_memo_prompt", False)),
+        )
 
         cursor.execute(
             """
@@ -194,8 +203,8 @@ def import_phone_sms_to_ledger(
                 card_last4, approval_no, transacted_at, raw_merchant_name,
                 total_amount, supply_value, vat_amount,
                 account_code, account_name, vat_deduction_type,
-                non_deduct_reason, is_vehicle_expense, reconcile_status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SMS_ONLY')
+                non_deduct_reason, is_vehicle_expense, counterparty_info, reconcile_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SMS_ONLY')
             """,
             (
                 parsed.card_last4,
@@ -210,6 +219,7 @@ def import_phone_sms_to_ledger(
                 rule_eval["vat_deduction_type"],
                 rule_eval["non_deduct_reason"],
                 1 if rule_eval["is_vehicle_expense"] else 0,
+                auto_memo,
             ),
         )
         tx_id = int(cursor.lastrowid)

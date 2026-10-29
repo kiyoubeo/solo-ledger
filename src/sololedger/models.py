@@ -159,6 +159,10 @@ class TransactionUpdateRequest(BaseModel):
     counterparty_info: Optional[str] = Field(
         default=None, description="Item summary or meeting attendee memo"
     )
+    apply_to_same_merchant: bool = Field(
+        default=True,
+        description="Propagate account classification and learned rule to identical merchants",
+    )
 
 
 class NasBackupRequest(BaseModel):

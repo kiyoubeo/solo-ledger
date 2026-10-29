@@ -164,6 +164,18 @@ def test_import_phone_sms_api_endpoint(client):
     assert r_data["end_date"] == "2026-07-31"
     assert r_data["total_tx_count"] == 1
     assert r_data["transactions"][0]["raw_merchant_name"] == "씨유영등포신성점"
+    assert len(r_data["account_breakdown"]) >= 1
+    assert r_data["account_breakdown"][0]["account_code"] == "811"
+
+    # Verify Firefly III-style auto-learning & same-merchant propagation + reapply-rules
+    re_res = client.post(
+        "/api/v1/system/reapply-rules",
+        headers={"X-API-Key": "test-secret-key"},
+        json={},
+    )
+    assert re_res.status_code == 200
+    assert re_res.json()["status"] == "reapplied"
+
 
 
 

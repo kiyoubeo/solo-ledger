@@ -67,6 +67,17 @@ def _apply_cached_merchant_overrides(
     return result
 
 
+_BUILTIN_BOOKSTORE_RE = re.compile(
+    r"(교보문고|영풍문고|알라딘|예스24|오피스디포|알파문구)",
+    re.IGNORECASE,
+)
+_BUILTIN_OFFLINE_MART_RE = re.compile(
+    r"(다이소|아성다이소|이마트|홈플러스|롯데마트|롯데쇼핑|신세계|아울렛|"
+    r"코스트코|트레이더스|하나로마트|케이마트|휴마트|할인마트|홈마트)",
+    re.IGNORECASE,
+)
+
+
 def evaluate_tax_rules(
     cursor: sqlite3.Cursor, merchant_name: str, biz_reg_no: Optional[str] = None
 ) -> Dict[str, Any]:
@@ -101,6 +112,25 @@ def evaluate_tax_rules(
             }
             break
 
+    if matched_result is None and _BUILTIN_BOOKSTORE_RE.search(merchant_name or ""):
+        matched_result = {
+            "account_code": "826",
+            "account_name": "도서인쇄비",
+            "vat_deduction_type": "DEDUCTIBLE",
+            "non_deduct_reason": None,
+            "is_vehicle_expense": False,
+            "require_memo_prompt": False,
+        }
+    elif matched_result is None and _BUILTIN_OFFLINE_MART_RE.search(merchant_name or ""):
+        matched_result = {
+            "account_code": "830",
+            "account_name": "소모품비",
+            "vat_deduction_type": "DEDUCTIBLE",
+            "non_deduct_reason": None,
+            "is_vehicle_expense": False,
+            "require_memo_prompt": False,
+        }
+
     if matched_result is None:
         matched_result = {
             "account_code": "999",
@@ -112,3 +142,84 @@ def evaluate_tax_rules(
         }
 
     return _apply_cached_merchant_overrides(cursor, matched_result, merchant_name, biz_reg_no)
+
+
+def generate_default_memo(
+    account_code: str,
+    merchant_name: str,
+    require_memo_prompt: bool = False,
+) -> Optional[str]:
+    """Generate a standard accounting memo for clear categories (Ledgerline Smart Queue style).
+
+    Returns None for unclassified (999), entertainment (813), or PG/online shopping (830 with prompt)
+    so those remain in the human-in-the-loop review queue.
+    """
+    if account_code in ("999", "813"):
+        return None
+    if account_code == "830" and require_memo_prompt:
+        return None
+
+    m_name = (merchant_name or "").strip()
+    if account_code == "822":
+        if "하이패스" in m_name:
+            return "하이패스 통행료"
+        if "주차" in m_name or "파크" in m_name:
+            return "차량 주차료"
+        if any(k in m_name for k in ("정비", "스피드메이트", "오토큐", "모터스", "타이어", "세차")):
+            return "업무용승용차 정비·유지"
+        return "업무용승용차 주유비"
+    if account_code == "811":
+        return "대표자(임직원) 식대 및 복리후생"
+    if account_code == "826":
+        return "업무용 도서 구입 및 인쇄"
+    if account_code == "830":
+        return "사무실 소모품 및 생활잡화 구입"
+    if account_code == "831":
+        return "업무용 IT구독·통신·교통 수수료"
+    if account_code == "212":
+        return "사무용 비품 취득"
+    return None
+
+
+def learn_merchant_rule(
+    cursor: sqlite3.Cursor,
+    merchant_name: str,
+    account_code: str,
+    account_name: str,
+    vat_deduction_type: str,
+    non_deduct_reason: Optional[str] = None,
+) -> None:
+    """Persist a Firefly III-style learned rule (priority 5) for an exact merchant name."""
+    clean_name = (merchant_name or "").strip()
+    if not clean_name or account_code == "999":
+        return
+    pattern = f"^{re.escape(clean_name)}$"
+    force_non_ded = 1 if vat_deduction_type == "NON_DEDUCTIBLE" else 0
+    is_vehicle = 1 if account_code == "822" else 0
+    require_memo = 1 if account_code == "813" else 0
+    cursor.execute(
+        """
+        DELETE FROM tax_classification_rules
+        WHERE priority = 5 AND match_field = 'MERCHANT_NAME' AND match_pattern = ?
+        """,
+        (pattern,),
+    )
+    cursor.execute(
+        """
+        INSERT INTO tax_classification_rules (
+            priority, match_field, match_pattern, target_account_code,
+            target_account_name, force_non_deductible, non_deduct_reason,
+            set_vehicle_flag, require_memo_prompt, is_active
+        ) VALUES (5, 'MERCHANT_NAME', ?, ?, ?, ?, ?, ?, ?, 1)
+        """,
+        (
+            pattern,
+            account_code,
+            account_name,
+            force_non_ded,
+            non_deduct_reason,
+            is_vehicle,
+            require_memo,
+        ),
+    )
+

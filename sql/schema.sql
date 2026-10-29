@@ -76,22 +76,17 @@ CREATE TABLE IF NOT EXISTS tax_classification_rules (
     UNIQUE(priority, match_field, match_pattern)
 );
 
--- Initial Seed Data for 1-Person Corporation Tax Rules
+-- Initial Seed Data for 1-Person Corporation Tax Rules (Firefly III-style expanded ruleset)
 DELETE FROM tax_classification_rules
-WHERE priority IN (10, 20, 40)
-  AND match_pattern IN (
-    '(쿠팡|네이버페이|알리익스프레스|이니시스|토스페이먼츠|카카오페이)',
-    '(주유소|에너지|스피드메이트|오토큐|하이패스|주차)',
-    '(컴포즈|매머드|브루다|스타벅스|맥도날드|롯데리아|맘스터치|샐러디)'
-  );
+WHERE priority IN (10, 20, 30, 35, 38, 40);
 INSERT OR IGNORE INTO tax_classification_rules
 (priority, match_field, match_pattern, target_account_code, target_account_name, force_non_deductible, non_deduct_reason, set_vehicle_flag, require_memo_prompt)
 VALUES
 -- Rule 1: E-commerce & PG providers require item specification
-(10, 'MERCHANT_NAME', '(쿠팡|네이버페이|알리익스프레스|이니시스|토스페이먼츠|카카오페이|PAYCO|페이코)', '830', '소모품비', 0, NULL, 0, 1),
--- Rule 2: Gas stations and auto maintenance -> Vehicle Expense + Non-deductible VAT (Passenger car)
-(20, 'MERCHANT_NAME', '(주유소|에너지|오일|석유|칼텍스|스피드메이트|오토큐|하이패스|주차)', '822', '차량유지비', 1, 'PASSENGER_CAR', 1, 0),
--- Rule 3: SaaS, AI subscriptions, Cloud servers -> Service Fees
-(30, 'MERCHANT_NAME', '(GITHUB|OPENAI|GOOGLE|AWS|클라우드)', '831', '지급수수료', 0, NULL, 0, 0),
--- Rule 4: Cafes, Restaurants, Convenience stores -> Prompt user to choose between Welfare vs. Business Promotion
-(40, 'MERCHANT_NAME', '(컴포즈|매머드|브루다|스타벅스|맥도날드|롯데리아|맘스터치|샐러디|카페|식당|푸드|통닭|수산|씨유|GS25|코리아세븐)', '811', '복리후생비', 0, NULL, 0, 1);
+(10, 'MERCHANT_NAME', '(쿠팡|네이버페이|네이버파이낸셜|알리익스프레스|이니시스|토스페이먼츠|카카오페이|주식회사카카|PAYCO|페이코|스마일페이|십일번가|11번가|지마켓|옥션|무신사)', '830', '소모품비', 0, NULL, 0, 1),
+-- Rule 2: Gas stations, auto maintenance, parking, toll -> Vehicle Expense + Non-deductible VAT (Passenger car)
+(20, 'MERCHANT_NAME', '(주유|에너지|에너|정유|오일|석유|칼텍스|스피드메이트|오토큐|하이패스|주차|파크|정비|모터스|타이어|세차|카쉐어링|쏘카|피플카)', '822', '차량유지비', 1, 'PASSENGER_CAR', 1, 0),
+-- Rule 3: SaaS, AI subscriptions, Cloud, Telecom, Transit, Utilities -> Service Fees
+(30, 'MERCHANT_NAME', '(GITHUB|OPENAI|GOOGLE|구글페이먼트|AWS|클라우드|웨이브|넷플릭스|유튜브|한국전력|도시가스|코레일|한국철도|SRT|택시|이비카드|티머니|우체국|펄어비스|블리자드|STEAMGAMES)', '831', '지급수수료', 0, NULL, 0, 0),
+-- Rule 4: Cafes, Restaurants, Convenience stores, Bakeries, Pharmacies -> Welfare Expense
+(40, 'MERCHANT_NAME', '(이마트24|컴포즈|컴파스커피|매머드|브루다|스타벅스|투썸|이디야|메가엠지씨|메가커피|빽다방|더벤티|더리터|드롭탑|폴바셋|할리스|파스쿠찌|맥도날드|롯데리아|맘스터치|버거|샐러디|서브웨이|가마로강정|카페|커피|베이커리|성심당|파리바게뜨|뚜레쥬르|식당|푸드|에프앤|통닭|치킨|피자|수산|회관|면옥|국밥|갈비|삼겹|김밥|분식|휴게소|쿠킹|우아한형제|주식회사우아|요기요|씨유|GS25|WE25|세븐일레븐|코리아세|미니스톱|동아대학교|약국|의원|병원|치과|한의원|헤어|피부)', '811', '복리후생비', 0, NULL, 0, 1);

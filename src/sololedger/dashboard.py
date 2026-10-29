@@ -12,7 +12,12 @@ from sololedger import __version__
 from sololedger.archiver import compute_sha256_hex, save_receipt_files
 from sololedger.config import settings
 from sololedger.sms_parser import format_card_label, sanitize_card_folder_name
-from sololedger.tax_engine import calculate_supply_and_vat
+from sololedger.tax_engine import (
+    calculate_supply_and_vat,
+    evaluate_tax_rules,
+    generate_default_memo,
+    learn_merchant_rule,
+)
 from sololedger.telegram_bot import _refresh_receipt_archived_filename
 from sololedger.vehicle_tracker import get_vehicle_expense_summary
 
@@ -36,6 +41,7 @@ def update_transaction_classification(
     vat_deduction_type: Optional[str] = None,
     non_deduct_reason: Optional[str] = None,
     counterparty_info: Optional[str] = None,
+    apply_to_same_merchant: bool = True,
 ) -> Dict[str, Any]:
     """Update a transaction's account classification, VAT deduction status, or memo."""
     cursor.execute("SELECT * FROM card_transactions WHERE tx_id = ?", (tx_id,))
@@ -54,10 +60,17 @@ def update_transaction_classification(
     elif resolved_code == "822" and vat_deduction_type is None:
         resolved_vat_type = "NON_DEDUCTIBLE"
         resolved_reason = resolved_reason or "PASSENGER_CAR"
+    elif resolved_code != "999" and resolved_vat_type in ("PENDING", "PENDING_CHECK"):
+        resolved_vat_type = "DEDUCTIBLE"
 
     is_vehicle = 1 if resolved_code == "822" else int(row["is_vehicle_expense"])
     supply_value, vat_amount = calculate_supply_and_vat(int(row["total_amount"]), resolved_vat_type)
-    resolved_memo = counterparty_info if counterparty_info is not None else row["counterparty_info"]
+    raw_memo = counterparty_info if counterparty_info is not None else row["counterparty_info"]
+    resolved_memo = (
+        raw_memo
+        if (raw_memo or "").strip()
+        else generate_default_memo(resolved_code, row["raw_merchant_name"], False)
+    )
 
     cursor.execute(
         """
@@ -86,11 +99,135 @@ def update_transaction_classification(
         ),
     )
 
+    propagated_count = 0
+    if apply_to_same_merchant and resolved_code != "999":
+        learn_merchant_rule(
+            cursor,
+            row["raw_merchant_name"],
+            resolved_code,
+            resolved_name,
+            resolved_vat_type,
+            resolved_reason,
+        )
+        cursor.execute(
+            """
+            SELECT tx_id, total_amount, counterparty_info
+            FROM card_transactions
+            WHERE raw_merchant_name = ?
+              AND tx_id != ?
+              AND (account_code = '999' OR counterparty_info IS NULL OR TRIM(counterparty_info) = '')
+            """,
+            (row["raw_merchant_name"], tx_id),
+        )
+        peer_rows = cursor.fetchall()
+        for peer in peer_rows:
+            p_supply, p_vat = calculate_supply_and_vat(
+                int(peer["total_amount"]), resolved_vat_type
+            )
+            p_memo = (peer["counterparty_info"] or "").strip() or resolved_memo
+            cursor.execute(
+                """
+                UPDATE card_transactions
+                SET account_code = ?,
+                    account_name = ?,
+                    vat_deduction_type = ?,
+                    non_deduct_reason = ?,
+                    is_vehicle_expense = ?,
+                    supply_value = ?,
+                    vat_amount = ?,
+                    counterparty_info = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE tx_id = ?
+                """,
+                (
+                    resolved_code,
+                    resolved_name,
+                    resolved_vat_type,
+                    resolved_reason,
+                    is_vehicle,
+                    p_supply,
+                    p_vat,
+                    p_memo,
+                    peer["tx_id"],
+                ),
+            )
+            propagated_count += 1
+
     archived_file_name = _refresh_receipt_archived_filename(cursor, tx_id)
     cursor.execute("SELECT * FROM card_transactions WHERE tx_id = ?", (tx_id,))
     updated = dict(cursor.fetchone())
     updated["archived_file_name"] = archived_file_name
+    updated["propagated_merchant_count"] = propagated_count
     return updated
+
+
+def reapply_tax_rules_to_ledger(cursor: sqlite3.Cursor) -> Dict[str, Any]:
+    """Re-evaluate tax classification rules and populate smart default memos across ledger rows."""
+    cursor.execute(
+        """
+        SELECT tx_id, raw_merchant_name, biz_reg_no, total_amount,
+               account_code, account_name, vat_deduction_type, counterparty_info
+        FROM card_transactions
+        WHERE reconcile_status != 'CANCELED'
+        """
+    )
+    rows = cursor.fetchall()
+    reclassified_count = 0
+    auto_memo_filled_count = 0
+
+    for r in rows:
+        tx_id = int(r["tx_id"])
+        m_name = str(r["raw_merchant_name"] or "")
+        cur_code = str(r["account_code"] or "999")
+        cur_memo = str(r["counterparty_info"] or "").strip()
+
+        rule_eval = evaluate_tax_rules(cursor, m_name, r["biz_reg_no"])
+        new_code = cur_code
+        if cur_code == "999" and rule_eval["account_code"] != "999":
+            new_code = rule_eval["account_code"]
+            new_name = rule_eval["account_name"]
+            new_vat_type = rule_eval["vat_deduction_type"]
+            new_reason = rule_eval["non_deduct_reason"]
+            is_veh = 1 if rule_eval["is_vehicle_expense"] else 0
+            sup, vat = calculate_supply_and_vat(int(r["total_amount"]), new_vat_type)
+            cursor.execute(
+                """
+                UPDATE card_transactions
+                SET account_code = ?,
+                    account_name = ?,
+                    vat_deduction_type = ?,
+                    non_deduct_reason = ?,
+                    is_vehicle_expense = ?,
+                    supply_value = ?,
+                    vat_amount = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE tx_id = ?
+                """,
+                (new_code, new_name, new_vat_type, new_reason, is_veh, sup, vat, tx_id),
+            )
+            reclassified_count += 1
+
+        if not cur_memo:
+            req_prompt = bool(rule_eval.get("require_memo_prompt", False))
+            auto_memo = generate_default_memo(new_code, m_name, req_prompt)
+            if auto_memo:
+                cursor.execute(
+                    """
+                    UPDATE card_transactions
+                    SET counterparty_info = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE tx_id = ?
+                    """,
+                    (auto_memo, tx_id),
+                )
+                auto_memo_filled_count += 1
+
+    return {
+        "status": "reapplied",
+        "total_scanned": len(rows),
+        "reclassified_count": reclassified_count,
+        "auto_memo_filled_count": auto_memo_filled_count,
+    }
 
 
 def _normalize_date_str(val: Optional[str]) -> Optional[str]:
@@ -262,20 +399,54 @@ def build_dashboard_summary(
     non_deductible_vat = 0
     non_deductible_total = 0
     pending_items: List[Dict[str, Any]] = []
+    acc_stats: Dict[str, Dict[str, Any]] = {}
 
     for r in rows:
         amt = int(r["total_amount"])
+        sup = int(r["supply_value"])
         vat = int(r["vat_amount"])
+        a_code = str(r.get("account_code") or "999")
+        a_name = str(r.get("account_name") or ACCOUNT_CODE_CATALOG.get(a_code, "미분류"))
+
+        a_entry = acc_stats.setdefault(
+            a_code,
+            {
+                "account_code": a_code,
+                "account_name": a_name,
+                "tx_count": 0,
+                "total_expenditure": 0,
+                "supply_value": 0,
+                "deductible_vat": 0,
+                "non_deductible_total": 0,
+                "ratio_pct": 0.0,
+            },
+        )
+        a_entry["tx_count"] += 1
+        a_entry["total_expenditure"] += amt
+        a_entry["supply_value"] += sup
+
         total_expenditure += amt
         if r["vat_deduction_type"] == "DEDUCTIBLE":
             deductible_vat += vat
+            a_entry["deductible_vat"] += vat
         elif r["vat_deduction_type"] == "NON_DEDUCTIBLE":
             non_deductible_vat += vat
             non_deductible_total += amt
+            a_entry["non_deductible_total"] += amt
 
         memo = (r.get("counterparty_info") or "").strip()
         if r["account_code"] == "999" or not memo:
             pending_items.append(r)
+
+    for a_entry in acc_stats.values():
+        if total_expenditure > 0:
+            a_entry["ratio_pct"] = round(a_entry["total_expenditure"] * 100.0 / total_expenditure, 1)
+
+    account_breakdown = sorted(
+        acc_stats.values(),
+        key=lambda x: (x["total_expenditure"], x["tx_count"]),
+        reverse=True,
+    )
 
     vehicle_summary = get_vehicle_expense_summary(cursor, year=target_year)
 
@@ -291,6 +462,7 @@ def build_dashboard_summary(
         "card_last4": target_card,
         "available_months": available_months,
         "card_breakdown": card_breakdown,
+        "account_breakdown": account_breakdown,
         "year": target_year,
         "total_tx_count": len(rows),
         "total_expenditure": total_expenditure,
@@ -568,8 +740,28 @@ def render_dashboard_html(
         else "<tr><td colspan='8' class='empty'>집계된 카드 내역이 없습니다.</td></tr>"
     )
 
+    acc_breakdown_rows = []
+    for ab in summary.get("account_breakdown", []):
+        a_lbl = html.escape(f"{ab['account_code']} {ab['account_name']}")
+        acc_breakdown_rows.append(
+            f"<tr>"
+            f"<td><strong>{a_lbl}</strong></td>"
+            f"<td class='num'>{ab['tx_count']}건</td>"
+            f"<td class='num'><strong>{ab['total_expenditure']:,}원</strong></td>"
+            f"<td class='num'>{ab['supply_value']:,}원</td>"
+            f"<td class='num'>{ab['deductible_vat']:,}원</td>"
+            f"<td class='num'>{ab['non_deductible_total']:,}원</td>"
+            f"<td class='num'>{ab['ratio_pct']}%</td>"
+            f"</tr>"
+        )
+    acc_breakdown_tbody = (
+        "\n".join(acc_breakdown_rows)
+        if acc_breakdown_rows
+        else "<tr><td colspan='7' class='empty'>집계된 계정과목 내역이 없습니다.</td></tr>"
+    )
+
     pending_rows_html = []
-    for item in summary["pending_transactions"]:
+    for item in summary["pending_transactions"][:150]:
         tx_id = item["tx_id"]
         c_lbl = html.escape(str(item.get("card_label") or format_card_label(item["card_last4"])))
         merchant = html.escape(str(item["raw_merchant_name"]))
@@ -694,7 +886,14 @@ def render_dashboard_html(
          | DB: <code>{html.escape(Path(summary['db_path']).name)}</code></p>
     </div>
     <div>
+      <input type="file" id="receipt-file-input" accept="image/*,.pdf"
+             style="display:none" onchange="uploadReceiptFile(this)" />
+      <input type="file" id="csv-file-input" accept=".csv,.txt"
+             style="display:none" onchange="uploadCsvFile(this)" />
       <button class="secondary" onclick="window.open('/manual', '_blank')">사용 매뉴얼(HTML)</button>
+      <button onclick="reapplyRules()">스마트 자동분류 실행</button>
+      <button onclick="document.getElementById('receipt-file-input').click()">영수증 업로드(OCR)</button>
+      <button onclick="document.getElementById('csv-file-input').click()">카드사/홈택스 CSV 업로드</button>
       <button onclick="importPhoneSms()">USB 휴대폰 문자 가져오기</button>
       <button class="secondary" onclick="seedDemoData()">샘플 데이터 생성</button>
       <button class="danger" onclick="resetTestLedger()">테스트 DB 초기화</button>
@@ -720,6 +919,21 @@ def render_dashboard_html(
       <h3>미분류·소명 필요 건수</h3>
       <div class="val">{summary['pending_action_count']}건</div>
     </div>
+  </section>
+
+  <section class="section">
+    <h2>계정과목별 지출 및 부가세 요약표 ({len(summary.get('account_breakdown', []))}개 계정)</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>계정과목 (코드·명칭)</th><th>거래 건수</th><th>지출 합계</th>
+          <th>공급가액</th><th>공제 가능 부가세</th><th>불공제 합계</th><th>지출 비중</th>
+        </tr>
+      </thead>
+      <tbody>
+        {acc_breakdown_tbody}
+      </tbody>
+    </table>
   </section>
 
   <section class="section">
@@ -846,6 +1060,50 @@ def render_dashboard_html(
         body: JSON.stringify({{ limit: 1500 }})
       }});
       window.location.href = '/dashboard?year_month=ALL';
+    }}
+    async function reapplyRules() {{
+      await fetch('/api/v1/system/reapply-rules', {{
+        method: 'POST',
+        headers: API_HEADERS,
+        body: JSON.stringify({{}})
+      }});
+      window.location.reload();
+    }}
+    function uploadReceiptFile(inputEl) {{
+      if (!inputEl.files || !inputEl.files[0]) return;
+      const file = inputEl.files[0];
+      const reader = new FileReader();
+      reader.onload = async function(ev) {{
+        const dataUrl = String(ev.target.result || '');
+        const b64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+        await fetch('/api/v1/receipts/upload', {{
+          method: 'POST',
+          headers: API_HEADERS,
+          body: JSON.stringify({{
+            file_name: file.name,
+            file_content_b64: b64,
+            source_channel: 'WEB_UPLOAD'
+          }})
+        }});
+        window.location.reload();
+      }};
+      reader.readAsDataURL(file);
+    }}
+    function uploadCsvFile(inputEl) {{
+      if (!inputEl.files || !inputEl.files[0]) return;
+      const file = inputEl.files[0];
+      const reader = new FileReader();
+      reader.onload = async function(ev) {{
+        const dataUrl = String(ev.target.result || '');
+        const b64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+        await fetch('/api/v1/imports/hometax-csv', {{
+          method: 'POST',
+          headers: API_HEADERS,
+          body: JSON.stringify({{ csv_content_b64: b64 }})
+        }});
+        window.location.reload();
+      }};
+      reader.readAsDataURL(file);
     }}
     async function exportTaxPack(yearMonth) {{
       await fetch('/api/v1/exports/tax-pack', {{
