@@ -725,7 +725,7 @@ def render_dashboard_html(
       await fetch('/api/v1/system/import-phone-sms', {{
         method: 'POST',
         headers: API_HEADERS,
-        body: JSON.stringify({{ limit: 30 }})
+        body: JSON.stringify({{ limit: 1500 }})
       }});
       window.location.href = '/dashboard?year_month=ALL';
     }}

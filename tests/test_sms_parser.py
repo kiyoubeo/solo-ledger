@@ -93,6 +93,27 @@ def test_parse_real_phone_samsung_lotte_hana_formats():
     assert r5.raw_merchant_name == "(주)코리아세븐대전테크노월드"
     assert r5.total_amount == 9000
 
+    # 6. Woori Card RCS (Chat+ open_rich_card JSON) format from 10/04
+    s6_rcs = (
+        '{"messageHeader":"[Web발신]","card":"open_rich_card","layout":{"children":['
+        '{"text":"● 우리카드 이용안내"},{"text":"우리(6534)승인\\n김*범님\\n23,050원 일시불\\n'
+        '10/04 09:45\\n주식회사 카카오페이\\n누적1,680,410원"}]}}'
+    )
+    r6 = parse_korean_card_sms(s6_rcs, fallback_time="2026-10-04T09:45:27")
+    assert r6.card_last4 == "6534"
+    assert r6.transacted_at == "2026-10-04 09:45:00"
+    assert r6.raw_merchant_name == "주식회사 카카오페이"
+    assert r6.total_amount == 23050
+    assert r6.is_cancel is False
+
+    # 7. KB Kookmin Card RCS partial cancellation format
+    s7 = "[Web발신]\n취소\n[KB국민카드] 8691 김*범님 쿠팡(쿠페이)-쿠 10/08 이용건 10/12 부분취소(-4,340원)"
+    r7 = parse_korean_card_sms(s7, fallback_time="2026-10-12T09:02:32")
+    assert r7.card_last4 == "8691"
+    assert r7.raw_merchant_name == "쿠팡(쿠페이)-쿠"
+    assert r7.total_amount == -4340
+    assert r7.is_cancel is True
+
 
 def test_import_phone_sms_api_endpoint(client):
     mock_adb_stdout = (

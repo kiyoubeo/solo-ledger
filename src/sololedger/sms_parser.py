@@ -1,8 +1,9 @@
 """Korean corporate card SMS parser supporting single-line and multi-line formats."""
 
+import json
 import re
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from sololedger.models import ParsedSmsResult
 
@@ -19,6 +20,8 @@ CARD_LABEL_MAP: Dict[str, str] = {
     "6534": "우리카드(6534)",
     "1595": "우리카드(1595)",
     "4479": "우리체크(4479)",
+    "8691": "KB국민카드(8691)",
+    "KB하이": "KB국민(하이패스)",
     "5*5*": "하나체크(5*5*)",
     "현대NV": "네이버현대카드",
     "현대백화": "현대백화점카드",
@@ -27,6 +30,36 @@ CARD_LABEL_MAP: Dict[str, str] = {
     "12*4": "신한법인(12*4)",
     "3456": "하나법인(3456)",
 }
+
+
+def extract_rcs_text(raw_body: str) -> str:
+    """Extract visible text lines from an Android RCS open_rich_card / generalPurposeCard JSON payload."""
+    body_str = (raw_body or "").strip()
+    if not body_str.startswith("{"):
+        return body_str
+    try:
+        data = json.loads(body_str)
+    except Exception:
+        texts = re.findall(r'"(?:text|description|title)"\s*:\s*"([^"]+)"', body_str)
+        return "\n".join(texts) if texts else body_str
+
+    collected: List[str] = []
+    if isinstance(data, dict) and data.get("messageHeader"):
+        collected.append(str(data["messageHeader"]))
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if k in ("text", "description", "title") and isinstance(v, str) and v.strip():
+                    collected.append(v.strip())
+                else:
+                    _walk(v)
+        elif isinstance(node, list):
+            for elem in node:
+                _walk(elem)
+
+    _walk(data)
+    return "\n".join(collected) if collected else body_str
 
 
 def format_card_label(card_last4: str) -> str:
@@ -52,14 +85,15 @@ def parse_korean_card_sms(
 ) -> ParsedSmsResult:
     """Parse multi-line or single-line Korean corporate card SMS into structured fields.
 
-    Supports Shinhan, KB, Hyundai, Samsung, Hana, Woori, IBK/BC, and NH Nonghyup formats.
+    Supports Shinhan, KB, Hyundai, Samsung, Hana, Woori, IBK/BC, NH Nonghyup, and RCS JSON formats.
     """
-    clean_text = raw_text.replace("\r\n", "\n").strip()
+    unwrapped = extract_rcs_text(raw_text)
+    clean_text = unwrapped.replace("\r\n", "\n").strip()
 
     # 1. Detect if the message is a cancellation event
     is_cancel = bool(
         re.search(
-            r"(승인취소|취소완료|취소승인|결제취소|법인취소|체크취소|해외취소|취소)",
+            r"(승인취소|취소완료|취소승인|결제취소|법인취소|체크취소|해외취소|부분취소|취소)",
             clean_text,
         )
     )
@@ -98,7 +132,7 @@ def parse_korean_card_sms(
 
     # 4. Extract Card Last 4 Digits (handles '1234', '12*4', '0*7*', '(9876)', '삼성8508승인')
     card_match = re.search(
-        r"(?:\(|신한|KB국민|국민|현대|삼성|하나|우리|IBK기업|기업|BC|NH농협|농협|롯데|법인|카드|체크|승인|취소|\s)"
+        r"(?:\(|\]\s*|신한|KB국민|국민|현대|삼성|하나|우리|IBK기업|기업|BC|NH농협|농협|롯데|법인|카드|체크|승인|취소|\s)"
         r"(\d[\d\*]{3})"
         r"(?:\)|\s|님|체크|법인|카드|해외|승인|취소|$)",
         clean_text,
@@ -109,6 +143,8 @@ def parse_korean_card_sms(
         card_last4 = "현대NV"
     elif "현대백화점카드" in clean_text:
         card_last4 = "현대백화"
+    elif "KB국민카드" in clean_text and "후불하이패스" in clean_text:
+        card_last4 = "KB하이"
     else:
         card_last4 = "0000"
 
@@ -122,6 +158,7 @@ def parse_korean_card_sms(
 
     for line in lines:
         stripped = re.sub(r"\[Web발신\]|\[웹발신\]", "", line, flags=re.IGNORECASE)
+        stripped = re.sub(r"^[●◼■▶*]\s*.*이용안내.*", "", stripped)
         stripped = re.sub(r"\[[^\]]*카드[^\]]*\]", "", stripped)
         stripped = re.sub(r"승인번호\s*:?\s*\d{8}", "", stripped)
         stripped = re.sub(r"누적.*", "", stripped)
@@ -132,14 +169,16 @@ def parse_korean_card_sms(
             stripped,
         )
         stripped = re.sub(r"\(?(\d[\d\*]{3})\)?", "", stripped)
-        stripped = re.sub(r"\((?:본인|가족|일시불|\d+개월)\)", "", stripped)
+        stripped = re.sub(r"\((?:본인|가족|일시불|\d+개월|-?[\d,]+원)\)", "", stripped)
         stripped = re.sub(r"[가-힣]\*[가-힣]+님?", "", stripped)
         stripped = re.sub(r"\d{2}/\d{2}\s+\d{2}:\d{2}", "", stripped)
+        stripped = re.sub(r"\d{2}/\d{2}\s*(?:이용건|결제예정|부분취소)?", "", stripped)
+        stripped = re.sub(r"\d+건\s*", "", stripped)
         stripped = re.sub(r"KRW\s*-?[\d,]+", "", stripped, flags=re.IGNORECASE)
         stripped = re.sub(r"-?[\d,]+\s*원", "", stripped)
         stripped = re.sub(
             r"(일시불|\d+개월|할부|승인취소|취소완료|취소승인|결제취소|법인승인|법인취소|"
-            r"체크승인|체크취소|해외승인|해외취소|승인|취소|결제|국외|해외)",
+            r"체크승인|체크취소|해외승인|해외취소|부분취소|승인|취소|결제예정|결제|국외|해외)",
             "",
             stripped,
         )

@@ -32,3 +32,4 @@
 | 2026-10-29 | README.md, logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py (+3 files) | [docs] HTML 사용자 매뉴얼(docs/USER_MANUAL.html) 및 웹 대시보드 매뉴얼 뷰어(/manual) 추가 |
 | 2026-10-29 | logs/last_verification.json, logs/verification_history.jsonl, sql/schema.sql, src/sololedger/api.py (+5 files) | [feat] 갤럭시 S26+ 실기기 USB ADB 카드 문자 추출기(phone_adb.py) 및 7개 카드사 실제 문자 파싱 고도화 |
 | 2026-10-29 | logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/archiver.py (+5 files) | [feat] 카드별 전표·영수증 분류 현황 대시보드, 카드별 필터링 및 by_card/ 보관 폴더 자동 분류 구현 |
+| 2026-10-29 | logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/dashboard.py, src/sololedger/phone_adb.py (+2 files) | [feat] 갤럭시 RCS(채팅+ content://im/chat) 오픈리치카드 메시지 통합 추출 및 2026년 전 기간 연속 조회 지원 |

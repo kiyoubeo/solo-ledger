@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from sololedger.sms_parser import parse_korean_card_sms
+from sololedger.sms_parser import extract_rcs_text, parse_korean_card_sms
 from sololedger.tax_engine import calculate_supply_and_vat, evaluate_tax_rules
 
 _AD_EXCLUSION_KEYWORDS = (
@@ -20,7 +20,13 @@ _AD_EXCLUSION_KEYWORDS = (
     "(광고)",
     "대출",
     "한도",
-    "안내",
+    "결제일 안내",
+    "결제금액 안내",
+    "카드대금",
+    "명세서",
+    "주문취소 안내",
+    "이용 안내 메시지",
+    "쿠폰 다운로드",
     "이벤트",
 )
 
@@ -39,68 +45,73 @@ def resolve_adb_binary() -> str:
 
 
 def fetch_card_sms_from_adb(
-    limit: int = 30,
+    limit: int = 1500,
     device_serial: Optional[str] = None,
     raw_adb_output: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Query SMS inbox from connected Android phone via ADB and return filtered card SMS rows."""
+    """Query both SMS inbox and RCS (Chat+) messages from connected Android phone via ADB."""
+    raw_texts: List[str] = []
     if raw_adb_output is None:
         adb_bin = resolve_adb_binary()
-        cmd = [adb_bin]
-        if device_serial:
-            cmd.extend(["-s", device_serial])
-        cmd.extend(
-            [
-                "shell",
-                "content query --uri content://sms/inbox --projection _id:address:date:body",
-            ]
-        )
-        proc = subprocess.run(cmd, capture_output=True, check=False, timeout=25)
-        if proc.returncode != 0:
-            err_msg = proc.stderr.decode("utf-8", errors="replace").strip()
-            raise RuntimeError(f"ADB query failed: {err_msg or 'No authorized Android device connected.'}")
-        text = proc.stdout.decode("utf-8", errors="replace")
+        for uri in ("content://sms/inbox", "content://im/chat"):
+            cmd = [adb_bin]
+            if device_serial:
+                cmd.extend(["-s", device_serial])
+            cmd.extend(
+                [
+                    "shell",
+                    f"content query --uri {uri} --projection _id:address:date:body",
+                ]
+            )
+            proc = subprocess.run(cmd, capture_output=True, check=False, timeout=25)
+            if proc.returncode != 0 and uri == "content://sms/inbox":
+                err_msg = proc.stderr.decode("utf-8", errors="replace").strip()
+                raise RuntimeError(
+                    f"ADB query failed: {err_msg or 'No authorized Android device connected.'}"
+                )
+            out_str = proc.stdout.decode("utf-8", errors="replace")
+            if out_str.strip():
+                raw_texts.append(out_str)
     else:
-        text = raw_adb_output
+        raw_texts.append(raw_adb_output)
 
-    raw_rows = re.split(r"(?m)^Row:\s+\d+\s+", text)
-    candidates: List[Dict[str, Any]] = []
+    all_parsed_rows: List[Dict[str, Any]] = []
+    for text in raw_texts:
+        raw_rows = re.split(r"(?m)^Row:\s+\d+\s+", text)
+        for chunk in raw_rows[1:]:
+            match = re.match(
+                r"_id=(\d+),\s*address=([^,]*),\s*date=(\d+),\s*body=(.*)",
+                chunk,
+                re.DOTALL,
+            )
+            if not match:
+                continue
+            sms_id = int(match.group(1))
+            address = match.group(2).strip()
+            date_ms = int(match.group(3))
+            body = extract_rcs_text(match.group(4).strip())
 
-    for chunk in raw_rows[1:]:
-        match = re.match(
-            r"_id=(\d+),\s*address=([^,]*),\s*date=(\d+),\s*body=(.*)",
-            chunk,
-            re.DOTALL,
-        )
-        if not match:
-            continue
-        sms_id = int(match.group(1))
-        address = match.group(2).strip()
-        date_ms = int(match.group(3))
-        body = match.group(4).strip()
+            if any(ad in body for ad in _AD_EXCLUSION_KEYWORDS):
+                continue
+            if not re.search(r"\d{2}/\d{2}", body):
+                continue
+            if not re.search(r"(?:[\d,]+\s*원|KRW\s*[\d,]+)", body, re.IGNORECASE):
+                continue
+            if not re.search(r"(승인|일시불|할부|체크|법인|카드|부분취소|취소|결제|후불하이패스)", body):
+                continue
 
-        if any(ad in body for ad in _AD_EXCLUSION_KEYWORDS):
-            continue
-        if not re.search(r"\d{2}/\d{2}\s+\d{2}:\d{2}", body):
-            continue
-        if not re.search(r"(?:[\d,]+\s*원|KRW\s*[\d,]+)", body, re.IGNORECASE):
-            continue
-        if not re.search(r"(승인|일시불|할부|체크|법인|카드|취소|결제)", body):
-            continue
+            all_parsed_rows.append(
+                {
+                    "sms_id": sms_id,
+                    "sender": address,
+                    "date_ms": date_ms,
+                    "received_at": datetime.fromtimestamp(date_ms / 1000.0).strftime("%Y-%m-%dT%H:%M:%S"),
+                    "raw_message": body,
+                }
+            )
 
-        candidates.append(
-            {
-                "sms_id": sms_id,
-                "sender": address,
-                "date_ms": date_ms,
-                "received_at": datetime.fromtimestamp(date_ms / 1000.0).strftime("%Y-%m-%dT%H:%M:%S"),
-                "raw_message": body,
-            }
-        )
-        if len(candidates) >= limit:
-            break
-
-    return candidates
+    all_parsed_rows.sort(key=lambda x: x["date_ms"], reverse=True)
+    return all_parsed_rows[:limit]
 
 
 def import_phone_sms_to_ledger(
