@@ -17,13 +17,17 @@
 
 이 작업 공간에서 코드를 생성, 수정, 리팩토링하거나 문서를 변경하는 모든 에이전트는 **반드시** 아래 3단계 프로토콜을 준수해야 합니다.
 
-### 수칙 1: 개발 결과 하네스 검증 (`verify`)
-- 파일 편집 완료 후 반드시 하네스 검증 파이프라인을 실행하여 정합성을 확인합니다:
+### 수칙 1: 개발 계획서 사전 검토 (`review-plan`) 및 5단계 하네스 검증 (`verify`)
+- 새로운 Phase 또는 기능 개발을 시작하기 전, 개발 계획서([docs/DEVELOPMENT_PLAN.md](./docs/DEVELOPMENT_PLAN.md))의 목표 산출물·API 엔드포인트·테스트 대상을 검토합니다:
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File scripts/harness.ps1 review-plan
+  ```
+- 파일 편집 완료 후 반드시 5단계 하네스 검증 파이프라인을 실행하여 정합성을 확인합니다:
   ```powershell
   powershell -ExecutionPolicy Bypass -File scripts/harness.ps1 verify
   ```
 - 새로운 기능을 추가하거나 버그를 수정할 때는 반드시 `tests/` 하위에 해당 동작을 검증하는 `pytest` 테스트 케이스를 함께 추가해야 합니다.
-- 검증 파이프라인(`compileall` → `ruff check` → `schema_integrity` → `pytest`)의 모든 단계가 `PASSED`여야만 다음 단계로 진행할 수 있습니다.
+- 검증 파이프라인(`plan_review` → `compileall` → `ruff check` → `schema_integrity` → `pytest`)의 모든 5단계가 `PASSED`여야만 다음 단계로 진행할 수 있습니다.
 
 ### 수칙 2: 모든 개발 변경사항 로그 기록 (`log`)
 - 모든 개발 변경사항은 다음 3곳에 동기화되어 기록되어야 합니다:

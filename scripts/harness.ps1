@@ -1,16 +1,17 @@
 <#
 .SYNOPSIS
-    SoloLedger Harness Engineering CLI (verify | log | commit-push | status)
+    SoloLedger Harness Engineering CLI (verify | review-plan | log | commit-push | status)
 .DESCRIPTION
     Unified development harness for SoloLedger:
-    - verify      : Runs syntax check, ruff static analysis, SQLite DDL schema check, and pytest suite.
+    - review-plan : Audits docs/DEVELOPMENT_PLAN.md against codebase modules, routes, tests, and version.
+    - verify      : Runs 5-stage pipeline (plan_review -> compileall -> ruff -> schema_integrity -> pytest).
     - log         : Records a development change entry into CHANGELOG.md, CLAUDE.md, and logs/dev_changes.jsonl.
     - commit-push : Runs verify -> records change logs -> git add/commit -> git push origin main.
     - status      : Prints repository sync status, last verification result, and recent change logs.
 #>
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("verify", "log", "commit-push", "status")]
+    [ValidateSet("verify", "review-plan", "log", "commit-push", "status")]
     [string]$Action = "status",
 
     [Parameter(Position = 1)]
@@ -56,9 +57,62 @@ function Get-ChangedFilesList {
     return $files
 }
 
+function Invoke-PlanReview {
+    Write-Host "==========================================================" -ForegroundColor Cyan
+    Write-Host " [SoloLedger Harness] Development Plan & Spec Review" -ForegroundColor Cyan
+    Write-Host "==========================================================" -ForegroundColor Cyan
+
+    $ErrorActionPreference = "Continue"
+    $pyCode = @"
+import json
+from sololedger.plan_verifier import parse_development_plan, verify_plan_traceability
+plan = parse_development_plan()
+rep = verify_plan_traceability()
+print(json.dumps({'plan': plan, 'report': rep}, ensure_ascii=False))
+"@
+    $jsonOut = (uv run python -c $pyCode 2>&1 | Out-String).Trim()
+    $exitCode = $LASTEXITCODE
+    $ErrorActionPreference = "Stop"
+
+    if ($exitCode -ne 0) {
+        Write-Host "Failed to execute plan_verifier:" -ForegroundColor Red
+        Write-Host $jsonOut
+        exit 1
+    }
+
+    $data = $jsonOut | ConvertFrom-Json
+    $rep = $data.report
+    Write-Host "Package Version     : v$($rep.package_version)"
+    Write-Host "Registered Endpoints: $($rep.registered_routes_count)"
+    Write-Host "`nPhase Roadmap Status (docs/DEVELOPMENT_PLAN.md):" -ForegroundColor Yellow
+    foreach ($p in $data.plan.phases) {
+        $mark = if ($p.is_completed) { "[DONE]" } else { "[TODO]" }
+        $color = if ($p.is_completed) { "Green" } else { "Cyan" }
+        Write-Host "  $mark $($p.phase) (v$($p.version)) -> Deliverables: $($p.deliverables -join ', ')" -ForegroundColor $color
+    }
+
+    if ($rep.next_phase) {
+        Write-Host "`nNext Target Phase:" -ForegroundColor Magenta
+        Write-Host "  Phase       : $($rep.next_phase.phase) (v$($rep.next_phase.version))"
+        Write-Host "  Deliverables: $($rep.next_phase.deliverables -join ', ')"
+        Write-Host "  Endpoints   : $($rep.next_phase.documented_endpoints -join ', ')"
+        Write-Host "  Tests       : $($rep.next_phase.expected_tests -join ', ')"
+    }
+
+    if (-not $rep.passed) {
+        Write-Host "`n[PLAN REVIEW FAILED] Traceability Errors:" -ForegroundColor Red
+        foreach ($err in $rep.errors) {
+            Write-Host "  - $err" -ForegroundColor Red
+        }
+        exit 1
+    } else {
+        Write-Host "`n[PLAN REVIEW PASSED] All completed phases in DEVELOPMENT_PLAN.md match codebase & tests." -ForegroundColor Green
+    }
+}
+
 function Invoke-HarnessVerify {
     Write-Host "==========================================================" -ForegroundColor Cyan
-    Write-Host " [SoloLedger Harness] Running Verification Pipeline..." -ForegroundColor Cyan
+    Write-Host " [SoloLedger Harness] Running 5-Stage Verification..." -ForegroundColor Cyan
     Write-Host "==========================================================" -ForegroundColor Cyan
 
     $startTime = Get-Date
@@ -66,8 +120,26 @@ function Invoke-HarnessVerify {
     $overallPassed = $true
     $ErrorActionPreference = "Continue"
 
-    # 1. Python Bytecode & Syntax Compilation Check
-    Write-Host "`n[1/4] Syntax & Bytecode Compilation Check (compileall)..." -ForegroundColor Yellow
+    # 1. Development Plan & Spec Traceability Review
+    Write-Host "`n[1/5] Development Plan & Spec Traceability Check (plan_review)..." -ForegroundColor Yellow
+    $planCheckCode = "from sololedger.plan_verifier import verify_plan_traceability; r = verify_plan_traceability(); assert r['passed'], 'Plan errors: ' + '; '.join(r['errors']); nxt = r['next_phase']['phase'] if r['next_phase'] else 'NONE'; print('Completed=' + ','.join(r['completed_phases']) + ', Next=' + nxt + ', Version=v' + r['package_version'])"
+    $planOut = (uv run python -c $planCheckCode 2>&1 | Out-String)
+    $planExit = $LASTEXITCODE
+    $steps += [ordered]@{
+        step   = "plan_review"
+        passed = ($planExit -eq 0)
+        output = $planOut.Trim()
+    }
+    if ($planExit -ne 0) {
+        $overallPassed = $false
+        Write-Host "  -> FAILED: Development plan traceability check failed." -ForegroundColor Red
+        Write-Host $planOut
+    } else {
+        Write-Host "  -> PASSED ($($planOut.Trim()))" -ForegroundColor Green
+    }
+
+    # 2. Python Bytecode & Syntax Compilation Check
+    Write-Host "`n[2/5] Syntax & Bytecode Compilation Check (compileall)..." -ForegroundColor Yellow
     $compileOut = (uv run python -m compileall -q src tests 2>&1 | Out-String)
     $compileExit = $LASTEXITCODE
     $steps += [ordered]@{
@@ -83,8 +155,8 @@ function Invoke-HarnessVerify {
         Write-Host "  -> PASSED" -ForegroundColor Green
     }
 
-    # 2. Static Analysis (Ruff Linter)
-    Write-Host "`n[2/4] Static Code Analysis (ruff check)..." -ForegroundColor Yellow
+    # 3. Static Analysis (Ruff Linter)
+    Write-Host "`n[3/5] Static Code Analysis (ruff check)..." -ForegroundColor Yellow
     $ruffOut = (uv run ruff check src tests 2>&1 | Out-String)
     $ruffExit = $LASTEXITCODE
     $steps += [ordered]@{
@@ -100,8 +172,8 @@ function Invoke-HarnessVerify {
         Write-Host "  -> PASSED" -ForegroundColor Green
     }
 
-    # 3. SQLite DDL & Seed Rules Integrity Check
-    Write-Host "`n[3/4] SQLite Schema & Seed Rules Integrity Check..." -ForegroundColor Yellow
+    # 4. SQLite DDL & Seed Rules Integrity Check
+    Write-Host "`n[4/5] SQLite Schema & Seed Rules Integrity Check..." -ForegroundColor Yellow
     $schemaOut = (uv run python -c "from sololedger.db import init_db, get_connection; import tempfile, os; fd, p = tempfile.mkstemp(suffix='.db'); os.close(fd); init_db(p); c = get_connection(p); cur = c.cursor(); cur.execute('SELECT COUNT(*) FROM tax_classification_rules WHERE is_active=1'); r = cur.fetchone()[0]; c.close(); os.remove(p); assert r >= 4; print(f'Tables=4, ActiveSeedRules={r}')" 2>&1 | Out-String)
     $schemaExit = $LASTEXITCODE
     $steps += [ordered]@{
@@ -117,8 +189,8 @@ function Invoke-HarnessVerify {
         Write-Host "  -> PASSED ($($schemaOut.Trim()))" -ForegroundColor Green
     }
 
-    # 4. Automated Unit & Integration Tests (Pytest)
-    Write-Host "`n[4/4] Automated Unit & Integration Test Suite (pytest)..." -ForegroundColor Yellow
+    # 5. Automated Unit & Integration Tests (Pytest)
+    Write-Host "`n[5/5] Automated Unit & Integration Test Suite (pytest)..." -ForegroundColor Yellow
     $pytestOut = (uv run pytest -q 2>&1 | Out-String)
     $pytestExit = $LASTEXITCODE
     $steps += [ordered]@{
@@ -245,6 +317,9 @@ function Add-DevelopmentLogEntry {
 }
 
 switch ($Action) {
+    "review-plan" {
+        Invoke-PlanReview
+    }
     "verify" {
         Invoke-HarnessVerify
     }
@@ -255,7 +330,7 @@ switch ($Action) {
         if ([string]::IsNullOrWhiteSpace($Message)) {
             throw "Commit message (-Message) is required for commit-push."
         }
-        # Step 1: Run full verification pipeline
+        # Step 1: Run full 5-stage verification pipeline (includes plan_review)
         Invoke-HarnessVerify
 
         # Step 2: Log changes to CHANGELOG.md, CLAUDE.md, and logs/dev_changes.jsonl

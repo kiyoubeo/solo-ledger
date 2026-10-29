@@ -12,19 +12,27 @@ Use `scripts/harness.ps1` to verify changes, record development logs, and commit
 
 ## Standard Development Loop
 
+0. **Review Development Plan (`review-plan`)**:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File scripts/harness.ps1 review-plan
+   ```
+   - Audits `docs/DEVELOPMENT_PLAN.md` and `docs/ARCHITECTURE_SPEC.md` against the codebase (`src/sololedger/`, `tests/`, registered FastAPI routes, and `sololedger.__version__`).
+
 1. **Implement & Add Tests**:
    - Implement domain logic under `src/sololedger/` and SQL changes in `sql/schema.sql`.
    - Add or update unit/integration tests in `tests/`.
+   - Update `docs/DEVELOPMENT_PLAN.md` when completing a Phase.
 
-2. **Run Harness Verification**:
+2. **Run 5-Stage Harness Verification**:
    ```powershell
    powershell -ExecutionPolicy Bypass -File scripts/harness.ps1 verify
    ```
    - Checks:
-     1. `compileall` (Python syntax & bytecode check)
-     2. `ruff check src tests` (Static lint analysis)
-     3. `schema_integrity` (SQLite DDL & seed rules verification)
-     4. `pytest` (Unit & FastAPI integration test suite)
+     1. `plan_review` (Plan-to-Code traceability: deliverables, test suites, FastAPI endpoints, version alignment)
+     2. `compileall` (Python syntax & bytecode check)
+     3. `ruff check src tests` (Static lint analysis)
+     4. `schema_integrity` (SQLite DDL & seed rules verification)
+     5. `pytest` (Unit & FastAPI integration test suite)
    - Inspect `logs/last_verification.json` if any check fails.
 
 3. **Log, Commit, and Push (Atomic Execution)**:
