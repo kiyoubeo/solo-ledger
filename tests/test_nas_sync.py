@@ -81,15 +81,23 @@ def test_nas_backup_api_and_cli_incremental_sync(client, test_db_path, tmp_path)
     assert cli_res["skipped_existing_count"] >= 2
 
 
-def test_server_service_script_and_setup_guide_exist():
-    """Verify 24/7 laptop/mini-PC server provisioning script, setup guide, and user manual."""
+def test_server_service_script_and_setup_guide_exist(client):
+    """Verify 24/7 laptop/mini-PC server provisioning script, setup guide, and user manuals."""
     service_script = PROJECT_ROOT / "scripts" / "server_service.ps1"
     guide_doc = PROJECT_ROOT / "docs" / "SERVER_SETUP_GUIDE.md"
     manual_doc = PROJECT_ROOT / "docs" / "USER_MANUAL.md"
+    manual_html = PROJECT_ROOT / "docs" / "USER_MANUAL.html"
     assert service_script.exists()
     assert guide_doc.exists()
     assert manual_doc.exists()
+    assert manual_html.exists()
     assert "TEST MODE" in manual_doc.read_text(encoding="utf-8")
+    assert "<!DOCTYPE html>" in manual_html.read_text(encoding="utf-8")
+
+    # Verify /manual endpoint serves HTML manual
+    manual_res = client.get("/manual")
+    assert manual_res.status_code == 200
+    assert "사용자 사용 매뉴얼 가이드" in manual_res.text
 
     proc = subprocess.run(
         [

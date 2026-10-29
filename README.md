@@ -54,7 +54,8 @@ SoloLedger/
 ├── docs/
 │   ├── ARCHITECTURE_SPEC.md    # 전체 시스템 아키텍처 및 도메인 설계 명세서
 │   ├── DEVELOPMENT_PLAN.md     # 단계별(Phase 1~5) 마스터 개발 계획서
-│   ├── USER_MANUAL.md          # SoloLedger 사용자 사용 매뉴얼 가이드
+│   ├── USER_MANUAL.md          # SoloLedger 사용자 사용 매뉴얼 가이드 (Markdown)
+│   ├── USER_MANUAL.html        # SoloLedger 사용자 사용 매뉴얼 가이드 (웹 브라우저용 HTML)
 │   └── SERVER_SETUP_GUIDE.md   # 중고 노트북 / 미니 PC 24시간 무인 서버 구축 가이드
 ├── logs/
 │   ├── dev_changes.jsonl       # 모든 개발 변경사항 구조화 로그 (JSONL)

@@ -29,3 +29,4 @@
 | 2026-10-29 | .gitignore, logs/last_verification.json, logs/verification_history.jsonl, tests/test_nas_sync.py (+2 files) | [feat] 중고 노트북·미니PC 24시간 무인 서버 자동 시작 및 일일 NAS 백업 프로비저닝 스크립트(server_service.ps1) 및 가이드 추가 |
 | 2026-10-29 | .env.example, .gitignore, logs/last_verification.json, logs/verification_history.jsonl (+5 files) | [feat] 테스트 전용 샌드박스 환경(.env test 모드, sololeger_test.db, SoloLedger_Test NAS 분리) 및 샘플 시드·초기화 기능 추가 |
 | 2026-10-29 | README.md, logs/last_verification.json, logs/verification_history.jsonl, tests/test_nas_sync.py (+1 files) | [docs] SoloLedger(v1.0.0) 사용자 사용 매뉴얼 가이드(docs/USER_MANUAL.md) 작성 및 테스트 검증 반영 |
+| 2026-10-29 | README.md, logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py (+3 files) | [docs] HTML 사용자 매뉴얼(docs/USER_MANUAL.html) 및 웹 대시보드 매뉴얼 뷰어(/manual) 추가 |

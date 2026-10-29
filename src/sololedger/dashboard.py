@@ -478,6 +478,7 @@ def render_dashboard_html(
          | DB: <code>{html.escape(Path(summary['db_path']).name)}</code></p>
     </div>
     <div>
+      <button class="secondary" onclick="window.open('/manual', '_blank')">사용 매뉴얼(HTML)</button>
       <button class="secondary" onclick="seedDemoData()">샘플 데이터 생성</button>
       <button class="danger" onclick="resetTestLedger()">테스트 DB 초기화</button>
       <button onclick="backupToNas()">NAS(Z:\\) 백업 동기화</button>

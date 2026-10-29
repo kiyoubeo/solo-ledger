@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SoloLedger v1.0.0 — 사용자 사용 매뉴얼 가이드</title>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --surface: #ffffff;
+      --border: #e2e8f0;
+      --text: #0f172a;
+      --muted: #475569;
+      --primary: #2563eb;
+      --primary-soft: #eff6ff;
+      --success-bg: #dcfce7;
+      --success-fg: #166534;
+      --warn-bg: #fef3c7;
+      --warn-fg: #92400e;
+      --danger-bg: #fee2e2;
+      --danger-fg: #991b1b;
+      --code-bg: #0f172a;
+      --code-fg: #f8fafc;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Pretendard", "Malgun Gothic", "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.65;
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: 270px 1fr;
+      max-width: 1360px;
+      margin: 0 auto;
+      min-height: 100vh;
+    }
+    aside {
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      padding: 28px 20px;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow-y: auto;
+    }
+    aside h2 {
+      margin: 0 0 6px 0;
+      font-size: 18px;
+      color: var(--primary);
+    }
+    aside .ver {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 20px;
+      display: block;
+    }
+    aside nav a {
+      display: block;
+      padding: 8px 10px;
+      margin-bottom: 4px;
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 13.5px;
+      border-radius: 6px;
+      font-weight: 500;
+    }
+    aside nav a:hover {
+      background: var(--primary-soft);
+      color: var(--primary);
+    }
+    aside .quick-links {
+      margin-top: 24px;
+      padding-top: 16px;
+      border-top: 1px solid var(--border);
+    }
+    aside .btn-link {
+      display: block;
+      text-align: center;
+      background: var(--primary);
+      color: #ffffff;
+      text-decoration: none;
+      padding: 9px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+    aside .btn-link.secondary {
+      background: #334155;
+    }
+    main {
+      padding: 36px 48px 64px 48px;
+    }
+    header.hero {
+      background: linear-gradient(135deg, #1e3a8a 0%, #2563eb 100%);
+      color: #ffffff;
+      padding: 32px;
+      border-radius: 14px;
+      margin-bottom: 32px;
+    }
+    header.hero h1 {
+      margin: 0 0 8px 0;
+      font-size: 28px;
+    }
+    header.hero p {
+      margin: 0;
+      opacity: 0.92;
+      font-size: 15px;
+    }
+    section.card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 28px;
+      margin-bottom: 28px;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
+    }
+    section.card h2 {
+      margin-top: 0;
+      font-size: 20px;
+      border-bottom: 2px solid var(--border);
+      padding-bottom: 10px;
+      margin-bottom: 18px;
+    }
+    section.card h3 {
+      font-size: 16px;
+      margin-top: 22px;
+      margin-bottom: 10px;
+      color: #1e293b;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13.5px;
+      margin: 14px 0;
+    }
+    th, td {
+      border: 1px solid var(--border);
+      padding: 10px 12px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #f1f5f9;
+      font-weight: 600;
+    }
+    pre {
+      background: var(--code-bg);
+      color: var(--code-fg);
+      padding: 16px;
+      border-radius: 8px;
+      overflow-x: auto;
+      font-size: 13px;
+      line-height: 1.55;
+      margin: 12px 0;
+    }
+    code {
+      font-family: "JetBrains Mono", Consolas, monospace;
+      font-size: 12.5px;
+      background: #f1f5f9;
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+    pre code {
+      background: transparent;
+      padding: 0;
+      color: inherit;
+    }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .badge.ok { background: var(--success-bg); color: var(--success-fg); }
+    .badge.warn { background: var(--warn-bg); color: var(--warn-fg); }
+    .badge.no { background: var(--danger-bg); color: var(--danger-fg); }
+    .callout {
+      background: var(--primary-soft);
+      border-left: 4px solid var(--primary);
+      padding: 14px 16px;
+      border-radius: 0 8px 8px 0;
+      margin: 14px 0;
+      font-size: 14px;
+    }
+    .steps-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 14px;
+      margin: 16px 0;
+    }
+    .step-box {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      background: #f8fafc;
+    }
+    .step-box strong {
+      display: block;
+      color: var(--primary);
+      margin-bottom: 6px;
+      font-size: 14px;
+    }
+    @media (max-width: 900px) {
+      .layout { grid-template-columns: 1fr; }
+      aside { position: static; height: auto; border-right: none; border-bottom: 1px solid var(--border); }
+      main { padding: 20px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <aside>
+      <h2>SoloLedger 매뉴얼</h2>
+      <span class="ver">버전 v1.0.0 · 1인 법인 세무증빙 시스템</span>
+      <nav>
+        <a href="#sec-1">1. 테스트 모드 vs 실운영 모드</a>
+        <a href="#sec-2">2. 서버 시작·종료 및 대시보드</a>
+        <a href="#sec-3">3. 워크플로우 A: 월말 10분 정산</a>
+        <a href="#sec-4">4. 워크플로우 B: 실시간 봇 연동</a>
+        <a href="#sec-5">5. 터미널(CLI) 명령어 7종</a>
+        <a href="#sec-6">6. 1인 법인 계정과목 기준표</a>
+        <a href="#sec-7">7. NAS(Z:\) 백업 &amp; 24시간 서버</a>
+      </nav>
+      <div class="quick-links">
+        <a class="btn-link" href="http://127.0.0.1:8000/dashboard" target="_blank">웹 대시보드 열기</a>
+        <a class="btn-link secondary" href="http://127.0.0.1:8000/docs" target="_blank">Swagger API 문서 열기</a>
+      </div>
+    </aside>
+
+    <main>
+      <header class="hero">
+        <h1>SoloLedger (v1.0.0) 사용자 사용 매뉴얼 가이드</h1>
+        <p>1인 법인 전용 회계·경비 원장 및 법인카드 세무증빙 무비용(Zero-Cost) 자동화 시스템</p>
+      </header>
+
+      <section id="sec-1" class="card">
+        <h2>1. 운용 모드 이해 및 전환 (테스트 모드 vs 실운영 모드)</h2>
+        <p>SoloLedger는 연습·테스트 데이터가 실제 법인 장부와 섞이지 않도록 프로젝트 루트의 <code>.env</code> 파일 설정에 따라 <strong>테스트 모드(<code>test</code>)</strong>와 <strong>실운영 모드(<code>prod</code>)</strong>를 완전히 분리합니다.</p>
+        <table>
+          <thead>
+            <tr>
+              <th>구분</th>
+              <th>테스트 모드 (<code>SOLOLEDGER_ENV=test</code>) — 현재 기본값</th>
+              <th>실운영 모드 (<code>SOLOLEDGER_ENV=prod</code>)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>원장 DB 파일</strong></td>
+              <td><code>sololedger_test.db</code></td>
+              <td><code>sololedger_prod.db</code></td>
+            </tr>
+            <tr>
+              <td><strong>로컬 영수증 폴더</strong></td>
+              <td><code>archive_test/</code></td>
+              <td><code>archive/</code></td>
+            </tr>
+            <tr>
+              <td><strong>NAS(<code>Z:\</code>) 백업 폴더</strong></td>
+              <td><code>Z:\HDD1\Data\SoloLedger_Test</code></td>
+              <td><code>Z:\HDD1\Data\SoloLedger</code></td>
+            </tr>
+            <tr>
+              <td><strong>대시보드 상단 배지</strong></td>
+              <td><span class="badge ok">TEST MODE</span> 표시</td>
+              <td><span class="badge warn">PROD MODE</span> 표시</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="callout">
+          <strong>실운영 모드로 전환하는 방법:</strong> 충분히 테스트하신 뒤 실제 법인카드 장부로 쓰실 때는 프로젝트 폴더의 <code>.env</code> 파일에서 <code>SOLOLEDGER_ENV=prod</code>로 변경하고 아래 3줄을 지정한 뒤 서버를 재시작하면 깨끗한 실운영 장부로 전환됩니다.
+        </div>
+<pre><code>SOLOLEDGER_ENV=prod
+SOLOLEDGER_DB_PATH=./sololedger_prod.db
+SOLOLEDGER_ARCHIVE_DIR=./archive
+SOLOLEDGER_NAS_DIR=Z:\HDD1\Data\SoloLedger</code></pre>
+      </section>
+
+      <section id="sec-2" class="card">
+        <h2>2. 서버 시작·종료 및 웹 대시보드 화면 가이드</h2>
+        <h3>2.1 백그라운드 서버 켜기 및 끄기</h3>
+        <p>PowerShell 터미널(<code>C:\ybkim\workspace\SoloLedger</code>)에서 아래 명령어로 서버를 제어합니다.</p>
+<pre><code># 1) 창 없이 백그라운드로 서버 켜기 (http://127.0.0.1:8000/dashboard)
+powershell -ExecutionPolicy Bypass -File scripts/server_service.ps1 start-background
+
+# 2) 현재 서버 실행 상태(PID) 확인
+powershell -ExecutionPolicy Bypass -File scripts/server_service.ps1 status
+
+# 3) 백그라운드 서버 끄기
+powershell -ExecutionPolicy Bypass -File scripts/server_service.ps1 stop-background</code></pre>
+
+        <h3>2.2 웹 대시보드 (<code>http://127.0.0.1:8000/dashboard</code>) 상단 버튼 기능</h3>
+        <div class="steps-grid">
+          <div class="step-box">
+            <strong>① [샘플 데이터 생성]</strong>
+            연습용 법인카드 거래 6건(쿠팡, 네이버페이 모니터, 스타벅스, 한우명가, 주유소, 미분류 문구점)과 샘플 영수증을 즉시 생성합니다.
+          </div>
+          <div class="step-box">
+            <strong>② [테스트 DB 초기화]</strong>
+            연습 삼아 입력·수정한 테스트 전표와 영수증을 전부 지우고 백지(0건) 상태로 리셋합니다.
+          </div>
+          <div class="step-box">
+            <strong>③ [NAS(Z:\) 백업 동기화]</strong>
+            원장 DB 스냅샷과 영수증·세무사 ZIP 파일들을 <code>khomeNAS (Z:\)</code>로 즉시 안전 복사합니다.
+          </div>
+          <div class="step-box">
+            <strong>④ [세무사 제출용 ZIP+CSV 생성]</strong>
+            해당 귀속월의 세무사 제출용 기장원장 CSV(<code>utf-8-sig</code>)와 정규화 영수증을 하나의 <code>.zip</code>으로 압축합니다.
+          </div>
+        </div>
+      </section>
+
+      <section id="sec-3" class="card">
+        <h2>3. 실무 워크플로우 A: 월말 10분 홈택스 CSV 일괄 정산 모드 (API 키 불필요)</h2>
+        <p>별도의 외부 API 키나 스마트폰 설정 없이 <strong>매월 말(또는 세무사 기장 자료 요청 시) 딱 10분 만에 세무사 제출 자료를 만드는 가장 쉬운 방법</strong>입니다.</p>
+        <div class="steps-grid">
+          <div class="step-box">
+            <strong>Step 1. 홈택스 CSV 다운로드</strong>
+            홈택스 <code>[사업용신용카드 → 매입내역 조회]</code> 또는 카드사 홈페이지에서 월별 내역 CSV를 내려받습니다.
+          </div>
+          <div class="step-box">
+            <strong>Step 2. CLI로 CSV 일괄 대사</strong>
+            <code>import-csv</code> 명령어로 CSV를 불러오면 승인번호/시간창 대사 및 세무 분류가 자동 수행됩니다.
+          </div>
+          <div class="step-box">
+            <strong>Step 3. 미분류 적요 입력</strong>
+            웹 대시보드에서 미분류(<code>999</code>) 건이나 품목 미입력 건의 적요를 입력하고 <code>[저장]</code>을 누릅니다.
+          </div>
+          <div class="step-box">
+            <strong>Step 4. 세무사 ZIP 추출</strong>
+            <code>[세무사 제출용 ZIP+CSV 생성]</code> 클릭 후 생성된 <code>SoloLedger_세무증빙_YYYYMM.zip</code>을 세무사에게 전달합니다.
+          </div>
+        </div>
+<pre><code># 홈택스 CSV 임포트 -> 세무사 패키지 생성 -> NAS 백업 (3줄 완성)
+.venv\Scripts\python.exe -m sololedger.cli import-csv C:\Downloads\hometax_202610.csv
+.venv\Scripts\python.exe -m sololedger.cli export-pack 202610
+.venv\Scripts\python.exe -m sololedger.cli backup-nas</code></pre>
+      </section>
+
+      <section id="sec-4" class="card">
+        <h2>4. 실무 워크플로우 B: 실시간 카드 SMS + 텔레그램 봇(<code>@SoloLedgerBot</code>) 자동화 모드</h2>
+        <p>결제하는 즉시 스마트폰에서 10초 만에 용도(단독 식사 vs 거래처 미팅)와 영수증 사진 업로드를 끝내는 실시간 자동화 모드입니다.</p>
+        <h3>4.1 무료 외부 API 키 3종 (<code>.env</code> 파일에 입력)</h3>
+        <ul>
+          <li><code>TELEGRAM_BOT_TOKEN</code> &amp; <code>TELEGRAM_CHAT_ID</code>: 텔레그램 앱에서 <code>@BotFather</code> 검색 후 <code>/newbot</code> 입력 (3분, 무료)</li>
+          <li><code>GEMINI_API_KEY</code>: Google AI Studio에서 발급 — 영수증 이미지 자동 글자 인식용 (2분, 무료 티어)</li>
+          <li><code>NTS_API_SERVICE_KEY</code>: 공공데이터포털(data.go.kr) 국세청 사업자등록 상태조회 키 (5분, 무료)</li>
+        </ul>
+
+        <h3>4.2 스마트폰 법인카드 승인 문자 웹훅 설정 (Android MacroDroid / iOS 단축어)</h3>
+<pre><code>POST http://&lt;서버주소&gt;:8000/api/v1/webhooks/sms
+Headers:
+  Content-Type: application/json
+  X-API-Key: dev-sololedger-secret-key
+Body:
+  {
+    "sender": "15447200",
+    "raw_message": "[Web발신] 신한법인(9876) 승인 45,000원 일시불 10/29 12:30 스타벅스역삼점 승인번호:12345678"
+  }</code></pre>
+      </section>
+
+      <section id="sec-5" class="card">
+        <h2>5. 터미널(CLI) 명령어 7종 요약표</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>명령어</th>
+              <th>실행 예시</th>
+              <th>동작 설명</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>init-db</code></td>
+              <td><code>.venv\Scripts\python.exe -m sololedger.cli init-db</code></td>
+              <td>SQLite 4대 테이블 및 세무 분류 규칙 초기화</td>
+            </tr>
+            <tr>
+              <td><code>status</code></td>
+              <td><code>.venv\Scripts\python.exe -m sololedger.cli status --year-month 202610</code></td>
+              <td>현재 원장 건수, 월별 지출·부가세 합계, 업무용승용차 한도 JSON 출력</td>
+            </tr>
+            <tr>
+              <td><code>seed-demo</code></td>
+              <td><code>.venv\Scripts\python.exe -m sololedger.cli seed-demo --year-month 202610</code></td>
+              <td>테스트용 실전 샘플 전표 6건 및 샘플 영수증 자동 생성</td>
+            </tr>
+            <tr>
+              <td><code>reset-db</code></td>
+              <td><code>.venv\Scripts\python.exe -m sololedger.cli reset-db</code></td>
+              <td>테스트 DB 전표·영수증·가맹점 캐시 전체 초기화</td>
+            </tr>
+            <tr>
+              <td><code>import-csv</code></td>
+              <td><code>.venv\Scripts\python.exe -m sololedger.cli import-csv hometax.csv</code></td>
+              <td>홈택스/카드사 CSV(UTF-8/CP949) 일괄 임포트 및 3단계 대사</td>
+            </tr>
+            <tr>
+              <td><code>export-pack</code></td>
+              <td><code>.venv\Scripts\python.exe -m sololedger.cli export-pack 202610 --force</code></td>
+              <td>세무대리인 제출용 표준 CSV + 정규화 영수증 ZIP 번들 생성</td>
+            </tr>
+            <tr>
+              <td><code>backup-nas</code></td>
+              <td><code>.venv\Scripts\python.exe -m sololedger.cli backup-nas</code></td>
+              <td><code>khomeNAS (Z:\)</code>로 SQLite 무결성 스냅샷 및 영수증 증분 동기화</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="sec-6" class="card">
+        <h2>6. 1인 법인 표준 계정과목 및 세무 처리 기준표</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>계정코드</th>
+              <th>계정과목명</th>
+              <th>주요 적용 대상</th>
+              <th>부가세 공제 구분</th>
+              <th>실무 세무 포인트</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>811</strong></td>
+              <td>복리후생비</td>
+              <td>대표이사 단독 식사, 탕비실 음료/커피</td>
+              <td><span class="badge ok">DEDUCTIBLE (공제)</span></td>
+              <td>일반과세 음식점/카페 결제 시 매입세액 공제 가능</td>
+            </tr>
+            <tr>
+              <td><strong>813</strong></td>
+              <td>기업업무추진비</td>
+              <td>거래처 미팅 식사·다과, 경조사비</td>
+              <td><span class="badge no">NON_DEDUCTIBLE (불공제)</span></td>
+              <td>구 접대비. 부가세 공제 불가하며 참석자/거래처 메모 필수</td>
+            </tr>
+            <tr>
+              <td><strong>822</strong></td>
+              <td>차량유지비</td>
+              <td>주유소, 전기차 충전, 정비, 주차, 하이패스</td>
+              <td><span class="badge no">NON_DEDUCTIBLE (불공제)</span></td>
+              <td>비영업용 소형승용차 매입세액 불공제 + 연간 1,500만 원 한도 관리</td>
+            </tr>
+            <tr>
+              <td><strong>826</strong></td>
+              <td>도서인쇄비</td>
+              <td>서점(교보문고 등) 기술서적, 명함/서류 인쇄</td>
+              <td><span class="badge warn">EXEMPT (면세)</span> / 공제</td>
+              <td>도서 구매는 부가세 0원(<code>EXEMPT</code>) 자동 반영</td>
+            </tr>
+            <tr>
+              <td><strong>830</strong></td>
+              <td>소모품비</td>
+              <td>쿠팡·네이버 사무용품, 30만 원 미만 소액 물품</td>
+              <td><span class="badge ok">DEDUCTIBLE (공제)</span></td>
+              <td>온라인 PG 결제 시 실제 구매 품목명(<code>모니터암 외 1건</code>) 소명 필수</td>
+            </tr>
+            <tr>
+              <td><strong>831</strong></td>
+              <td>지급수수료</td>
+              <td>ChatGPT, GitHub, AWS, 클라우드·SaaS 구독</td>
+              <td><span class="badge ok">DEDUCTIBLE</span> / 해외면세</td>
+              <td>해외 달러 결제 시 카드사 매입 확정 원화 금액으로 대사</td>
+            </tr>
+            <tr>
+              <td><strong>212</strong></td>
+              <td>비품</td>
+              <td>노트북, 4K 모니터, 책상 등 30만 원 이상 자산</td>
+              <td><span class="badge ok">DEDUCTIBLE (공제)</span></td>
+              <td>30만 원 이상 고액 장비 또는 <code>'비품'</code> 명시 시 자동 승격</td>
+            </tr>
+            <tr>
+              <td><strong>999</strong></td>
+              <td>가계정(미분류)</td>
+              <td>규칙 미매칭 신규 가맹점</td>
+              <td><span class="badge warn">PENDING (확인필요)</span></td>
+              <td>대시보드에서 품목/용도 입력 시 해당 계정으로 즉시 전환</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="sec-7" class="card">
+        <h2>7. 개인 NAS(<code>khomeNAS Z:\</code>) 백업 및 24시간 서버 노트북 확장</h2>
+        <h3>7.1 NAS(<code>Z:\HDD1\Data\SoloLedger_Test</code>) 백업 폴더 구조</h3>
+        <ul>
+          <li><code>backups/sololedger_prod_latest.db</code>: 가장 최근 동기화된 원장 DB 최신본</li>
+          <li><code>backups/sololedger_prod_YYYYMMDD.db</code>: 일자별 원장 DB 스냅샷</li>
+          <li><code>archive/original/</code>: 업로드된 영수증 원본 이미지</li>
+          <li><code>archive/normalized/</code>: <code>{YYYYMMDD}_{가맹점}_{계정과목}_{품목}_{금액}.{ext}</code> 규칙으로 정리된 5년 보관용 영수증</li>
+          <li><code>archive/exports/</code>: 세무사에게 바로 전달할 월별 <code>SoloLedger_기장원장_YYYYMM.csv</code> 및 <code>SoloLedger_세무증빙_YYYYMM.zip</code></li>
+        </ul>
+        <h3>7.2 추후 중고 노트북 / 미니 PC를 24시간 무인 서버로 세팅할 때 (3줄 완성)</h3>
+<pre><code>git clone https://github.com/kiyoubeo/solo-ledger.git C:\SoloLedger ; cd C:\SoloLedger ; uv sync
+powershell -ExecutionPolicy Bypass -File scripts/server_service.ps1 configure-power
+powershell -ExecutionPolicy Bypass -File scripts/server_service.ps1 install</code></pre>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

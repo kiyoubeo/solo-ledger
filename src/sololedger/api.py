@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse
 
 from sololedger import __version__
 from sololedger.archiver import DuplicateReceiptError
-from sololedger.config import settings
+from sololedger.config import PROJECT_ROOT, settings
 from sololedger.dashboard import (
     build_dashboard_summary,
     render_dashboard_html,
@@ -522,3 +522,13 @@ async def render_dashboard_page(
         return HTMLResponse(content=html_doc)
     finally:
         conn.close()
+
+
+@app.get("/manual", response_class=HTMLResponse)
+async def render_user_manual_page():
+    """Serve the standalone HTML5 User Manual page."""
+    manual_path = PROJECT_ROOT / "docs" / "USER_MANUAL.html"
+    if not manual_path.exists():
+        raise HTTPException(status_code=404, detail="USER_MANUAL.html not found.")
+    return HTMLResponse(content=manual_path.read_text(encoding="utf-8"))
+
