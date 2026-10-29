@@ -444,6 +444,8 @@ async def dashboard_summary_endpoint(
     year_month: Optional[str] = Query(default=None),
     year: Optional[int] = Query(default=None),
     card_last4: Optional[str] = Query(default=None),
+    start_date: Optional[str] = Query(default=None),
+    end_date: Optional[str] = Query(default=None),
     x_api_key: Optional[str] = Header(default=None),
     sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
 ):
@@ -454,7 +456,12 @@ async def dashboard_summary_endpoint(
     cursor = conn.cursor()
     try:
         return build_dashboard_summary(
-            cursor, year_month=year_month, year=year, card_last4=card_last4
+            cursor,
+            year_month=year_month,
+            year=year,
+            card_last4=card_last4,
+            start_date=start_date,
+            end_date=end_date,
         )
     finally:
         conn.close()
@@ -544,6 +551,8 @@ async def render_dashboard_page(
     year_month: Optional[str] = Query(default=None),
     year: Optional[int] = Query(default=None),
     card_last4: Optional[str] = Query(default=None),
+    start_date: Optional[str] = Query(default=None),
+    end_date: Optional[str] = Query(default=None),
 ):
     """Render the lightweight HTML5 management dashboard."""
     init_db()
@@ -551,7 +560,12 @@ async def render_dashboard_page(
     cursor = conn.cursor()
     try:
         html_doc = render_dashboard_html(
-            cursor, year_month=year_month, year=year, card_last4=card_last4
+            cursor,
+            year_month=year_month,
+            year=year,
+            card_last4=card_last4,
+            start_date=start_date,
+            end_date=end_date,
         )
         return HTMLResponse(content=html_doc)
     finally:

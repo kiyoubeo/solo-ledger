@@ -1,5 +1,6 @@
 """Lightweight Web Dashboard and Inline Ledger Management for SoloLedger."""
 
+import calendar
 import html
 import shutil
 import sqlite3
@@ -92,23 +93,41 @@ def update_transaction_classification(
     return updated
 
 
+def _normalize_date_str(val: Optional[str]) -> Optional[str]:
+    """Normalize YYYY-MM-DD or YYYYMMDD date input string."""
+    if not val:
+        return None
+    s = val.strip()
+    if not s:
+        return None
+    if len(s) == 8 and s.isdigit():
+        return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+    return s[:10]
+
+
 def build_dashboard_summary(
     cursor: sqlite3.Cursor,
     year_month: Optional[str] = None,
     year: Optional[int] = None,
     card_last4: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build aggregated dashboard metrics, per-card breakdown, pending action items, and vehicle limit."""
     now = datetime.now()
-    target_ym = (year_month or now.strftime("%Y%m")).strip().upper()
-    if target_ym == "ALL":
-        target_year = year or now.year
-        ym_prefix = "%"
-    else:
-        target_year = year or int(target_ym[:4])
-        ym_prefix = f"{target_ym[:4]}-{target_ym[4:6]}-%"
-
     target_card = (card_last4 or "ALL").strip()
+
+    cursor.execute(
+        """
+        SELECT MIN(SUBSTR(transacted_at, 1, 10)), MAX(SUBSTR(transacted_at, 1, 10))
+        FROM card_transactions
+        WHERE LENGTH(transacted_at) >= 10
+          AND reconcile_status != 'CANCELED'
+        """
+    )
+    bound_row = cursor.fetchone()
+    min_tx_date = (bound_row[0] if bound_row and bound_row[0] else None) or f"{now.year}-01-01"
+    max_tx_date = (bound_row[1] if bound_row and bound_row[1] else None) or now.strftime("%Y-%m-%d")
 
     cursor.execute(
         """
@@ -123,23 +142,77 @@ def build_dashboard_summary(
     if current_ym not in available_months:
         available_months.insert(0, current_ym)
 
-    cursor.execute(
-        """
-        SELECT t.*,
-               (
-                   SELECT r.archived_file_name
-                   FROM receipt_ocr_metadata r
-                   WHERE r.tx_id = t.tx_id
-                   ORDER BY r.receipt_id DESC
-                   LIMIT 1
-               ) AS archived_file_name
-        FROM card_transactions t
-        WHERE t.transacted_at LIKE ?
-          AND t.reconcile_status != 'CANCELED'
-        ORDER BY t.transacted_at DESC, t.tx_id DESC
-        """,
-        (ym_prefix,),
-    )
+    norm_start = _normalize_date_str(start_date)
+    norm_end = _normalize_date_str(end_date)
+
+    if norm_start is not None or norm_end is not None:
+        resolved_start = norm_start or min_tx_date
+        resolved_end = norm_end or max_tx_date
+        if resolved_start > resolved_end:
+            resolved_start, resolved_end = resolved_end, resolved_start
+        end_yr = int(resolved_end[:4]) if resolved_end[:4].isdigit() else now.year
+        target_year = year or end_yr
+        default_ym = (
+            resolved_end[:4] + resolved_end[5:7]
+            if len(resolved_end) >= 7
+            else now.strftime("%Y%m")
+        )
+        target_ym = (year_month or default_ym).strip().upper()
+        cursor.execute(
+            """
+            SELECT t.*,
+                   (
+                       SELECT r.archived_file_name
+                       FROM receipt_ocr_metadata r
+                       WHERE r.tx_id = t.tx_id
+                       ORDER BY r.receipt_id DESC
+                       LIMIT 1
+                   ) AS archived_file_name
+            FROM card_transactions t
+            WHERE SUBSTR(t.transacted_at, 1, 10) >= ?
+              AND SUBSTR(t.transacted_at, 1, 10) <= ?
+              AND t.reconcile_status != 'CANCELED'
+            ORDER BY t.transacted_at DESC, t.tx_id DESC
+            """,
+            (resolved_start, resolved_end),
+        )
+    else:
+        target_ym = (year_month or now.strftime("%Y%m")).strip().upper()
+        if target_ym == "ALL":
+            target_year = year or now.year
+            resolved_start = min_tx_date
+            resolved_end = max_tx_date
+            ym_prefix = "%"
+        else:
+            y_int = int(target_ym[:4]) if target_ym[:4].isdigit() else now.year
+            m_int = (
+                int(target_ym[4:6])
+                if len(target_ym) >= 6 and target_ym[4:6].isdigit()
+                else now.month
+            )
+            target_year = year or y_int
+            last_day = calendar.monthrange(y_int, m_int)[1]
+            resolved_start = f"{y_int:04d}-{m_int:02d}-01"
+            resolved_end = f"{y_int:04d}-{m_int:02d}-{last_day:02d}"
+            ym_prefix = f"{y_int:04d}-{m_int:02d}-%"
+
+        cursor.execute(
+            """
+            SELECT t.*,
+                   (
+                       SELECT r.archived_file_name
+                       FROM receipt_ocr_metadata r
+                       WHERE r.tx_id = t.tx_id
+                       ORDER BY r.receipt_id DESC
+                       LIMIT 1
+                   ) AS archived_file_name
+            FROM card_transactions t
+            WHERE t.transacted_at LIKE ?
+              AND t.reconcile_status != 'CANCELED'
+            ORDER BY t.transacted_at DESC, t.tx_id DESC
+            """,
+            (ym_prefix,),
+        )
     all_period_rows = [dict(r) for r in cursor.fetchall()]
 
     card_stats: Dict[str, Dict[str, Any]] = {}
@@ -211,6 +284,10 @@ def build_dashboard_summary(
         "db_path": str(settings.db_path),
         "nas_backup_dir": str(settings.nas_backup_dir),
         "year_month": target_ym,
+        "start_date": resolved_start,
+        "end_date": resolved_end,
+        "min_tx_date": min_tx_date,
+        "max_tx_date": max_tx_date,
         "card_last4": target_card,
         "available_months": available_months,
         "card_breakdown": card_breakdown,
@@ -439,21 +516,24 @@ def render_dashboard_html(
     year_month: Optional[str] = None,
     year: Optional[int] = None,
     card_last4: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
 ) -> str:
     """Render server-side HTML5 management dashboard for SoloLedger."""
     summary = build_dashboard_summary(
-        cursor, year_month=year_month, year=year, card_last4=card_last4
+        cursor,
+        year_month=year_month,
+        year=year,
+        card_last4=card_last4,
+        start_date=start_date,
+        end_date=end_date,
     )
     veh = summary["vehicle_limit"]
     gauge_pct = min(100.0, float(veh["usage_ratio_pct"]))
-
-    ym_options_html = []
-    all_selected = "selected" if summary["year_month"] == "ALL" else ""
-    ym_options_html.append(f"<option value='ALL' {all_selected}>전체 기간 (ALL)</option>")
-    for ym_opt in summary.get("available_months", []):
-        sel = "selected" if summary["year_month"] == ym_opt else ""
-        ym_options_html.append(f"<option value='{html.escape(ym_opt)}' {sel}>{html.escape(ym_opt)}</option>")
-    ym_select_html = "".join(ym_options_html)
+    s_date = html.escape(str(summary["start_date"]))
+    e_date = html.escape(str(summary["end_date"]))
+    min_d = html.escape(str(summary["min_tx_date"]))
+    max_d = html.escape(str(summary["max_tx_date"]))
 
     card_options_html = []
     c_all_sel = "selected" if summary["card_last4"] == "ALL" else ""
@@ -586,7 +666,9 @@ def render_dashboard_html(
               padding: 6px 12px; cursor: pointer; margin-left: 4px; }}
     button.secondary {{ background: #475569; }}
     button.danger {{ background: #dc2626; }}
-    input[type="text"], select {{ padding: 5px 8px; border: 1px solid #cbd5e1; border-radius: 4px; }}
+    input[type="text"], input[type="date"], select {{
+      padding: 5px 8px; border: 1px solid #cbd5e1; border-radius: 4px;
+    }}
   </style>
 </head>
 <body>
@@ -596,9 +678,14 @@ def render_dashboard_html(
         <span class="badge env">{html.escape(summary['app_env'].upper())} MODE</span>
       </h1>
       <p>조회 기간:
-         <select id="ym-filter" onchange="applyFilters()">
-           {ym_select_html}
-         </select>
+         <input type="date" id="start-date" value="{s_date}" />
+         ~
+         <input type="date" id="end-date" value="{e_date}" />
+         <button onclick="applyFilters()">기간 조회</button>
+         <button class="secondary" onclick="setQuickRange('THIS_MONTH')">이번 달</button>
+         <button class="secondary" onclick="setQuickRange('3M')">최근 3개월</button>
+         <button class="secondary" onclick="setQuickRange('THIS_YEAR')">올해 전체</button>
+         <button class="secondary" onclick="setQuickRange('ALL')">전체 기간</button>
          | 카드 선택:
          <select id="card-filter" onchange="applyFilters()">
            {card_select_html}
@@ -618,7 +705,7 @@ def render_dashboard_html(
 
   <section class="cards">
     <div class="card">
-      <h3>월 총 지출액 ({summary['total_tx_count']}건)</h3>
+      <h3>조회 기간 총 지출액 ({summary['total_tx_count']}건)</h3>
       <div class="val">{summary['total_expenditure']:,}원</div>
     </div>
     <div class="card">
@@ -676,7 +763,7 @@ def render_dashboard_html(
   </section>
 
   <section class="section">
-    <h2>귀속월 전체 법인카드 원장 ({summary['total_tx_count']}건)</h2>
+    <h2>조회 기간 법인카드 원장 ({s_date} ~ {e_date}, 총 {summary['total_tx_count']}건)</h2>
     <table>
       <thead>
         <tr>
@@ -695,16 +782,47 @@ def render_dashboard_html(
       'Content-Type': 'application/json',
       'X-API-Key': '{html.escape(settings.api_key)}'
     }};
+    const MIN_TX_DATE = '{min_d}';
+    const MAX_TX_DATE = '{max_d}';
     function applyFilters() {{
-      const ym = document.getElementById('ym-filter').value;
+      const s = document.getElementById('start-date').value;
+      const e = document.getElementById('end-date').value;
       const card = document.getElementById('card-filter').value;
-      const q = '?year_month=' + encodeURIComponent(ym) + '&card_last4=' + encodeURIComponent(card);
+      const q = '?start_date=' + encodeURIComponent(s)
+              + '&end_date=' + encodeURIComponent(e)
+              + '&card_last4=' + encodeURIComponent(card);
       window.location.href = '/dashboard' + q;
     }}
     function filterByCard(cardCode) {{
-      const ym = document.getElementById('ym-filter').value;
-      const q = '?year_month=' + encodeURIComponent(ym) + '&card_last4=' + encodeURIComponent(cardCode);
+      const s = document.getElementById('start-date').value;
+      const e = document.getElementById('end-date').value;
+      const q = '?start_date=' + encodeURIComponent(s)
+              + '&end_date=' + encodeURIComponent(e)
+              + '&card_last4=' + encodeURIComponent(cardCode);
       window.location.href = '/dashboard' + q;
+    }}
+    function setQuickRange(mode) {{
+      const now = new Date();
+      const pad = (n) => String(n).padStart(2, '0');
+      const y = now.getFullYear();
+      const m = now.getMonth() + 1;
+      const lastDay = new Date(y, m, 0).getDate();
+      let s = MIN_TX_DATE;
+      let e = MAX_TX_DATE;
+      if (mode === 'THIS_MONTH') {{
+        s = y + '-' + pad(m) + '-01';
+        e = y + '-' + pad(m) + '-' + pad(lastDay);
+      }} else if (mode === '3M') {{
+        const d3 = new Date(y, m - 3, 1);
+        s = d3.getFullYear() + '-' + pad(d3.getMonth() + 1) + '-01';
+        e = y + '-' + pad(m) + '-' + pad(lastDay);
+      }} else if (mode === 'THIS_YEAR') {{
+        s = y + '-01-01';
+        e = y + '-12-31';
+      }}
+      document.getElementById('start-date').value = s;
+      document.getElementById('end-date').value = e;
+      applyFilters();
     }}
     async function saveTxMemo(txId) {{
       const memoInput = document.getElementById('memo-' + txId);

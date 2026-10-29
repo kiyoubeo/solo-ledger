@@ -146,4 +146,24 @@ def test_import_phone_sms_api_endpoint(client):
     assert "에이치디현대오일" in card_res.text
     assert "씨유영등포신성점" not in card_res.text
 
+    # Verify start_date ~ end_date range filtering ("언제부터 ~ 언제까지")
+    range_res = client.get("/dashboard?start_date=2024-04-01&end_date=2024-04-30")
+    assert range_res.status_code == 200
+    assert "에이치디현대오일" in range_res.text
+    assert "씨유영등포신성점" not in range_res.text
+    assert 'value="2024-04-01"' in range_res.text
+    assert 'value="2024-04-30"' in range_res.text
+
+    range_sum = client.get(
+        "/api/v1/dashboard/summary?start_date=2026-07-01&end_date=2026-07-31",
+        headers={"X-API-Key": "test-secret-key"},
+    )
+    assert range_sum.status_code == 200
+    r_data = range_sum.json()
+    assert r_data["start_date"] == "2026-07-01"
+    assert r_data["end_date"] == "2026-07-31"
+    assert r_data["total_tx_count"] == 1
+    assert r_data["transactions"][0]["raw_merchant_name"] == "씨유영등포신성점"
+
+
 
