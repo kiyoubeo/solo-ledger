@@ -17,21 +17,21 @@ def test_verify_plan_traceability_passes_on_current_repo():
     assert "Phase 1" in report["completed_phases"]
     assert "Phase 2" in report["completed_phases"]
     assert "Phase 3" in report["completed_phases"]
-    assert report["next_phase"]["phase"] == "Phase 4"
+    assert "Phase 4" in report["completed_phases"]
 
 
 def test_verify_plan_detects_missing_deliverable(tmp_path):
-    # Create a fake plan claiming Phase 4 is completed when importers.py does not exist yet
+    # Create a fake plan claiming a non-existent deliverable `missing_module_xyz.py` is required in Phase 1
     real_plan = parse_development_plan()["path"]
     with open(real_plan, "r", encoding="utf-8") as f:
         text = f.read()
 
-    old_str = "`importers.py`, `exporters.py`, `vehicle_tracker.py` | 12h | 예정 |"
-    new_str = "`importers.py`, `exporters.py`, `vehicle_tracker.py` | 12h | **완료 (`PASSED`)** |"
+    old_str = "`db.py`, `sms_parser.py`"
+    new_str = "`db.py`, `missing_module_xyz.py`, `sms_parser.py`"
     tampered = text.replace(old_str, new_str)
     fake_plan_file = tmp_path / "DEVELOPMENT_PLAN.md"
     fake_plan_file.write_text(tampered, encoding="utf-8")
 
     report = verify_plan_traceability(plan_path=fake_plan_file)
     assert report["passed"] is False
-    assert any("importers.py" in err for err in report["errors"])
+    assert any("missing_module_xyz.py" in err for err in report["errors"])

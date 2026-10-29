@@ -49,6 +49,7 @@ class ReconcileItem(BaseModel):
     tax_type_code: str = "GENERAL"
     biz_status: str = "ACTIVE"
     reconcile_source: str = "HOMETAX_VERIFIED"
+    is_cancel: bool = False
 
 
 class ReconcileBatchRequest(BaseModel):
@@ -120,4 +121,27 @@ class ReceiptUploadRequest(BaseModel):
     tx_id: Optional[int] = Field(default=None, description="Optional explicit transaction ID")
     ocr_override: Optional[OcrExtractionResult] = Field(
         default=None, description="Optional pre-parsed OCR payload"
+    )
+
+
+class HometaxCsvImportRequest(BaseModel):
+    """Request payload for importing Hometax or card issuer CSV data."""
+
+    csv_content_b64: Optional[str] = Field(
+        default=None, description="Base64-encoded CSV file bytes (UTF-8 or CP949)"
+    )
+    csv_text: Optional[str] = Field(
+        default=None, description="Direct plain-text CSV content"
+    )
+
+
+class TaxPackExportRequest(BaseModel):
+    """Request payload for generating a monthly tax accountant CSV + ZIP bundle."""
+
+    year_month: str = Field(
+        ..., pattern=r"^\d{6}$", description="Target归属 year-month in YYYYMM format (e.g., 202610)"
+    )
+    force_reexport: bool = Field(
+        default=False,
+        description="Include transactions that were already exported in a previous run",
     )

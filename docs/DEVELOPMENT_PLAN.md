@@ -36,7 +36,7 @@ flowchart TD
 | **Phase 1** | `v0.1.0` | DB 스키마, 한국어 카드 SMS 파서, 세무 분류 엔진, 3단계 대사 코어, FastAPI 웹훅, 하네스 엔지니어링 | `db.py`, `sms_parser.py`, `tax_engine.py`, `reconciler.py`, `api.py`, `scripts/harness.ps1` | 8h | **완료 (`PASSED`)** |
 | **Phase 2** | `v0.2.0` | 국세청 사업자등록 상태조회 API 연동, 사업자번호 체크섬 검증, `merchants` 30일 캐시, 과세유형별 공제 자동 전환 | `nts_client.py`, `merchant_service.py` | 8h | **완료 (`PASSED`)** |
 | **Phase 3** | `v0.3.0` | `@SoloLedgerBot` 양방향 콜백/답장 처리, Vision LLM 영수증·주문내역 OCR, SHA-256 중복 방지, 증빙 파일 정규화 보관 | `telegram_bot.py`, `ocr_engine.py`, `archiver.py` | 14h | **완료 (`PASSED`)** |
-| **Phase 4** | `v0.4.0` | 홈택스·카드사 엑셀/CSV 파서, 외화 결제 확정, 업무용승용차 1,500만 원 한도 집계, 세무사 제출용 CSV+ZIP 번들 생성기 | `importers.py`, `exporters.py`, `vehicle_tracker.py` | 12h | 예정 |
+| **Phase 4** | `v0.4.0` | 홈택스·카드사 엑셀/CSV 파서, 외화 결제 확정, 업무용승용차 1,500만 원 한도 집계, 세무사 제출용 CSV+ZIP 번들 생성기 | `importers.py`, `exporters.py`, `vehicle_tracker.py` | 12h | **완료 (`PASSED`)** |
 | **Phase 5** | `v1.0.0` | 경량 웹 대시보드(미분류·소명 관리/파일 업로드), 운영 CLI, Docker Compose 배포 및 백업 자동화 | `dashboard.py`, `cli.py`, `docker-compose.yml` | 8h | 예정 |
 
 ---

@@ -1,24 +1,29 @@
-"""FastAPI application for SoloLedger SMS Webhook, NTS Cache, Vision OCR, Telegram Bot, and Reconciliation."""
+"""FastAPI application for SoloLedger SMS Webhook, NTS Cache, Vision OCR, Telegram Bot, and Tax Export."""
 
 import base64
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Any, Dict, Optional
 
-from fastapi import BackgroundTasks, Body, FastAPI, Header, HTTPException
+from fastapi import BackgroundTasks, Body, FastAPI, Header, HTTPException, Query
 
 from sololedger import __version__
 from sololedger.archiver import DuplicateReceiptError
 from sololedger.config import settings
 from sololedger.db import get_connection, init_db
+from sololedger.exporters import generate_tax_accountant_pack
+from sololedger.importers import decode_csv_bytes, import_and_reconcile_hometax_csv
 from sololedger.merchant_service import (
     apply_merchant_tax_status_to_ledger,
     get_or_verify_merchant,
 )
 from sololedger.models import (
+    HometaxCsvImportRequest,
     MerchantVerifyRequest,
     ReceiptUploadRequest,
     ReconcileBatchRequest,
     SmsWebhookPayload,
+    TaxPackExportRequest,
 )
 from sololedger.notifier import send_telegram_memo_prompt
 from sololedger.ocr_engine import process_and_link_receipt
@@ -26,6 +31,7 @@ from sololedger.reconciler import reconcile_single_item
 from sololedger.sms_parser import parse_korean_card_sms
 from sololedger.tax_engine import calculate_supply_and_vat, evaluate_tax_rules
 from sololedger.telegram_bot import handle_telegram_update
+from sololedger.vehicle_tracker import get_vehicle_expense_summary
 
 
 @asynccontextmanager
@@ -296,6 +302,78 @@ async def reconcile_transactions(
         results = [reconcile_single_item(cursor, item) for item in request.items]
         conn.commit()
         return {"status": "reconciled", "count": len(results), "results": results}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/imports/hometax-csv")
+async def import_hometax_csv_endpoint(
+    request: HometaxCsvImportRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Import Hometax or corporate card purchase CSV (UTF-8 / CP949) and run 3-stage reconciliation."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    if request.csv_content_b64:
+        try:
+            raw_bytes = base64.b64decode(request.csv_content_b64)
+            csv_text = decode_csv_bytes(raw_bytes)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid base64 CSV payload: {e}") from e
+    elif request.csv_text:
+        csv_text = request.csv_text
+    else:
+        raise HTTPException(
+            status_code=400, detail="Either csv_content_b64 or csv_text must be provided."
+        )
+
+    init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        outcome = import_and_reconcile_hometax_csv(cursor, csv_text)
+        conn.commit()
+        return outcome
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/analytics/vehicle-limit")
+async def vehicle_limit_endpoint(
+    year: int = Query(default_factory=lambda: datetime.now().year),
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Query cumulative corporate passenger car expense vs. the 15,000,000 KRW annual limit."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        return get_vehicle_expense_summary(cursor, year=year)
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/exports/tax-pack")
+async def export_tax_pack_endpoint(
+    request: TaxPackExportRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Generate tax accountant standard CSV and normalized receipt ZIP archive for YYYYMM."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        outcome = generate_tax_accountant_pack(
+            cursor,
+            year_month=request.year_month,
+            force_reexport=request.force_reexport,
+        )
+        conn.commit()
+        return outcome
     finally:
         conn.close()
 
