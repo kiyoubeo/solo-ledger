@@ -21,7 +21,9 @@ _AD_EXCLUSION_KEYWORDS = (
     "대출",
     "한도",
     "결제일 안내",
-    "결제금액 안내",
+    "결제금액",
+    "출금완료",
+    "연회비포함",
     "카드대금",
     "명세서",
     "주문취소 안내",
@@ -93,7 +95,7 @@ def fetch_card_sms_from_adb(
 
             if any(ad in body for ad in _AD_EXCLUSION_KEYWORDS):
                 continue
-            if not re.search(r"\d{2}/\d{2}", body):
+            if not re.search(r"(?:\d{2}/\d{2}\s+\d{2}:\d{2}|부분취소|후불하이패스)", body):
                 continue
             if not re.search(r"(?:[\d,]+\s*원|KRW\s*[\d,]+)", body, re.IGNORECASE):
                 continue

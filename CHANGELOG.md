@@ -21,3 +21,4 @@
 | 2026-10-29 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, sql/schema.sql, src/sololedger/api.py (+5 files)` | 갤럭시 S26+ 실기기 USB ADB 카드 문자 추출기(phone_adb.py) 및 7개 카드사 실제 문자 파싱 고도화 | `PASSED` |
 | 2026-10-29 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/archiver.py (+5 files)` | 카드별 전표·영수증 분류 현황 대시보드, 카드별 필터링 및 by_card/ 보관 폴더 자동 분류 구현 | `PASSED` |
 | 2026-10-29 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/dashboard.py, src/sololedger/phone_adb.py (+2 files)` | 갤럭시 RCS(채팅+ content://im/chat) 오픈리치카드 메시지 통합 추출 및 2026년 전 기간 연속 조회 지원 | `PASSED` |
+| 2026-10-29 | `fix` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/phone_adb.py` | 월별 카드대금 출금완료 안내 필터링 정교화 | `PASSED` |
