@@ -2,10 +2,11 @@
 
 import base64
 import json
+import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -21,9 +22,46 @@ from sololedger.merchant_service import (
     apply_merchant_tax_status_to_ledger,
     get_or_verify_merchant,
 )
-from sololedger.models import OcrExtractionResult, ReconcileItem
+from sololedger.models import OcrExtractionResult, OcrLineItem, ReconcileItem
 from sololedger.nts_client import validate_biz_reg_no_checksum
 from sololedger.reconciler import reconcile_single_item
+from sololedger.tax_engine import calculate_supply_and_vat
+from sololedger.telegram_bot import _detect_memo_account_override
+
+
+def summarize_line_items(line_items: List[OcrLineItem]) -> Optional[str]:
+    """Build concise Korean accounting item summary (e.g., '모니터암 외 2건')."""
+    if not line_items:
+        return None
+    first_item = (line_items[0].item or "").strip()
+    if not first_item:
+        return None
+    extra_count = len(line_items) - 1
+    if extra_count > 0:
+        return f"{first_item} 외 {extra_count}건"
+    return first_item
+
+
+def sanitize_ocr_identifiers(
+    raw_biz_reg_no: Optional[str], raw_approval_no: Optional[str]
+) -> Tuple[Optional[str], Optional[str]]:
+    """Filter out phone numbers or long e-commerce order IDs misidentified by OCR."""
+    clean_biz_no: Optional[str] = None
+    if raw_biz_reg_no:
+        digits = re.sub(r"\D", "", raw_biz_reg_no)
+        # Reject 10-digit strings starting with Korean phone prefixes (02, 010, 031~064, 15xx, 16xx, 18xx)
+        is_phone_like = digits.startswith(("02", "010", "15", "16", "18"))
+        if len(digits) == 10 and not is_phone_like:
+            clean_biz_no = digits
+
+    clean_approval_no: Optional[str] = None
+    if raw_approval_no:
+        candidate = re.sub(r"[^A-Za-z0-9]", "", raw_approval_no.strip())
+        # Standard Korean card approval numbers are 6~12 alphanumeric characters (usually 8 digits)
+        if 6 <= len(candidate) <= 12:
+            clean_approval_no = candidate
+
+    return clean_biz_no, clean_approval_no
 
 
 async def parse_receipt_image_with_vision(
@@ -119,21 +157,20 @@ async def process_and_link_receipt(
         file_bytes, transport=vision_transport
     )
 
-    clean_biz_no = None
+    clean_biz_no, clean_approval_no = sanitize_ocr_identifiers(
+        ocr_res.biz_reg_no, ocr_res.approval_no
+    )
     nts_status = None
-    if ocr_res.biz_reg_no:
-        digits = ocr_res.biz_reg_no.replace("-", "").strip()
-        if len(digits) == 10 and digits.isdigit():
-            clean_biz_no = digits
-            nts_status = await get_or_verify_merchant(
-                cursor,
-                biz_reg_no=clean_biz_no,
-                merchant_name=ocr_res.merchant_name,
-                transport=nts_transport,
-            )
+    if clean_biz_no:
+        nts_status = await get_or_verify_merchant(
+            cursor,
+            biz_reg_no=clean_biz_no,
+            merchant_name=ocr_res.merchant_name,
+            transport=nts_transport,
+        )
 
     amount_mismatch = False
-    primary_item_name = ocr_res.line_items[0].item if ocr_res.line_items else None
+    primary_item_name = summarize_line_items(ocr_res.line_items)
 
     if explicit_tx_id is not None:
         cursor.execute("SELECT * FROM card_transactions WHERE tx_id = ?", (explicit_tx_id,))
@@ -157,12 +194,12 @@ async def process_and_link_receipt(
                 updated_at = CURRENT_TIMESTAMP
             WHERE tx_id = ?
             """,
-            (clean_biz_no, ocr_res.approval_no, primary_item_name, matched_tx_id),
+            (clean_biz_no, clean_approval_no, primary_item_name, matched_tx_id),
         )
     else:
         rec_item = ReconcileItem(
             card_last4="0000",
-            approval_no=ocr_res.approval_no,
+            approval_no=clean_approval_no,
             transacted_at=ocr_res.transacted_at,
             merchant_name=ocr_res.merchant_name,
             biz_reg_no=clean_biz_no,
@@ -184,8 +221,104 @@ async def process_and_link_receipt(
                 (primary_item_name, matched_tx_id),
             )
 
+    # Apply item-based account inference for PG/unclassified rows if line items indicate specific account
+    if primary_item_name:
+        cursor.execute("SELECT * FROM card_transactions WHERE tx_id = ?", (matched_tx_id,))
+        curr_tx = cursor.fetchone()
+        if curr_tx and (
+            curr_tx["account_code"] in ("999", "830")
+            or curr_tx["vat_deduction_type"] in ("PENDING", "PENDING_CHECK")
+        ):
+            inferred = _detect_memo_account_override(primary_item_name)
+            if inferred:
+                acc_code, acc_name, force_non_ded, reason = inferred
+                # For PG transactions already classified as 830 (consumables), only upgrade to
+                # 212 (equipment) when total_amount >= 300,000 KRW or '비품' is explicitly stated.
+                should_apply = True
+                if (
+                    curr_tx["account_code"] == "830"
+                    and acc_code == "212"
+                    and int(curr_tx["total_amount"]) < 300_000
+                    and "비품" not in primary_item_name
+                ):
+                    should_apply = False
+
+                if should_apply:
+                    new_ded = "NON_DEDUCTIBLE" if force_non_ded else "DEDUCTIBLE"
+                    inf_supply, inf_vat = calculate_supply_and_vat(
+                        int(curr_tx["total_amount"]), new_ded
+                    )
+                    cursor.execute(
+                        """
+                        UPDATE card_transactions
+                        SET account_code = ?,
+                            account_name = ?,
+                            vat_deduction_type = ?,
+                            non_deduct_reason = ?,
+                            supply_value = ?,
+                            vat_amount = ?
+                        WHERE tx_id = ?
+                        """,
+                        (
+                            acc_code,
+                            acc_name,
+                            new_ded,
+                            reason,
+                            inf_supply,
+                            inf_vat,
+                            matched_tx_id,
+                        ),
+                    )
+            elif curr_tx["vat_deduction_type"] in ("PENDING", "PENDING_CHECK"):
+                cursor.execute(
+                    """
+                    UPDATE card_transactions
+                    SET vat_deduction_type = 'DEDUCTIBLE'
+                    WHERE tx_id = ?
+                    """,
+                    (matched_tx_id,),
+                )
+
     if nts_status:
         apply_merchant_tax_status_to_ledger(cursor, nts_status)
+
+    # Respect explicit supply_value and vat_amount from receipt (e.g. mixed tax/exempt or duty-free book)
+    if (
+        ocr_res.supply_value is not None
+        and ocr_res.vat_amount is not None
+        and ocr_res.total_amount > 0
+        and not amount_mismatch
+        and (ocr_res.supply_value + ocr_res.vat_amount == ocr_res.total_amount)
+    ):
+        cursor.execute("SELECT * FROM card_transactions WHERE tx_id = ?", (matched_tx_id,))
+        tx_check = cursor.fetchone()
+        if tx_check:
+            if ocr_res.vat_amount == 0:
+                new_vat_type = (
+                    "EXEMPT"
+                    if tx_check["vat_deduction_type"] in ("DEDUCTIBLE", "PENDING_CHECK")
+                    else tx_check["vat_deduction_type"]
+                )
+                cursor.execute(
+                    """
+                    UPDATE card_transactions
+                    SET supply_value = ?,
+                        vat_amount = 0,
+                        vat_deduction_type = ?
+                    WHERE tx_id = ?
+                    """,
+                    (ocr_res.supply_value, new_vat_type, matched_tx_id),
+                )
+            elif tx_check["vat_deduction_type"] in ("DEDUCTIBLE", "PENDING_CHECK"):
+                cursor.execute(
+                    """
+                    UPDATE card_transactions
+                    SET supply_value = ?,
+                        vat_amount = ?
+                    WHERE tx_id = ?
+                    """,
+                    (ocr_res.supply_value, ocr_res.vat_amount, matched_tx_id),
+                )
 
     cursor.execute("SELECT * FROM card_transactions WHERE tx_id = ?", (matched_tx_id,))
     final_tx = cursor.fetchone()

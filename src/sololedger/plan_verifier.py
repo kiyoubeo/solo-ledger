@@ -17,7 +17,7 @@ PHASE_TEST_MAPPING = {
         "tests/test_api_webhook.py",
     ],
     "Phase 2": ["tests/test_nts_client.py"],
-    "Phase 3": ["tests/test_ocr_and_bot.py"],
+    "Phase 3": ["tests/test_ocr_and_bot.py", "tests/test_receipt_dataset.py"],
     "Phase 4": ["tests/test_import_export.py"],
     "Phase 5": ["tests/test_e2e_lifecycle.py"],
 }

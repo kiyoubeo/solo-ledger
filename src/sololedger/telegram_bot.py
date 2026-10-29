@@ -11,7 +11,10 @@ _MEMO_ACCOUNT_KEYWORDS = [
     (re.compile(r"(도서|책|인쇄|출판)"), ("826", "도서인쇄비", False, None)),
     (re.compile(r"(소프트웨어|구독|클라우드|서버|수수료)"), ("831", "지급수수료", False, None)),
     (re.compile(r"(미팅|접대|거래처|고객사|식사대접)"), ("813", "기업업무추진비", True, "ENTERTAINMENT")),
-    (re.compile(r"(소모품|사무용품|케이블|마우스패드)"), ("830", "소모품비", False, None)),
+    (
+        re.compile(r"(소모품|사무용품|복사용지|탕비실|원두|케이블|마우스|멀티탭|스테이플러)"),
+        ("830", "소모품비", False, None),
+    ),
 ]
 
 

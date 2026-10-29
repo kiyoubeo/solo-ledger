@@ -155,7 +155,15 @@ def reconcile_single_item(cursor: sqlite3.Cursor, item: ReconcileItem) -> Dict[s
                 ),
             )
         else:
-            supply_val, vat_val = calculate_supply_and_vat(item.total_amount, "DEDUCTIBLE")
+            cursor.execute(
+                "SELECT vat_deduction_type FROM card_transactions WHERE tx_id = ?",
+                (matched_tx_id,),
+            )
+            existing_tx = cursor.fetchone()
+            existing_vat_type = (
+                existing_tx["vat_deduction_type"] if existing_tx else "DEDUCTIBLE"
+            )
+            supply_val, vat_val = calculate_supply_and_vat(item.total_amount, existing_vat_type)
             cursor.execute(
                 """
                 UPDATE card_transactions

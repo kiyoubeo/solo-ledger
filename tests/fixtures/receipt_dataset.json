@@ -1,0 +1,258 @@
+[
+  {
+    "case_id": "CASE_01_COUPANG_MULTI_ITEM",
+    "description": "쿠팡 온라인 다품목 주문서 — '외 N건' 요약 및 PG 가맹점 PENDING_CHECK -> DEDUCTIBLE 확정",
+    "pre_sms": {
+      "raw_message": "[Web발신] 신한법인(9876) 승인 38,500원 일시불 10/20 10:15 쿠팡(주) 승인번호:10002001",
+      "received_at": "2026-10-20T10:15:05"
+    },
+    "ocr_payload": {
+      "biz_reg_no": "120-88-00767",
+      "merchant_name": "쿠팡(주)",
+      "approval_no": "10002001",
+      "transacted_at": "2026-10-20 10:15:00",
+      "total_amount": 38500,
+      "supply_value": 35000,
+      "vat_amount": 3500,
+      "line_items": [
+        {"item": "사무용복사용지", "qty": 2, "price": 22000},
+        {"item": "스테이플러", "qty": 1, "price": 9500},
+        {"item": "바인더클립", "qty": 1, "price": 7000}
+      ],
+      "confidence": 0.98
+    },
+    "expected": {
+      "match_stage": "STAGE_1_APPROVAL_NO",
+      "account_code": "830",
+      "account_name": "소모품비",
+      "vat_deduction_type": "DEDUCTIBLE",
+      "supply_value": 35000,
+      "vat_amount": 3500,
+      "counterparty_info": "사무용복사용지 외 2건",
+      "archived_file_name": "20261020_쿠팡_소모품비_사무용복사용지외2건_38500.jpg",
+      "amount_mismatch": false
+    }
+  },
+  {
+    "case_id": "CASE_02_NAVER_EQUIPMENT_MONITOR",
+    "description": "네이버페이 모니터 구매 — 온라인 PG 초기 소모품비(830)에서 품목 기반 비품(212) 자동 승격",
+    "pre_sms": {
+      "raw_message": "[Web발신] 현대카드(1234) 승인 330,000원 일시불 10/20 11:20 네이버페이 승인번호:10002002",
+      "received_at": "2026-10-20T11:20:03"
+    },
+    "ocr_payload": {
+      "biz_reg_no": "220-81-62517",
+      "merchant_name": "네이버파이낸셜(주)",
+      "approval_no": "10002002",
+      "transacted_at": "2026-10-20 11:20:00",
+      "total_amount": 330000,
+      "supply_value": 300000,
+      "vat_amount": 30000,
+      "line_items": [
+        {"item": "LG 27인치 4K 모니터", "qty": 1, "price": 330000}
+      ],
+      "confidence": 0.99
+    },
+    "expected": {
+      "match_stage": "STAGE_1_APPROVAL_NO",
+      "account_code": "212",
+      "account_name": "비품",
+      "vat_deduction_type": "DEDUCTIBLE",
+      "supply_value": 300000,
+      "vat_amount": 30000,
+      "counterparty_info": "LG 27인치 4K 모니터",
+      "archived_file_name": "20261020_네이버페이_비품_LG27인치4K모니터_330000.jpg",
+      "amount_mismatch": false
+    }
+  },
+  {
+    "case_id": "CASE_03_KYOBO_EXEMPT_BOOK",
+    "description": "교보문고 면세 도서 영수증 — 부가세 0원(vat_amount=0) 감지 시 EXEMPT 및 도서인쇄비(826) 자동 분류",
+    "pre_sms": null,
+    "ocr_payload": {
+      "biz_reg_no": "102-81-11670",
+      "merchant_name": "교보문고광화문점",
+      "approval_no": "10002003",
+      "transacted_at": "2026-10-21 14:00:00",
+      "total_amount": 32000,
+      "supply_value": 32000,
+      "vat_amount": 0,
+      "line_items": [
+        {"item": "클린아키텍처 기술도서", "qty": 1, "price": 32000}
+      ],
+      "confidence": 0.97
+    },
+    "expected": {
+      "match_stage": "STAGE_3_FORCE_INSERT",
+      "account_code": "826",
+      "account_name": "도서인쇄비",
+      "vat_deduction_type": "EXEMPT",
+      "supply_value": 32000,
+      "vat_amount": 0,
+      "counterparty_info": "클린아키텍처 기술도서",
+      "archived_file_name": "20261021_교보문고광화문점_도서인쇄비_클린아키텍처기술도서_32000.jpg",
+      "amount_mismatch": false
+    }
+  },
+  {
+    "case_id": "CASE_04_EMART_MIXED_TAX_EXEMPT",
+    "description": "대형마트 과세(커피원두 33,000원) + 면세(과일 22,000원) 복합과세 영수증 — 부가세 과다공제 방지(5,000원이 아닌 3,000원 정확 반영)",
+    "pre_sms": {
+      "raw_message": "[Web발신] KB국민카드(5678) 승인 55,000원 일시불 10/21 16:30 이마트역삼점 승인번호:10002004",
+      "received_at": "2026-10-21T16:30:10"
+    },
+    "ocr_payload": {
+      "biz_reg_no": "206-86-50913",
+      "merchant_name": "이마트역삼점",
+      "approval_no": "10002004",
+      "transacted_at": "2026-10-21 16:30:00",
+      "total_amount": 55000,
+      "supply_value": 52000,
+      "vat_amount": 3000,
+      "line_items": [
+        {"item": "탕비실 커피원두", "qty": 1, "price": 33000},
+        {"item": "국산 사과세트(면세)", "qty": 1, "price": 22000}
+      ],
+      "confidence": 0.96
+    },
+    "expected": {
+      "match_stage": "STAGE_1_APPROVAL_NO",
+      "account_code": "830",
+      "account_name": "소모품비",
+      "vat_deduction_type": "DEDUCTIBLE",
+      "supply_value": 52000,
+      "vat_amount": 3000,
+      "counterparty_info": "탕비실 커피원두 외 1건",
+      "archived_file_name": "20261021_이마트역삼점_소모품비_탕비실커피원두외1건_55000.jpg",
+      "amount_mismatch": false
+    }
+  },
+  {
+    "case_id": "CASE_05_NOISY_PHONE_AND_ORDER_ID",
+    "description": "대표전화(02-1577-7011)를 사업자번호로, 쇼핑몰 주문번호(ORD-20261022-9988776655)를 승인번호로 오인식한 노이즈 방어 및 2순위 시간창 매칭",
+    "pre_sms": {
+      "raw_message": "[Web발신] 삼성카드(4321) 승인 27,500원 일시불 10/22 09:40 스타벅스코리아",
+      "received_at": "2026-10-22T09:40:00"
+    },
+    "ocr_payload": {
+      "biz_reg_no": "02-1577-7011",
+      "merchant_name": "스타벅스코리아",
+      "approval_no": "ORD-20261022-9988776655",
+      "transacted_at": "2026-10-22 09:42:00",
+      "total_amount": 27500,
+      "supply_value": 25000,
+      "vat_amount": 2500,
+      "line_items": [
+        {"item": "아메리카노", "qty": 5, "price": 22500},
+        {"item": "치즈케이크", "qty": 1, "price": 5000}
+      ],
+      "confidence": 0.91
+    },
+    "expected": {
+      "match_stage": "STAGE_2_AMOUNT_TIME_WINDOW",
+      "account_code": "811",
+      "account_name": "복리후생비",
+      "vat_deduction_type": "DEDUCTIBLE",
+      "supply_value": 25000,
+      "vat_amount": 2500,
+      "counterparty_info": "아메리카노 외 1건",
+      "archived_file_name": "20261022_스타벅스코리아_복리후생비_아메리카노외1건_27500.jpg",
+      "amount_mismatch": false,
+      "ocr_biz_reg_no": null
+    }
+  },
+  {
+    "case_id": "CASE_06_COUPON_DISCOUNT_MISMATCH",
+    "description": "주문총액(50,000원)과 쿠폰할인 후 카드 실결제액(45,000원) 불일치 — amount_mismatch 경보 플래그 감지 및 실결제액 원장 보존",
+    "pre_sms": {
+      "raw_message": "[Web발신] 신한법인(9876) 승인 45,000원 일시불 10/22 13:10 쿠팡(주) 승인번호:10002006",
+      "received_at": "2026-10-22T13:10:00"
+    },
+    "use_explicit_tx_id": true,
+    "ocr_payload": {
+      "biz_reg_no": "120-88-00767",
+      "merchant_name": "쿠팡(주)",
+      "approval_no": "10002006",
+      "transacted_at": "2026-10-22 13:10:00",
+      "total_amount": 50000,
+      "supply_value": 45455,
+      "vat_amount": 4545,
+      "line_items": [
+        {"item": "무선마우스", "qty": 1, "price": 50000}
+      ],
+      "confidence": 0.95
+    },
+    "expected": {
+      "match_stage": "EXPLICIT_TX_ID",
+      "account_code": "830",
+      "account_name": "소모품비",
+      "vat_deduction_type": "DEDUCTIBLE",
+      "supply_value": 40909,
+      "vat_amount": 4091,
+      "counterparty_info": "무선마우스",
+      "archived_file_name": "20261022_쿠팡_소모품비_무선마우스_45000.jpg",
+      "amount_mismatch": true
+    }
+  },
+  {
+    "case_id": "CASE_07_VEHICLE_FUEL_RECEIPT",
+    "description": "업무용승용차 주유 영수증 — 일반과세 가맹점이더라도 차량유지비(822) 불공제(PASSENGER_CAR) 및 부가세 0원 철벽 유지",
+    "pre_sms": {
+      "raw_message": "[Web발신] 현대카드(1234) 승인 88,000원 일시불 10/23 08:30 GS칼텍스주유소 승인번호:10002007",
+      "received_at": "2026-10-23T08:30:00"
+    },
+    "ocr_payload": {
+      "biz_reg_no": "116-81-18745",
+      "merchant_name": "GS칼텍스주유소",
+      "approval_no": "10002007",
+      "transacted_at": "2026-10-23 08:30:00",
+      "total_amount": 88000,
+      "supply_value": 80000,
+      "vat_amount": 8000,
+      "line_items": [
+        {"item": "무연휘발유 50L", "qty": 1, "price": 88000}
+      ],
+      "confidence": 0.99
+    },
+    "expected": {
+      "match_stage": "STAGE_1_APPROVAL_NO",
+      "account_code": "822",
+      "account_name": "차량유지비",
+      "vat_deduction_type": "NON_DEDUCTIBLE",
+      "supply_value": 80000,
+      "vat_amount": 8000,
+      "counterparty_info": "무연휘발유 50L",
+      "archived_file_name": "20261023_GS칼텍스주유소_차량유지비_무연휘발유50L_88000.jpg",
+      "amount_mismatch": false
+    }
+  },
+  {
+    "case_id": "CASE_08_CLIENT_MEETING_DINNER",
+    "description": "거래처 접대 식사 영수증 — 품목/메모에 '거래처 미팅' 포함 시 기업업무추진비(813) 및 매입세액 불공제(ENTERTAINMENT) 자동 전환",
+    "pre_sms": null,
+    "ocr_payload": {
+      "biz_reg_no": "211-87-54321",
+      "merchant_name": "한우명가역삼점",
+      "approval_no": "10002008",
+      "transacted_at": "2026-10-23 19:30:00",
+      "total_amount": 165000,
+      "supply_value": 150000,
+      "vat_amount": 15000,
+      "line_items": [
+        {"item": "거래처 미팅 한우세트", "qty": 3, "price": 165000}
+      ],
+      "confidence": 0.96
+    },
+    "expected": {
+      "match_stage": "STAGE_3_FORCE_INSERT",
+      "account_code": "813",
+      "account_name": "기업업무추진비",
+      "vat_deduction_type": "NON_DEDUCTIBLE",
+      "supply_value": 150000,
+      "vat_amount": 15000,
+      "counterparty_info": "거래처 미팅 한우세트",
+      "archived_file_name": "20261023_한우명가역삼점_기업업무추진비_거래처미팅한우세트_165000.jpg",
+      "amount_mismatch": false
+    }
+  }
+]
