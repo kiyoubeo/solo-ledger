@@ -98,9 +98,26 @@ def build_dashboard_summary(
 ) -> Dict[str, Any]:
     """Build aggregated dashboard metrics, pending action items, and vehicle limit gauge."""
     now = datetime.now()
-    target_ym = year_month or now.strftime("%Y%m")
-    target_year = year or int(target_ym[:4])
-    ym_prefix = f"{target_ym[:4]}-{target_ym[4:6]}-%"
+    target_ym = (year_month or now.strftime("%Y%m")).strip().upper()
+    if target_ym == "ALL":
+        target_year = year or now.year
+        ym_prefix = "%"
+    else:
+        target_year = year or int(target_ym[:4])
+        ym_prefix = f"{target_ym[:4]}-{target_ym[4:6]}-%"
+
+    cursor.execute(
+        """
+        SELECT DISTINCT SUBSTR(transacted_at, 1, 4) || SUBSTR(transacted_at, 6, 2) AS ym
+        FROM card_transactions
+        WHERE LENGTH(transacted_at) >= 7
+        ORDER BY ym DESC
+        """
+    )
+    available_months = [r[0] for r in cursor.fetchall() if r[0]]
+    current_ym = now.strftime("%Y%m")
+    if current_ym not in available_months:
+        available_months.insert(0, current_ym)
 
     cursor.execute(
         """
@@ -148,6 +165,7 @@ def build_dashboard_summary(
         "db_path": str(settings.db_path),
         "nas_backup_dir": str(settings.nas_backup_dir),
         "year_month": target_ym,
+        "available_months": available_months,
         "year": target_year,
         "total_tx_count": len(rows),
         "total_expenditure": total_expenditure,
@@ -378,20 +396,33 @@ def render_dashboard_html(
     veh = summary["vehicle_limit"]
     gauge_pct = min(100.0, float(veh["usage_ratio_pct"]))
 
+    ym_options_html = []
+    all_selected = "selected" if summary["year_month"] == "ALL" else ""
+    ym_options_html.append(f"<option value='ALL' {all_selected}>전체 기간 (ALL)</option>")
+    for ym_opt in summary.get("available_months", []):
+        sel = "selected" if summary["year_month"] == ym_opt else ""
+        ym_options_html.append(f"<option value='{html.escape(ym_opt)}' {sel}>{html.escape(ym_opt)}</option>")
+    ym_select_html = "".join(ym_options_html)
+
     pending_rows_html = []
     for item in summary["pending_transactions"]:
         tx_id = item["tx_id"]
         merchant = html.escape(str(item["raw_merchant_name"]))
         amt_str = f"{int(item['total_amount']):,}원"
-        acc_name = html.escape(f"{item['account_code']} {item['account_name']}")
+        cur_code = str(item["account_code"])
         memo_val = html.escape(str(item.get("counterparty_info") or ""))
+        acc_opts = []
+        for code_k, code_v in ACCOUNT_CODE_CATALOG.items():
+            sel = "selected" if code_k == cur_code else ""
+            acc_opts.append(f"<option value='{code_k}' {sel}>{code_k} {html.escape(code_v)}</option>")
+        acc_select = f"<select id='acc-{tx_id}'>{''.join(acc_opts)}</select>"
         pending_rows_html.append(
             f"<tr data-tx-id='{tx_id}'>"
             f"<td>#{tx_id}</td>"
             f"<td>{html.escape(str(item['transacted_at']))}</td>"
             f"<td><strong>{merchant}</strong></td>"
             f"<td class='num'>{amt_str}</td>"
-            f"<td><span class='badge warn'>{acc_name}</span></td>"
+            f"<td>{acc_select}</td>"
             f"<td><input type='text' id='memo-{tx_id}' value='{memo_val}' "
             f"placeholder='품목 또는 참석자 입력' /></td>"
             f"<td><button onclick='saveTxMemo({tx_id})'>저장</button></td>"
@@ -465,7 +496,7 @@ def render_dashboard_html(
               padding: 6px 12px; cursor: pointer; margin-left: 4px; }}
     button.secondary {{ background: #475569; }}
     button.danger {{ background: #dc2626; }}
-    input[type="text"] {{ padding: 5px 8px; border: 1px solid #cbd5e1; border-radius: 4px; }}
+    input[type="text"], select {{ padding: 5px 8px; border: 1px solid #cbd5e1; border-radius: 4px; }}
   </style>
 </head>
 <body>
@@ -474,11 +505,16 @@ def render_dashboard_html(
       <h1>SoloLedger 경비·세무증빙 대시보드 (v{__version__})
         <span class="badge env">{html.escape(summary['app_env'].upper())} MODE</span>
       </h1>
-      <p>귀속 연월: <strong>{summary['year_month']}</strong> | 귀속 연도: <strong>{summary['year']}</strong>
+      <p>조회 기간:
+         <select onchange="window.location.href='/dashboard?year_month=' + this.value">
+           {ym_select_html}
+         </select>
+         | 귀속 연도: <strong>{summary['year']}</strong>
          | DB: <code>{html.escape(Path(summary['db_path']).name)}</code></p>
     </div>
     <div>
       <button class="secondary" onclick="window.open('/manual', '_blank')">사용 매뉴얼(HTML)</button>
+      <button onclick="importPhoneSms()">USB 휴대폰 문자 가져오기</button>
       <button class="secondary" onclick="seedDemoData()">샘플 데이터 생성</button>
       <button class="danger" onclick="resetTestLedger()">테스트 DB 초기화</button>
       <button onclick="backupToNas()">NAS(Z:\\) 백업 동기화</button>
@@ -551,13 +587,26 @@ def render_dashboard_html(
     }};
     async function saveTxMemo(txId) {{
       const memoInput = document.getElementById('memo-' + txId);
+      const accSelect = document.getElementById('acc-' + txId);
       if (!memoInput) return;
+      const bodyObj = {{ counterparty_info: memoInput.value }};
+      if (accSelect && accSelect.value) {{
+        bodyObj.account_code = accSelect.value;
+      }}
       await fetch('/api/v1/transactions/' + txId, {{
         method: 'PATCH',
         headers: API_HEADERS,
-        body: JSON.stringify({{ counterparty_info: memoInput.value }})
+        body: JSON.stringify(bodyObj)
       }});
       window.location.reload();
+    }}
+    async function importPhoneSms() {{
+      await fetch('/api/v1/system/import-phone-sms', {{
+        method: 'POST',
+        headers: API_HEADERS,
+        body: JSON.stringify({{ limit: 30 }})
+      }});
+      window.location.href = '/dashboard?year_month=ALL';
     }}
     async function exportTaxPack(yearMonth) {{
       await fetch('/api/v1/exports/tax-pack', {{

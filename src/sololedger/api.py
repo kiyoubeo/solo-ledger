@@ -38,6 +38,7 @@ from sololedger.models import (
 from sololedger.nas_sync import sync_to_nas
 from sololedger.notifier import send_telegram_memo_prompt
 from sololedger.ocr_engine import process_and_link_receipt
+from sololedger.phone_adb import import_phone_sms_to_ledger
 from sololedger.reconciler import reconcile_single_item
 from sololedger.sms_parser import parse_korean_card_sms
 from sololedger.tax_engine import calculate_supply_and_vat, evaluate_tax_rules
@@ -502,6 +503,33 @@ async def reset_test_endpoint(
     cursor = conn.cursor()
     try:
         outcome = reset_test_ledger(cursor)
+        conn.commit()
+        return outcome
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/system/import-phone-sms")
+async def import_phone_sms_endpoint(
+    payload: Dict[str, Any] = Body(default_factory=dict),
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Fetch card SMS messages from connected USB Android phone via ADB and import into ledger."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        limit = int(payload.get("limit", 30)) if isinstance(payload, dict) else 30
+        serial = payload.get("device_serial") if isinstance(payload, dict) else None
+        raw_adb = payload.get("raw_adb_output") if isinstance(payload, dict) else None
+        outcome = import_phone_sms_to_ledger(
+            cursor,
+            limit=limit,
+            device_serial=serial,
+            raw_adb_output=raw_adb,
+        )
         conn.commit()
         return outcome
     finally:

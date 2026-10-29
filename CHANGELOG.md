@@ -18,3 +18,4 @@
 | 2026-10-29 | `feat` | `.env.example, .gitignore, logs/last_verification.json, logs/verification_history.jsonl (+5 files)` | 테스트 전용 샌드박스 환경(.env test 모드, sololeger_test.db, SoloLedger_Test NAS 분리) 및 샘플 시드·초기화 기능 추가 | `PASSED` |
 | 2026-10-29 | `docs` | `README.md, logs/last_verification.json, logs/verification_history.jsonl, tests/test_nas_sync.py (+1 files)` | SoloLedger(v1.0.0) 사용자 사용 매뉴얼 가이드(docs/USER_MANUAL.md) 작성 및 테스트 검증 반영 | `PASSED` |
 | 2026-10-29 | `docs` | `README.md, logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py (+3 files)` | HTML 사용자 매뉴얼(docs/USER_MANUAL.html) 및 웹 대시보드 매뉴얼 뷰어(/manual) 추가 | `PASSED` |
+| 2026-10-29 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, sql/schema.sql, src/sololedger/api.py (+5 files)` | 갤럭시 S26+ 실기기 USB ADB 카드 문자 추출기(phone_adb.py) 및 7개 카드사 실제 문자 파싱 고도화 | `PASSED` |

@@ -77,14 +77,21 @@ CREATE TABLE IF NOT EXISTS tax_classification_rules (
 );
 
 -- Initial Seed Data for 1-Person Corporation Tax Rules
+DELETE FROM tax_classification_rules
+WHERE priority IN (10, 20, 40)
+  AND match_pattern IN (
+    '(쿠팡|네이버페이|알리익스프레스|이니시스|토스페이먼츠|카카오페이)',
+    '(주유소|에너지|스피드메이트|오토큐|하이패스|주차)',
+    '(컴포즈|매머드|브루다|스타벅스|맥도날드|롯데리아|맘스터치|샐러디)'
+  );
 INSERT OR IGNORE INTO tax_classification_rules
 (priority, match_field, match_pattern, target_account_code, target_account_name, force_non_deductible, non_deduct_reason, set_vehicle_flag, require_memo_prompt)
 VALUES
 -- Rule 1: E-commerce & PG providers require item specification
-(10, 'MERCHANT_NAME', '(쿠팡|네이버페이|알리익스프레스|이니시스|토스페이먼츠|카카오페이)', '830', '소모품비', 0, NULL, 0, 1),
+(10, 'MERCHANT_NAME', '(쿠팡|네이버페이|알리익스프레스|이니시스|토스페이먼츠|카카오페이|PAYCO|페이코)', '830', '소모품비', 0, NULL, 0, 1),
 -- Rule 2: Gas stations and auto maintenance -> Vehicle Expense + Non-deductible VAT (Passenger car)
-(20, 'MERCHANT_NAME', '(주유소|에너지|스피드메이트|오토큐|하이패스|주차)', '822', '차량유지비', 1, 'PASSENGER_CAR', 1, 0),
+(20, 'MERCHANT_NAME', '(주유소|에너지|오일|석유|칼텍스|스피드메이트|오토큐|하이패스|주차)', '822', '차량유지비', 1, 'PASSENGER_CAR', 1, 0),
 -- Rule 3: SaaS, AI subscriptions, Cloud servers -> Service Fees
 (30, 'MERCHANT_NAME', '(GITHUB|OPENAI|GOOGLE|AWS|클라우드)', '831', '지급수수료', 0, NULL, 0, 0),
--- Rule 4: Cafes and Restaurants -> Prompt user to choose between Welfare vs. Business Promotion
-(40, 'MERCHANT_NAME', '(컴포즈|매머드|브루다|스타벅스|맥도날드|롯데리아|맘스터치|샐러디)', '811', '복리후생비', 0, NULL, 0, 1);
+-- Rule 4: Cafes, Restaurants, Convenience stores -> Prompt user to choose between Welfare vs. Business Promotion
+(40, 'MERCHANT_NAME', '(컴포즈|매머드|브루다|스타벅스|맥도날드|롯데리아|맘스터치|샐러디|카페|식당|푸드|통닭|수산|씨유|GS25|코리아세븐)', '811', '복리후생비', 0, NULL, 0, 1);

@@ -18,6 +18,7 @@ from sololedger.db import get_connection, init_db
 from sololedger.exporters import generate_tax_accountant_pack
 from sololedger.importers import decode_csv_bytes, import_and_reconcile_hometax_csv
 from sololedger.nas_sync import sync_to_nas
+from sololedger.phone_adb import import_phone_sms_to_ledger
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -91,6 +92,23 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "reset-db",
         help="Clear all transactions, receipts, and merchants from the test ledger",
+    )
+
+    # 8. import-phone-sms
+    phone_parser = subparsers.add_parser(
+        "import-phone-sms",
+        help="Fetch card SMS messages from connected USB Android phone via ADB and import into ledger",
+    )
+    phone_parser.add_argument(
+        "--limit",
+        type=int,
+        default=30,
+        help="Maximum number of recent card SMS messages to import (default: 30)",
+    )
+    phone_parser.add_argument(
+        "--serial",
+        default=None,
+        help="Optional ADB device serial number",
     )
 
     return parser
@@ -177,6 +195,15 @@ def run_cli(argv: Optional[List[str]] = None) -> Dict[str, Any]:
             outcome = reset_test_ledger(cursor)
             conn.commit()
             return {"command": "reset-db", **outcome}
+
+        if args.command == "import-phone-sms":
+            outcome = import_phone_sms_to_ledger(
+                cursor,
+                limit=int(args.limit),
+                device_serial=args.serial,
+            )
+            conn.commit()
+            return {"command": "import-phone-sms", **outcome}
 
         raise ValueError(f"Unknown CLI command: {args.command}")
     finally:
