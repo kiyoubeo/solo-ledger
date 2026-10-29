@@ -10,12 +10,13 @@ venv/
 dist/
 build/
 
-# Local SQLite databases & receipt archive storage (production / runtime)
+# Local SQLite databases & receipt archive storage (production / runtime / test)
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
 archive/
+archive_test/
 
 # Environment variables & secrets
 .env

@@ -9,7 +9,11 @@ from typing import Any, Dict, List, Optional
 
 from sololedger import __version__
 from sololedger.config import settings
-from sololedger.dashboard import build_dashboard_summary
+from sololedger.dashboard import (
+    build_dashboard_summary,
+    reset_test_ledger,
+    seed_demo_transactions,
+)
 from sololedger.db import get_connection, init_db
 from sololedger.exporters import generate_tax_accountant_pack
 from sololedger.importers import decode_csv_bytes, import_and_reconcile_hometax_csv
@@ -70,6 +74,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--nas-dir",
         default=None,
         help="Override NAS target directory path (defaults to SOLOLEDGER_NAS_DIR or Z:\\SoloLedger)",
+    )
+
+    # 6. seed-demo
+    seed_parser = subparsers.add_parser(
+        "seed-demo",
+        help="Seed realistic sample transactions and receipts into the test ledger",
+    )
+    seed_parser.add_argument(
+        "--year-month",
+        default=None,
+        help="Target year-month in YYYYMM format (defaults to current month)",
+    )
+
+    # 7. reset-db
+    subparsers.add_parser(
+        "reset-db",
+        help="Clear all transactions, receipts, and merchants from the test ledger",
     )
 
     return parser
@@ -146,6 +167,16 @@ def run_cli(argv: Optional[List[str]] = None) -> Dict[str, Any]:
             target_dir = Path(args.nas_dir) if args.nas_dir else None
             outcome = sync_to_nas(target_nas_dir=target_dir)
             return {"command": "backup-nas", **outcome}
+
+        if args.command == "seed-demo":
+            outcome = seed_demo_transactions(cursor, year_month=args.year_month)
+            conn.commit()
+            return {"command": "seed-demo", **outcome}
+
+        if args.command == "reset-db":
+            outcome = reset_test_ledger(cursor)
+            conn.commit()
+            return {"command": "reset-db", **outcome}
 
         raise ValueError(f"Unknown CLI command: {args.command}")
     finally:

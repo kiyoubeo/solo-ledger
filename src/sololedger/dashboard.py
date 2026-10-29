@@ -1,11 +1,15 @@
 """Lightweight Web Dashboard and Inline Ledger Management for SoloLedger."""
 
 import html
+import shutil
 import sqlite3
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from sololedger import __version__
+from sololedger.archiver import compute_sha256_hex, save_receipt_files
+from sololedger.config import settings
 from sololedger.tax_engine import calculate_supply_and_vat
 from sololedger.telegram_bot import _refresh_receipt_archived_filename
 from sololedger.vehicle_tracker import get_vehicle_expense_summary
@@ -140,6 +144,9 @@ def build_dashboard_summary(
     vehicle_summary = get_vehicle_expense_summary(cursor, year=target_year)
 
     return {
+        "app_env": settings.app_env,
+        "db_path": str(settings.db_path),
+        "nas_backup_dir": str(settings.nas_backup_dir),
         "year_month": target_ym,
         "year": target_year,
         "total_tx_count": len(rows),
@@ -151,6 +158,213 @@ def build_dashboard_summary(
         "pending_transactions": pending_items,
         "transactions": rows,
         "vehicle_limit": vehicle_summary,
+    }
+
+
+def seed_demo_transactions(
+    cursor: sqlite3.Cursor,
+    year_month: Optional[str] = None,
+    archive_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Insert realistic 1-person corp test transactions and sample receipt files for sandbox testing."""
+    now = datetime.now()
+    ym = year_month or now.strftime("%Y%m")
+    y_str, m_str = ym[:4], ym[4:6]
+
+    demo_rows = [
+        (
+            "9876",
+            "DEMO1001",
+            f"{y_str}-{m_str}-05 10:30:00",
+            "쿠팡(주)",
+            "1208800767",
+            45000,
+            40909,
+            4091,
+            "830",
+            "소모품비",
+            "DEDUCTIBLE",
+            None,
+            0,
+            "모니터암 외 1건",
+            "OCR_MATCHED",
+        ),
+        (
+            "1234",
+            "DEMO1002",
+            f"{y_str}-{m_str}-08 14:20:00",
+            "네이버페이",
+            "2208162517",
+            330000,
+            300000,
+            30000,
+            "212",
+            "비품",
+            "DEDUCTIBLE",
+            None,
+            0,
+            "LG 27인치 4K 모니터",
+            "OCR_MATCHED",
+        ),
+        (
+            "1234",
+            "DEMO1003",
+            f"{y_str}-{m_str}-12 12:15:00",
+            "스타벅스역삼점",
+            "2018121515",
+            12000,
+            10909,
+            1091,
+            "811",
+            "복리후생비",
+            "DEDUCTIBLE",
+            None,
+            0,
+            "대표자 단독 식사",
+            "HOMETAX_VERIFIED",
+        ),
+        (
+            "1234",
+            "DEMO1004",
+            f"{y_str}-{m_str}-15 19:10:00",
+            "한우명가역삼점",
+            "2118754321",
+            165000,
+            150000,
+            15000,
+            "813",
+            "기업업무추진비",
+            "NON_DEDUCTIBLE",
+            "ENTERTAINMENT",
+            0,
+            "A사 김철수 대표 프로젝트 킥오프 미팅",
+            "HOMETAX_VERIFIED",
+        ),
+        (
+            "9876",
+            "DEMO1005",
+            f"{y_str}-{m_str}-18 09:00:00",
+            "SK에너지주유소",
+            "1168118745",
+            110000,
+            100000,
+            10000,
+            "822",
+            "차량유지비",
+            "NON_DEDUCTIBLE",
+            "PASSENGER_CAR",
+            1,
+            "업무용승용차 주유 60L",
+            "HOMETAX_VERIFIED",
+        ),
+        (
+            "5678",
+            "DEMO1006",
+            f"{y_str}-{m_str}-22 16:40:00",
+            "알수없는문구점",
+            "2148539210",
+            15000,
+            13636,
+            1364,
+            "999",
+            "미분류",
+            "PENDING_CHECK",
+            None,
+            0,
+            None,
+            "SMS_ONLY",
+        ),
+    ]
+
+    inserted_ids: List[int] = []
+    for row in demo_rows:
+        cursor.execute(
+            "SELECT tx_id FROM card_transactions WHERE approval_no = ?",
+            (row[1],),
+        )
+        if cursor.fetchone():
+            continue
+        if row[4]:
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO merchants (
+                    biz_reg_no, merchant_name, tax_type_code, biz_status, nts_verified_at
+                ) VALUES (?, ?, 'GENERAL', 'ACTIVE', CURRENT_TIMESTAMP)
+                """,
+                (row[4], row[3]),
+            )
+        cursor.execute(
+            """
+            INSERT INTO card_transactions (
+                card_last4, approval_no, transacted_at, raw_merchant_name,
+                biz_reg_no, total_amount, supply_value, vat_amount,
+                account_code, account_name, vat_deduction_type,
+                non_deduct_reason, is_vehicle_expense, counterparty_info, reconcile_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            row,
+        )
+        tx_id = int(cursor.lastrowid)
+        inserted_ids.append(tx_id)
+
+        # Attach sample receipt for DEMO1001
+        if row[1] == "DEMO1001":
+            sample_bytes = f"DEMO-RECEIPT-COUPANG-{ym}".encode("utf-8")
+            file_hash = compute_sha256_hex(sample_bytes)
+            cursor.execute(
+                "SELECT receipt_id FROM receipt_ocr_metadata WHERE file_hash_sha256 = ?",
+                (file_hash,),
+            )
+            if not cursor.fetchone():
+                arch_name = f"{y_str}{m_str}05_쿠팡_소모품비_모니터암외1건_45000.jpg"
+                orig_path, _ = save_receipt_files(
+                    sample_bytes,
+                    original_file_name="demo_coupang.jpg",
+                    archived_file_name=arch_name,
+                    archive_dir=archive_dir,
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO receipt_ocr_metadata (
+                        tx_id, source_channel, original_file_path, archived_file_name,
+                        file_hash_sha256, ocr_biz_reg_no, ocr_total_amount,
+                        line_items_json, raw_ocr_response, ocr_confidence
+                    ) VALUES (?, 'WEB_UPLOAD', ?, ?, ?, '1208800767', 45000, '[]', '{}', 0.99)
+                    """,
+                    (tx_id, orig_path, arch_name, file_hash),
+                )
+
+    return {
+        "status": "seeded",
+        "year_month": ym,
+        "inserted_count": len(inserted_ids),
+        "inserted_tx_ids": inserted_ids,
+    }
+
+
+def reset_test_ledger(
+    cursor: sqlite3.Cursor,
+    archive_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Clear all transaction, receipt, and merchant rows in the test ledger."""
+    cursor.execute("SELECT COUNT(*) FROM card_transactions")
+    deleted_tx_count = int(cursor.fetchone()[0])
+
+    cursor.execute("DELETE FROM receipt_ocr_metadata")
+    cursor.execute("DELETE FROM card_transactions")
+    cursor.execute("DELETE FROM merchants")
+
+    target_archive = archive_dir or settings.archive_dir
+    for sub in ("original", "normalized", "exports"):
+        sub_path = target_archive / sub
+        if sub_path.exists():
+            shutil.rmtree(sub_path, ignore_errors=True)
+            sub_path.mkdir(parents=True, exist_ok=True)
+
+    return {
+        "status": "reset",
+        "deleted_transactions": deleted_tx_count,
+        "archive_dir_cleaned": str(target_archive),
     }
 
 
@@ -245,18 +459,27 @@ def render_dashboard_html(
     td.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
     td.empty {{ text-align: center; color: #64748b; padding: 18px; }}
     .badge.warn {{ background: #fef3c7; color: #92400e; padding: 2px 8px; border-radius: 4px; }}
+    .badge.env {{ background: #dcfce7; color: #166534; padding: 3px 10px; border-radius: 6px;
+                  font-size: 12px; font-weight: 700; margin-left: 8px; }}
     button {{ background: #2563eb; color: #fff; border: none; border-radius: 6px;
-              padding: 6px 12px; cursor: pointer; }}
+              padding: 6px 12px; cursor: pointer; margin-left: 4px; }}
+    button.secondary {{ background: #475569; }}
+    button.danger {{ background: #dc2626; }}
     input[type="text"] {{ padding: 5px 8px; border: 1px solid #cbd5e1; border-radius: 4px; }}
   </style>
 </head>
 <body>
   <header>
     <div>
-      <h1>SoloLedger 경비·세무증빙 대시보드 (v{__version__})</h1>
-      <p>귀속 연월: <strong>{summary['year_month']}</strong> | 귀속 연도: <strong>{summary['year']}</strong></p>
+      <h1>SoloLedger 경비·세무증빙 대시보드 (v{__version__})
+        <span class="badge env">{html.escape(summary['app_env'].upper())} MODE</span>
+      </h1>
+      <p>귀속 연월: <strong>{summary['year_month']}</strong> | 귀속 연도: <strong>{summary['year']}</strong>
+         | DB: <code>{html.escape(Path(summary['db_path']).name)}</code></p>
     </div>
     <div>
+      <button class="secondary" onclick="seedDemoData()">샘플 데이터 생성</button>
+      <button class="danger" onclick="resetTestLedger()">테스트 DB 초기화</button>
       <button onclick="backupToNas()">NAS(Z:\\) 백업 동기화</button>
       <button onclick="exportTaxPack('{summary['year_month']}')">세무사 제출용 ZIP+CSV 생성</button>
     </div>
@@ -321,12 +544,16 @@ def render_dashboard_html(
   </section>
 
   <script>
+    const API_HEADERS = {{
+      'Content-Type': 'application/json',
+      'X-API-Key': '{html.escape(settings.api_key)}'
+    }};
     async function saveTxMemo(txId) {{
       const memoInput = document.getElementById('memo-' + txId);
       if (!memoInput) return;
       await fetch('/api/v1/transactions/' + txId, {{
         method: 'PATCH',
-        headers: {{ 'Content-Type': 'application/json' }},
+        headers: API_HEADERS,
         body: JSON.stringify({{ counterparty_info: memoInput.value }})
       }});
       window.location.reload();
@@ -334,15 +561,31 @@ def render_dashboard_html(
     async function exportTaxPack(yearMonth) {{
       await fetch('/api/v1/exports/tax-pack', {{
         method: 'POST',
-        headers: {{ 'Content-Type': 'application/json' }},
-        body: JSON.stringify({{ year_month: yearMonth }})
+        headers: API_HEADERS,
+        body: JSON.stringify({{ year_month: yearMonth, force_reexport: true }})
       }});
       window.location.reload();
     }}
     async function backupToNas() {{
       await fetch('/api/v1/system/backup-nas', {{
         method: 'POST',
-        headers: {{ 'Content-Type': 'application/json' }},
+        headers: API_HEADERS,
+        body: JSON.stringify({{}})
+      }});
+      window.location.reload();
+    }}
+    async function seedDemoData() {{
+      await fetch('/api/v1/system/seed-demo', {{
+        method: 'POST',
+        headers: API_HEADERS,
+        body: JSON.stringify({{ year_month: '{summary['year_month']}' }})
+      }});
+      window.location.reload();
+    }}
+    async function resetTestLedger() {{
+      await fetch('/api/v1/system/reset-test', {{
+        method: 'POST',
+        headers: API_HEADERS,
         body: JSON.stringify({{}})
       }});
       window.location.reload();

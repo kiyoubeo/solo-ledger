@@ -217,6 +217,14 @@ def test_operational_cli_commands(test_db_path, tmp_path):
     assert exp_res["exported_count"] == 1
     assert Path(exp_res["zip_file_path"]).exists()
 
+    seed_res = run_cli(["seed-demo", "--year-month", "202610"])
+    assert seed_res["command"] == "seed-demo"
+    assert seed_res["inserted_count"] == 6
+
+    rst_res = run_cli(["reset-db"])
+    assert rst_res["command"] == "reset-db"
+    assert rst_res["deleted_transactions"] == 7
+
 
 def test_docker_deployment_manifests_exist():
     """Verify Dockerfile and docker-compose.yml exist and configure SoloLedger properly."""

@@ -14,6 +14,8 @@ from sololedger.config import settings
 from sololedger.dashboard import (
     build_dashboard_summary,
     render_dashboard_html,
+    reset_test_ledger,
+    seed_demo_transactions,
     update_transaction_classification,
 )
 from sololedger.db import get_connection, init_db
@@ -466,6 +468,44 @@ async def backup_nas_endpoint(
     _verify_api_key(x_api_key, sololedger_api_key)
     target_dir = Path(request.nas_dir) if request.nas_dir else None
     return sync_to_nas(target_nas_dir=target_dir)
+
+
+@app.post("/api/v1/system/seed-demo")
+async def seed_demo_endpoint(
+    payload: Dict[str, Any] = Body(default_factory=dict),
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Seed realistic test/demo corporate card transactions and sample receipts."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        ym = payload.get("year_month") if isinstance(payload, dict) else None
+        outcome = seed_demo_transactions(cursor, year_month=ym)
+        conn.commit()
+        return outcome
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/system/reset-test")
+async def reset_test_endpoint(
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Clear all transactions, receipts, and cached merchants from the test ledger."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        outcome = reset_test_ledger(cursor)
+        conn.commit()
+        return outcome
+    finally:
+        conn.close()
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
