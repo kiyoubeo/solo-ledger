@@ -5,9 +5,10 @@ import io
 import sqlite3
 import zipfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from sololedger.config import settings
+from sololedger.sms_parser import format_card_label, sanitize_card_folder_name
 
 CSV_HEADERS = [
     "전표번호",
@@ -76,7 +77,9 @@ def generate_tax_accountant_pack(
     writer.writerow(CSV_HEADERS)
 
     exported_tx_ids: List[int] = []
-    attached_receipt_files: List[str] = []
+    attached_receipt_files: List[Tuple[str, str]] = []
+    card_rows_map: Dict[str, List[List[Any]]] = {}
+    card_stats_map: Dict[str, Dict[str, Any]] = {}
     total_supply = 0
     total_vat = 0
     total_amount = 0
@@ -88,6 +91,7 @@ def generate_tax_accountant_pack(
         supply_val = int(row["supply_value"])
         vat_val = int(row["vat_amount"])
         amt_val = int(row["total_amount"])
+        c_last4 = str(row["card_last4"] or "0000")
 
         total_supply += supply_val
         total_vat += vat_val
@@ -97,30 +101,45 @@ def generate_tax_accountant_pack(
 
         arch_name = row["archived_file_name"] or ""
         if arch_name:
-            attached_receipt_files.append(arch_name)
+            attached_receipt_files.append((c_last4, arch_name))
 
-        writer.writerow(
-            [
-                tx_id,
-                row["transacted_at"],
-                row["card_last4"],
-                row["approval_no"] or "",
-                row["raw_merchant_name"],
-                row["biz_reg_no"] or "",
-                row["merchant_tax_type"] or "UNKNOWN",
-                supply_val,
-                vat_val,
-                amt_val,
-                row["account_code"],
-                row["account_name"],
-                row["vat_deduction_type"],
-                row["non_deduct_reason"] or "",
-                "Y" if row["is_vehicle_expense"] else "N",
-                row["counterparty_info"] or "",
-                row["reconcile_status"],
-                arch_name,
-            ]
+        csv_row = [
+            tx_id,
+            row["transacted_at"],
+            c_last4,
+            row["approval_no"] or "",
+            row["raw_merchant_name"],
+            row["biz_reg_no"] or "",
+            row["merchant_tax_type"] or "UNKNOWN",
+            supply_val,
+            vat_val,
+            amt_val,
+            row["account_code"],
+            row["account_name"],
+            row["vat_deduction_type"],
+            row["non_deduct_reason"] or "",
+            "Y" if row["is_vehicle_expense"] else "N",
+            row["counterparty_info"] or "",
+            row["reconcile_status"],
+            arch_name,
+        ]
+        writer.writerow(csv_row)
+        card_rows_map.setdefault(c_last4, []).append(csv_row)
+
+        st = card_stats_map.setdefault(
+            c_last4,
+            {
+                "card_last4": c_last4,
+                "card_label": format_card_label(c_last4),
+                "tx_count": 0,
+                "total_amount": 0,
+                "receipt_count": 0,
+            },
         )
+        st["tx_count"] += 1
+        st["total_amount"] += amt_val
+        if arch_name:
+            st["receipt_count"] += 1
 
     csv_filename = f"SoloLedger_기장원장_{year_month}.csv"
     csv_path = export_dir / csv_filename
@@ -132,13 +151,29 @@ def generate_tax_accountant_pack(
     norm_dir = base_archive / "normalized"
 
     bundled_receipts_count = 0
+    seen_flat_receipts = set()
     with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(csv_filename, csv_bytes)
-        for arch_name in set(attached_receipt_files):
+        for c_last4, c_rows in card_rows_map.items():
+            c_buf = io.StringIO()
+            c_writer = csv.writer(c_buf)
+            c_writer.writerow(CSV_HEADERS)
+            c_writer.writerows(c_rows)
+            c_folder = sanitize_card_folder_name(c_last4)
+            zf.writestr(
+                f"cards/SoloLedger_카드별원장_{year_month}_{c_folder}.csv",
+                c_buf.getvalue().encode("utf-8-sig"),
+            )
+
+        for c_last4, arch_name in attached_receipt_files:
             candidate = norm_dir / arch_name
             if candidate.exists():
-                zf.write(candidate, arcname=f"receipts/{arch_name}")
-                bundled_receipts_count += 1
+                if arch_name not in seen_flat_receipts:
+                    zf.write(candidate, arcname=f"receipts/{arch_name}")
+                    seen_flat_receipts.add(arch_name)
+                    bundled_receipts_count += 1
+                c_folder = sanitize_card_folder_name(c_last4)
+                zf.write(candidate, arcname=f"receipts_by_card/{c_folder}/{arch_name}")
 
     if exported_tx_ids:
         placeholders = ",".join("?" for _ in exported_tx_ids)
@@ -163,4 +198,5 @@ def generate_tax_accountant_pack(
         "deductible_vat_amount": deductible_vat,
         "csv_file_path": str(csv_path),
         "zip_file_path": str(zip_path),
+        "card_breakdown": list(card_stats_map.values()),
     }

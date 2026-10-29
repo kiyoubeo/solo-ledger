@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from sololedger.config import settings
+from sololedger.sms_parser import sanitize_card_folder_name
 
 
 class DuplicateReceiptError(ValueError):
@@ -84,8 +85,9 @@ def save_receipt_files(
     original_file_name: str,
     archived_file_name: str,
     archive_dir: Optional[Path] = None,
+    card_last4: Optional[str] = None,
 ) -> Tuple[str, str]:
-    """Persist original and normalized receipt files under archive directory."""
+    """Persist original, normalized, and per-card categorized receipt files under archive directory."""
     base_dir = archive_dir or settings.archive_dir
     orig_dir = base_dir / "original"
     norm_dir = base_dir / "normalized"
@@ -98,5 +100,11 @@ def save_receipt_files(
 
     orig_path.write_bytes(content)
     norm_path.write_bytes(content)
+
+    if card_last4:
+        card_folder = sanitize_card_folder_name(card_last4)
+        card_dir = norm_dir / "by_card" / card_folder
+        card_dir.mkdir(parents=True, exist_ok=True)
+        (card_dir / archived_file_name).write_bytes(content)
 
     return str(orig_path), str(norm_path)

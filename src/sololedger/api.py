@@ -443,16 +443,19 @@ async def patch_transaction_endpoint(
 async def dashboard_summary_endpoint(
     year_month: Optional[str] = Query(default=None),
     year: Optional[int] = Query(default=None),
+    card_last4: Optional[str] = Query(default=None),
     x_api_key: Optional[str] = Header(default=None),
     sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
 ):
-    """Return aggregated dashboard summary metrics, pending items, and vehicle limit."""
+    """Return aggregated dashboard summary metrics, per-card breakdown, and vehicle limit."""
     _verify_api_key(x_api_key, sololedger_api_key)
     init_db()
     conn = get_connection()
     cursor = conn.cursor()
     try:
-        return build_dashboard_summary(cursor, year_month=year_month, year=year)
+        return build_dashboard_summary(
+            cursor, year_month=year_month, year=year, card_last4=card_last4
+        )
     finally:
         conn.close()
 
@@ -540,13 +543,16 @@ async def import_phone_sms_endpoint(
 async def render_dashboard_page(
     year_month: Optional[str] = Query(default=None),
     year: Optional[int] = Query(default=None),
+    card_last4: Optional[str] = Query(default=None),
 ):
     """Render the lightweight HTML5 management dashboard."""
     init_db()
     conn = get_connection()
     cursor = conn.cursor()
     try:
-        html_doc = render_dashboard_html(cursor, year_month=year_month, year=year)
+        html_doc = render_dashboard_html(
+            cursor, year_month=year_month, year=year, card_last4=card_last4
+        )
         return HTMLResponse(content=html_doc)
     finally:
         conn.close()

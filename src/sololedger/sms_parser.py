@@ -2,9 +2,49 @@
 
 import re
 from datetime import datetime
-from typing import Optional
+from typing import Dict, Optional
 
 from sololedger.models import ParsedSmsResult
+
+CARD_LABEL_MAP: Dict[str, str] = {
+    "8508": "삼성카드(8508)",
+    "4195": "삼성카드(4195)",
+    "7023": "삼성카드(7023)",
+    "1000": "삼성카드(1000)",
+    "6*1*": "롯데카드(6*1*)",
+    "0*7*": "롯데카드(0*7*)",
+    "8*6*": "롯데카드(8*6*)",
+    "1266": "신한카드(1266)",
+    "6096": "신한카드(6096)",
+    "6534": "우리카드(6534)",
+    "1595": "우리카드(1595)",
+    "4479": "우리체크(4479)",
+    "5*5*": "하나체크(5*5*)",
+    "현대NV": "네이버현대카드",
+    "현대백화": "현대백화점카드",
+    "9876": "신한법인(9876)",
+    "5678": "KB국민법인(5678)",
+    "12*4": "신한법인(12*4)",
+    "3456": "하나법인(3456)",
+}
+
+
+def format_card_label(card_last4: str) -> str:
+    """Return a human-readable card display label for a given card_last4 code."""
+    key = (card_last4 or "0000").strip()
+    if key in CARD_LABEL_MAP:
+        return CARD_LABEL_MAP[key]
+    if key == "0000":
+        return "기타카드(0000)"
+    return f"법인카드({key})"
+
+
+def sanitize_card_folder_name(card_last4: str) -> str:
+    """Return a filesystem-safe directory name for per-card receipt archiving."""
+    label = format_card_label(card_last4)
+    cleaned = label.replace("*", "X").replace("(", "_").replace(")", "")
+    cleaned = re.sub(r'[\\/:*?"<>|\s]+', "_", cleaned).strip("_")
+    return cleaned or "기타카드_0000"
 
 
 def parse_korean_card_sms(
@@ -63,7 +103,14 @@ def parse_korean_card_sms(
         r"(?:\)|\s|님|체크|법인|카드|해외|승인|취소|$)",
         clean_text,
     )
-    card_last4 = card_match.group(1) if card_match else "0000"
+    if card_match:
+        card_last4 = card_match.group(1)
+    elif "네이버 현대카드" in clean_text:
+        card_last4 = "현대NV"
+    elif "현대백화점카드" in clean_text:
+        card_last4 = "현대백화"
+    else:
+        card_last4 = "0000"
 
     # 5. Extract Approval Number if present in SMS (8 digits)
     app_no_match = re.search(r"승인번호\s*:?\s*(\d{8})", clean_text)

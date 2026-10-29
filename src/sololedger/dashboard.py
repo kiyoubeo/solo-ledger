@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from sololedger import __version__
 from sololedger.archiver import compute_sha256_hex, save_receipt_files
 from sololedger.config import settings
+from sololedger.sms_parser import format_card_label, sanitize_card_folder_name
 from sololedger.tax_engine import calculate_supply_and_vat
 from sololedger.telegram_bot import _refresh_receipt_archived_filename
 from sololedger.vehicle_tracker import get_vehicle_expense_summary
@@ -95,8 +96,9 @@ def build_dashboard_summary(
     cursor: sqlite3.Cursor,
     year_month: Optional[str] = None,
     year: Optional[int] = None,
+    card_last4: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Build aggregated dashboard metrics, pending action items, and vehicle limit gauge."""
+    """Build aggregated dashboard metrics, per-card breakdown, pending action items, and vehicle limit."""
     now = datetime.now()
     target_ym = (year_month or now.strftime("%Y%m")).strip().upper()
     if target_ym == "ALL":
@@ -105,6 +107,8 @@ def build_dashboard_summary(
     else:
         target_year = year or int(target_ym[:4])
         ym_prefix = f"{target_ym[:4]}-{target_ym[4:6]}-%"
+
+    target_card = (card_last4 or "ALL").strip()
 
     cursor.execute(
         """
@@ -136,7 +140,49 @@ def build_dashboard_summary(
         """,
         (ym_prefix,),
     )
-    rows = [dict(r) for r in cursor.fetchall()]
+    all_period_rows = [dict(r) for r in cursor.fetchall()]
+
+    card_stats: Dict[str, Dict[str, Any]] = {}
+    for r in all_period_rows:
+        c_code = str(r.get("card_last4") or "0000")
+        c_label = format_card_label(c_code)
+        r["card_label"] = c_label
+        r["card_folder"] = sanitize_card_folder_name(c_code)
+
+        entry = card_stats.setdefault(
+            c_code,
+            {
+                "card_last4": c_code,
+                "card_label": c_label,
+                "card_folder": r["card_folder"],
+                "tx_count": 0,
+                "total_expenditure": 0,
+                "deductible_vat": 0,
+                "non_deductible_total": 0,
+                "receipt_count": 0,
+            },
+        )
+        amt = int(r["total_amount"])
+        vat = int(r["vat_amount"])
+        entry["tx_count"] += 1
+        entry["total_expenditure"] += amt
+        if r["vat_deduction_type"] == "DEDUCTIBLE":
+            entry["deductible_vat"] += vat
+        elif r["vat_deduction_type"] == "NON_DEDUCTIBLE":
+            entry["non_deductible_total"] += amt
+        if r.get("archived_file_name"):
+            entry["receipt_count"] += 1
+
+    card_breakdown = sorted(
+        card_stats.values(),
+        key=lambda x: (x["tx_count"], x["total_expenditure"]),
+        reverse=True,
+    )
+
+    if target_card and target_card != "ALL":
+        rows = [r for r in all_period_rows if str(r.get("card_last4") or "0000") == target_card]
+    else:
+        rows = all_period_rows
 
     total_expenditure = 0
     deductible_vat = 0
@@ -165,7 +211,9 @@ def build_dashboard_summary(
         "db_path": str(settings.db_path),
         "nas_backup_dir": str(settings.nas_backup_dir),
         "year_month": target_ym,
+        "card_last4": target_card,
         "available_months": available_months,
+        "card_breakdown": card_breakdown,
         "year": target_year,
         "total_tx_count": len(rows),
         "total_expenditure": total_expenditure,
@@ -390,9 +438,12 @@ def render_dashboard_html(
     cursor: sqlite3.Cursor,
     year_month: Optional[str] = None,
     year: Optional[int] = None,
+    card_last4: Optional[str] = None,
 ) -> str:
     """Render server-side HTML5 management dashboard for SoloLedger."""
-    summary = build_dashboard_summary(cursor, year_month=year_month, year=year)
+    summary = build_dashboard_summary(
+        cursor, year_month=year_month, year=year, card_last4=card_last4
+    )
     veh = summary["vehicle_limit"]
     gauge_pct = min(100.0, float(veh["usage_ratio_pct"]))
 
@@ -404,9 +455,43 @@ def render_dashboard_html(
         ym_options_html.append(f"<option value='{html.escape(ym_opt)}' {sel}>{html.escape(ym_opt)}</option>")
     ym_select_html = "".join(ym_options_html)
 
+    card_options_html = []
+    c_all_sel = "selected" if summary["card_last4"] == "ALL" else ""
+    card_options_html.append(f"<option value='ALL' {c_all_sel}>전체 카드 (ALL)</option>")
+    for cb in summary.get("card_breakdown", []):
+        c_val = html.escape(str(cb["card_last4"]))
+        c_lbl = html.escape(f"{cb['card_label']} ({cb['tx_count']}건)")
+        sel = "selected" if summary["card_last4"] == cb["card_last4"] else ""
+        card_options_html.append(f"<option value='{c_val}' {sel}>{c_lbl}</option>")
+    card_select_html = "".join(card_options_html)
+
+    card_breakdown_rows = []
+    for cb in summary.get("card_breakdown", []):
+        c_val = html.escape(str(cb["card_last4"]))
+        c_lbl = html.escape(str(cb["card_label"]))
+        c_folder = html.escape(str(cb["card_folder"]))
+        card_breakdown_rows.append(
+            f"<tr>"
+            f"<td><span class='badge card'>{c_lbl}</span></td>"
+            f"<td class='num'><strong>{cb['tx_count']}건</strong></td>"
+            f"<td class='num'>{cb['total_expenditure']:,}원</td>"
+            f"<td class='num'>{cb['deductible_vat']:,}원</td>"
+            f"<td class='num'>{cb['non_deductible_total']:,}원</td>"
+            f"<td class='num'>{cb['receipt_count']}건</td>"
+            f"<td><code>by_card/{c_folder}/</code></td>"
+            f"<td><button class='secondary' onclick=\"filterByCard('{c_val}')\">이 카드만 보기</button></td>"
+            f"</tr>"
+        )
+    card_breakdown_tbody = (
+        "\n".join(card_breakdown_rows)
+        if card_breakdown_rows
+        else "<tr><td colspan='8' class='empty'>집계된 카드 내역이 없습니다.</td></tr>"
+    )
+
     pending_rows_html = []
     for item in summary["pending_transactions"]:
         tx_id = item["tx_id"]
+        c_lbl = html.escape(str(item.get("card_label") or format_card_label(item["card_last4"])))
         merchant = html.escape(str(item["raw_merchant_name"]))
         amt_str = f"{int(item['total_amount']):,}원"
         cur_code = str(item["account_code"])
@@ -420,6 +505,7 @@ def render_dashboard_html(
             f"<tr data-tx-id='{tx_id}'>"
             f"<td>#{tx_id}</td>"
             f"<td>{html.escape(str(item['transacted_at']))}</td>"
+            f"<td><span class='badge card'>{c_lbl}</span></td>"
             f"<td><strong>{merchant}</strong></td>"
             f"<td class='num'>{amt_str}</td>"
             f"<td>{acc_select}</td>"
@@ -431,12 +517,13 @@ def render_dashboard_html(
     pending_tbody = (
         "\n".join(pending_rows_html)
         if pending_rows_html
-        else "<tr><td colspan='7' class='empty'>미분류 또는 소명 누락 전표가 없습니다.</td></tr>"
+        else "<tr><td colspan='8' class='empty'>미분류 또는 소명 누락 전표가 없습니다.</td></tr>"
     )
 
     tx_rows_html = []
     for tx in summary["transactions"]:
         tx_id = tx["tx_id"]
+        c_lbl = html.escape(str(tx.get("card_label") or format_card_label(tx["card_last4"])))
         merchant = html.escape(str(tx["raw_merchant_name"]))
         amt_str = f"{int(tx['total_amount']):,}원"
         vat_str = f"{int(tx['vat_amount']):,}원"
@@ -448,6 +535,7 @@ def render_dashboard_html(
             f"<tr>"
             f"<td>#{tx_id}</td>"
             f"<td>{html.escape(str(tx['transacted_at']))}</td>"
+            f"<td><span class='badge card'>{c_lbl}</span></td>"
             f"<td>{merchant}</td>"
             f"<td class='num'>{amt_str}</td>"
             f"<td class='num'>{vat_str}</td>"
@@ -460,7 +548,7 @@ def render_dashboard_html(
     tx_tbody = (
         "\n".join(tx_rows_html)
         if tx_rows_html
-        else "<tr><td colspan='9' class='empty'>해당 귀속월 거래 내역이 없습니다.</td></tr>"
+        else "<tr><td colspan='10' class='empty'>해당 조건의 거래 내역이 없습니다.</td></tr>"
     )
 
     return f"""<!DOCTYPE html>
@@ -490,6 +578,8 @@ def render_dashboard_html(
     td.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
     td.empty {{ text-align: center; color: #64748b; padding: 18px; }}
     .badge.warn {{ background: #fef3c7; color: #92400e; padding: 2px 8px; border-radius: 4px; }}
+    .badge.card {{ background: #dbeafe; color: #1e40af; padding: 3px 8px; border-radius: 4px;
+                   font-weight: 600; font-size: 12px; }}
     .badge.env {{ background: #dcfce7; color: #166534; padding: 3px 10px; border-radius: 6px;
                   font-size: 12px; font-weight: 700; margin-left: 8px; }}
     button {{ background: #2563eb; color: #fff; border: none; border-radius: 6px;
@@ -506,8 +596,12 @@ def render_dashboard_html(
         <span class="badge env">{html.escape(summary['app_env'].upper())} MODE</span>
       </h1>
       <p>조회 기간:
-         <select onchange="window.location.href='/dashboard?year_month=' + this.value">
+         <select id="ym-filter" onchange="applyFilters()">
            {ym_select_html}
+         </select>
+         | 카드 선택:
+         <select id="card-filter" onchange="applyFilters()">
+           {card_select_html}
          </select>
          | 귀속 연도: <strong>{summary['year']}</strong>
          | DB: <code>{html.escape(Path(summary['db_path']).name)}</code></p>
@@ -542,6 +636,22 @@ def render_dashboard_html(
   </section>
 
   <section class="section">
+    <h2>카드별 지출 및 영수증 분류 현황 ({len(summary.get('card_breakdown', []))}개 카드)</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>카드명 (식별번호)</th><th>결제 건수</th><th>지출 합계</th>
+          <th>공제 부가세</th><th>불공제 합계</th><th>첨부 영수증</th>
+          <th>영수증 보관 폴더</th><th>필터</th>
+        </tr>
+      </thead>
+      <tbody>
+        {card_breakdown_tbody}
+      </tbody>
+    </table>
+  </section>
+
+  <section class="section">
     <h2>업무용승용차 연간 1,500만 원 특례 한도 트래커 ({veh['year']}년)</h2>
     <p>누적 사용액: <strong>{veh['total_used']:,}원</strong> / {veh['annual_limit']:,}원
        ({veh['usage_ratio_pct']}%) | 잔여 한도: <strong>{veh['remaining_limit']:,}원</strong>
@@ -555,7 +665,7 @@ def render_dashboard_html(
     <table>
       <thead>
         <tr>
-          <th>전표번호</th><th>거래일시</th><th>가맹점명</th><th>금액</th>
+          <th>전표번호</th><th>거래일시</th><th>카드구분</th><th>가맹점명</th><th>금액</th>
           <th>현재 계정</th><th>품목 / 참석자 소명</th><th>작업</th>
         </tr>
       </thead>
@@ -570,7 +680,7 @@ def render_dashboard_html(
     <table>
       <thead>
         <tr>
-          <th>전표번호</th><th>거래일시</th><th>가맹점명</th><th>합계금액</th>
+          <th>전표번호</th><th>거래일시</th><th>카드구분</th><th>가맹점명</th><th>합계금액</th>
           <th>부가세</th><th>계정과목</th><th>공제구분</th><th>적요/참석자</th><th>증빙파일명</th>
         </tr>
       </thead>
@@ -585,6 +695,17 @@ def render_dashboard_html(
       'Content-Type': 'application/json',
       'X-API-Key': '{html.escape(settings.api_key)}'
     }};
+    function applyFilters() {{
+      const ym = document.getElementById('ym-filter').value;
+      const card = document.getElementById('card-filter').value;
+      const q = '?year_month=' + encodeURIComponent(ym) + '&card_last4=' + encodeURIComponent(card);
+      window.location.href = '/dashboard' + q;
+    }}
+    function filterByCard(cardCode) {{
+      const ym = document.getElementById('ym-filter').value;
+      const q = '?year_month=' + encodeURIComponent(ym) + '&card_last4=' + encodeURIComponent(cardCode);
+      window.location.href = '/dashboard' + q;
+    }}
     async function saveTxMemo(txId) {{
       const memoInput = document.getElementById('memo-' + txId);
       const accSelect = document.getElementById('acc-' + txId);

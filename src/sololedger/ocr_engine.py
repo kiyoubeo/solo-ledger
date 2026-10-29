@@ -338,6 +338,7 @@ async def process_and_link_receipt(
         original_file_name=original_file_name,
         archived_file_name=archived_file_name,
         archive_dir=archive_dir,
+        card_last4=final_tx["card_last4"],
     )
 
     line_items_str = json.dumps(

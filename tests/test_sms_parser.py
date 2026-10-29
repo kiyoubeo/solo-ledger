@@ -111,9 +111,18 @@ def test_import_phone_sms_api_endpoint(client):
     assert body["status"] == "imported"
     assert body["inserted_count"] == 2
 
-    # Verify ALL period dashboard summary includes both imported rows
+    # Verify ALL period dashboard summary includes both imported rows and per-card breakdown
     dash_res = client.get("/dashboard?year_month=ALL")
     assert dash_res.status_code == 200
     assert "씨유영등포신성점" in dash_res.text
     assert "에이치디현대오일" in dash_res.text
+    assert "삼성카드(8508)" in dash_res.text
+    assert "네이버현대카드" in dash_res.text
+
+    # Verify filtering by a single card (8508)
+    card_res = client.get("/dashboard?year_month=ALL&card_last4=8508")
+    assert card_res.status_code == 200
+    assert "에이치디현대오일" in card_res.text
+    assert "씨유영등포신성점" not in card_res.text
+
 
