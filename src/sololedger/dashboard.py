@@ -1073,7 +1073,30 @@ def render_dashboard_html(
     }};
     const MIN_TX_DATE = '{min_d}';
     const MAX_TX_DATE = '{max_d}';
+    const DEFAULT_DOC_TITLE = document.title;
     let activeModalTxId = null;
+    let activeModalPrintTitle = '';
+
+    function sanitizeFileToken(s) {{
+      return String(s || '')
+        .replace(/\\(주\\)|주식회사|\\(유\\)/g, '')
+        .replace(/[\\\\/:*?"<>|\\r\\n\\t]+/g, '')
+        .replace(/\\s+/g, '')
+        .replace(/^[_.-]+|[_.-]+$/g, '') || '미상';
+    }}
+
+    function buildReceiptPrintTitle(d) {{
+      if (d.print_title) return d.print_title;
+      const digits = String(d.transacted_at || '').replace(/\\D/g, '');
+      const ymd = digits.length >= 8 ? digits.slice(0, 8) : '00000000';
+      const hm = digits.length >= 12 ? digits.slice(8, 12) : '0000';
+      const cardTok = sanitizeFileToken(d.card_folder || d.card_label || d.card_last4);
+      const merchTok = sanitizeFileToken(d.raw_merchant_name);
+      const accTok = sanitizeFileToken(d.account_name);
+      const amtTok = Math.abs(Number(d.total_amount || 0)) + '원';
+      return '매출전표_' + ymd + '_' + hm + '_' + cardTok + '_'
+        + merchTok + '_' + accTok + '_' + amtTok + '_TX' + d.tx_id;
+    }}
 
     async function openReceiptModal(txId) {{
       activeModalTxId = txId;
@@ -1091,6 +1114,8 @@ def render_dashboard_html(
         return;
       }}
       const d = await res.json();
+      activeModalPrintTitle = buildReceiptPrintTitle(d);
+      document.title = activeModalPrintTitle;
       document.getElementById('modal-header-title').textContent =
         '🧾 신용카드 매출전표 (#' + d.tx_id + ')';
 
@@ -1122,7 +1147,9 @@ def render_dashboard_html(
         '<div class="slip-row"><span>적요/품목</span><span>' + memo + '</span></div>' +
         '<div class="slip-row"><span>대사상태</span><span>' + d.reconcile_status + '</span></div>' +
         '<div class="slip-row"><span>보관경로</span><code style="font-size:11px;">' +
-        arch + '</code></div>';
+        arch + '</code></div>' +
+        '<div class="slip-row no-print"><span>PDF 저장명</span><code style="font-size:11px; color:#1d4ed8;">' +
+        activeModalPrintTitle + '.pdf</code></div>';
 
       if (d.has_receipt_file && d.is_renderable_image) {{
         imgEl.innerHTML =
@@ -1148,10 +1175,15 @@ def render_dashboard_html(
     function closeReceiptModal() {{
       document.body.classList.remove('modal-open');
       document.getElementById('receipt-modal-backdrop').classList.remove('open');
+      activeModalPrintTitle = '';
+      document.title = DEFAULT_DOC_TITLE;
     }}
 
     function printReceiptSlip() {{
       document.body.classList.add('modal-open');
+      if (activeModalPrintTitle) {{
+        document.title = activeModalPrintTitle;
+      }}
       window.print();
     }}
 

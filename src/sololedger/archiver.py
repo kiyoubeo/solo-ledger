@@ -68,6 +68,30 @@ def build_archived_filename(
     return f"{date_prefix}_{merchant_tok}_{account_tok}_{amount_tok}{ext}"
 
 
+def build_receipt_print_title(
+    tx_id: int,
+    transacted_at: str,
+    card_last4: str,
+    merchant_name: str,
+    account_name: str,
+    total_amount: int,
+) -> str:
+    """Build a distinguishing PDF print filename/title for a single credit card receipt slip.
+
+    Format:
+    `매출전표_{YYYYMMDD}_{HHMM}_{카드명}_{가맹점}_{계정과목}_{금액}원_TX{tx_id}`
+    e.g. `매출전표_20261004_0945_우리법인카드_6534_카카오페이_소모품비_23050원_TX4271`
+    """
+    digits = re.sub(r"\D", "", transacted_at or "")
+    ymd = digits[:8] if len(digits) >= 8 else "00000000"
+    hm = digits[8:12] if len(digits) >= 12 else "0000"
+    card_tok = sanitize_card_folder_name(card_last4 or "0000")
+    merchant_tok = sanitize_filename_token(merchant_name)
+    account_tok = sanitize_filename_token(account_name)
+    amount_tok = f"{abs(int(total_amount))}원"
+    return f"매출전표_{ymd}_{hm}_{card_tok}_{merchant_tok}_{account_tok}_{amount_tok}_TX{int(tx_id)}"
+
+
 def check_duplicate_receipt_hash(
     cursor: sqlite3.Cursor, file_hash_sha256: str
 ) -> Optional[int]:

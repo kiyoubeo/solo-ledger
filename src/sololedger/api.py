@@ -10,7 +10,7 @@ from fastapi import BackgroundTasks, Body, FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse, Response
 
 from sololedger import __version__
-from sololedger.archiver import DuplicateReceiptError
+from sololedger.archiver import DuplicateReceiptError, build_receipt_print_title
 from sololedger.config import PROJECT_ROOT, settings
 from sololedger.dashboard import (
     build_dashboard_summary,
@@ -498,11 +498,20 @@ async def get_transaction_receipt_detail(tx_id: int):
                     break
 
         card_code = str(tx_dict.get("card_last4") or "0000")
+        print_title = build_receipt_print_title(
+            tx_id=tx_id,
+            transacted_at=str(tx_dict["transacted_at"]),
+            card_last4=card_code,
+            merchant_name=str(tx_dict["raw_merchant_name"]),
+            account_name=str(tx_dict["account_name"]),
+            total_amount=int(tx_dict["total_amount"]),
+        )
         return {
             "tx_id": tx_id,
             "card_last4": card_code,
             "card_label": format_card_label(card_code),
             "card_folder": sanitize_card_folder_name(card_code),
+            "print_title": print_title,
             "transacted_at": tx_dict["transacted_at"],
             "approval_no": tx_dict.get("approval_no"),
             "raw_merchant_name": tx_dict["raw_merchant_name"],

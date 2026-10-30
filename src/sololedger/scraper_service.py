@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional
 
 from sololedger.archiver import (
     build_archived_filename,
+    build_receipt_print_title,
     compute_sha256_hex,
     save_receipt_files,
 )
@@ -471,12 +472,22 @@ def render_electronic_slip_html(tx_row: Dict[str, Any]) -> str:
     ded_str = html.escape(str(tx_row["vat_deduction_type"]))
     memo_str = html.escape(str(tx_row.get("counterparty_info") or "-"))
     rec_status = html.escape(str(tx_row.get("reconcile_status") or "SMS_ONLY"))
+    print_title = html.escape(
+        build_receipt_print_title(
+            tx_id=tx_id,
+            transacted_at=str(tx_row["transacted_at"]),
+            card_last4=c_code,
+            merchant_name=str(tx_row["raw_merchant_name"]),
+            account_name=str(tx_row["account_name"]),
+            total_amount=total_amt,
+        )
+    )
 
     return f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
   <meta charset="utf-8" />
-  <title>신용카드 매출전표 #{tx_id} - {merchant}</title>
+  <title>{print_title}</title>
   <style>
     body {{ font-family: 'Malgun Gothic', -apple-system, sans-serif; background: #f1f5f9;
            padding: 24px; color: #0f172a; }}
