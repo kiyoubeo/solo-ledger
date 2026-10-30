@@ -917,12 +917,13 @@ def render_dashboard_html(
     <div>
       <input type="file" id="receipt-file-input" accept="image/*,.pdf"
              style="display:none" onchange="uploadReceiptFile(this)" />
-      <input type="file" id="csv-file-input" accept=".csv,.txt"
+      <input type="file" id="csv-file-input" accept=".csv,.txt,.xls,.html,.json"
              style="display:none" onchange="uploadCsvFile(this)" />
       <button class="secondary" onclick="window.open('/manual', '_blank')">사용 매뉴얼(HTML)</button>
       <button onclick="reapplyRules()">스마트 자동분류 실행</button>
+      <button onclick="generateElectronicSlips()">전자 매출전표 일괄 생성</button>
       <button onclick="document.getElementById('receipt-file-input').click()">영수증 업로드(OCR)</button>
-      <button onclick="document.getElementById('csv-file-input').click()">카드사/홈택스 CSV 업로드</button>
+      <button onclick="document.getElementById('csv-file-input').click()">카드사/홈택스 전표 업로드</button>
       <button onclick="importPhoneSms()">USB 휴대폰 문자 가져오기</button>
       <button class="secondary" onclick="seedDemoData()">샘플 데이터 생성</button>
       <button class="danger" onclick="resetTestLedger()">테스트 DB 초기화</button>
@@ -1221,6 +1222,14 @@ def render_dashboard_html(
       }});
       window.location.reload();
     }}
+    async function generateElectronicSlips() {{
+      await fetch('/api/v1/scraper/generate-slips', {{
+        method: 'POST',
+        headers: API_HEADERS,
+        body: JSON.stringify({{ force_regenerate: false }})
+      }});
+      window.location.reload();
+    }}
     function uploadReceiptFile(inputEl) {{
       if (!inputEl.files || !inputEl.files[0]) return;
       const file = inputEl.files[0];
@@ -1244,14 +1253,22 @@ def render_dashboard_html(
     function uploadCsvFile(inputEl) {{
       if (!inputEl.files || !inputEl.files[0]) return;
       const file = inputEl.files[0];
+      const fName = (file.name || '').toLowerCase();
+      let portal = 'HOMETAX';
+      if (fName.includes('coupang') || fName.includes('쿠팡')) portal = 'COUPANG';
+      else if (fName.includes('naver') || fName.includes('네이버')) portal = 'NAVERPAY';
       const reader = new FileReader();
       reader.onload = async function(ev) {{
         const dataUrl = String(ev.target.result || '');
         const b64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
-        await fetch('/api/v1/imports/hometax-csv', {{
+        await fetch('/api/v1/scraper/ingest', {{
           method: 'POST',
           headers: API_HEADERS,
-          body: JSON.stringify({{ csv_content_b64: b64 }})
+          body: JSON.stringify({{
+            portal: portal,
+            content_b64: b64,
+            auto_generate_slips: true
+          }})
         }});
         window.location.reload();
       }};

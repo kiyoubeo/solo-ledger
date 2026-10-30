@@ -186,6 +186,46 @@ def test_import_phone_sms_api_endpoint(client):
     assert slip_data["card_label"] == "네이버현대카드"
     assert f"openReceiptModal({tx_id})" in client.get("/dashboard?year_month=ALL").text
 
+    # Verify Scraper Engine: targets list, HTML table (.xls) ingestion, and electronic slip generation
+    targets_res = client.get("/api/v1/scraper/targets")
+    assert targets_res.status_code == 200
+    assert "HOMETAX" in targets_res.json()["targets"]
+    assert "WOORI" in targets_res.json()["targets"]
+    assert "COUPANG" in targets_res.json()["targets"]
+
+    html_xls_payload = (
+        "<table><tr><th>승인일자</th><th>승인시간</th><th>카드번호</th>"
+        "<th>승인번호</th><th>이용가맹점</th><th>사업자번호</th><th>승인금액</th></tr>"
+        "<tr><td>2026-10-04</td><td>09:45:00</td><td>6534</td>"
+        "<td>88776655</td><td>주식회사 카카오페이</td><td>120-88-00767</td><td>23,050</td></tr></table>"
+    )
+    ingest_res = client.post(
+        "/api/v1/scraper/ingest",
+        headers={"X-API-Key": "test-secret-key"},
+        json={"portal": "WOORI", "raw_content": html_xls_payload, "auto_generate_slips": True},
+    )
+    assert ingest_res.status_code == 200
+    ing_body = ingest_res.json()
+    assert ing_body["status"] == "ingested"
+    assert ing_body["scraped_rows_count"] == 1
+    assert ing_body["generated_slips_count"] >= 1
+
+    # Verify E-Commerce order item matching for the 23,050 KRW KakaoPay transaction
+    ecom_json = '[{"주문일자":"2026-10-04","상품명":"무선 마우스 및 패드 세트","결제금액":"23050"}]'
+    ecom_res = client.post(
+        "/api/v1/scraper/ingest",
+        headers={"X-API-Key": "test-secret-key"},
+        json={"portal": "COUPANG", "raw_content": ecom_json},
+    )
+    assert ecom_res.status_code == 200
+    assert ecom_res.json()["matched_orders"] == 1
+
+    # Verify generated electronic slip file is served via /api/v1/transactions/{tx_id}/receipt-file
+    file_res = client.get(f"/api/v1/transactions/{tx_id}/receipt-file")
+    assert file_res.status_code == 200
+    assert "신용카드 매출전표" in file_res.text
+
+
 
 
 

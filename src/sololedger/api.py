@@ -42,6 +42,11 @@ from sololedger.notifier import send_telegram_memo_prompt
 from sololedger.ocr_engine import process_and_link_receipt
 from sololedger.phone_adb import import_phone_sms_to_ledger
 from sololedger.reconciler import reconcile_single_item
+from sololedger.scraper_service import (
+    SUPPORTED_SCRAPER_TARGETS,
+    generate_electronic_slips_for_ledger,
+    ingest_scraped_payload,
+)
 from sololedger.sms_parser import (
     format_card_label,
     parse_korean_card_sms,
@@ -558,6 +563,8 @@ async def serve_transaction_receipt_file(tx_id: int):
             media = "image/gif"
         elif raw.startswith(b"%PDF"):
             media = "application/pdf"
+        elif target_path.suffix.lower() in (".html", ".htm") or b"<!DOCTYPE html" in raw[:120]:
+            media = "text/html; charset=utf-8"
         else:
             media = "text/plain; charset=utf-8"
         return Response(content=raw, media_type=media)
@@ -684,6 +691,66 @@ async def reapply_rules_endpoint(
     cursor = conn.cursor()
     try:
         outcome = reapply_tax_rules_to_ledger(cursor)
+        conn.commit()
+        return outcome
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/scraper/targets")
+async def list_scraper_targets_endpoint():
+    """List supported card issuer, Hometax, Credit Finance Assoc., and e-commerce scraper targets."""
+    return {"count": len(SUPPORTED_SCRAPER_TARGETS), "targets": SUPPORTED_SCRAPER_TARGETS}
+
+
+@app.post("/api/v1/scraper/ingest")
+async def scraper_ingest_endpoint(
+    payload: Dict[str, Any] = Body(default_factory=dict),
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Ingest scraped JSON/HTML(.xls)/CSV card statements or e-commerce order lists."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    portal = str(payload.get("portal") or "HOMETAX")
+    raw_content = payload.get("raw_content") or ""
+    if not raw_content and payload.get("content_b64"):
+        raw_bytes = base64.b64decode(str(payload["content_b64"]))
+        raw_content = decode_csv_bytes(raw_bytes)
+    if not raw_content:
+        raise HTTPException(
+            status_code=400, detail="Either raw_content or content_b64 must be provided."
+        )
+
+    init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        outcome = ingest_scraped_payload(
+            cursor,
+            target_portal=portal,
+            raw_content=str(raw_content),
+            auto_generate_slips=bool(payload.get("auto_generate_slips", True)),
+        )
+        conn.commit()
+        return outcome
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/scraper/generate-slips")
+async def generate_electronic_slips_endpoint(
+    payload: Dict[str, Any] = Body(default_factory=dict),
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Batch-generate per-card electronic sales slip receipts (.html) under archive/by_card/."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    force = bool(payload.get("force_regenerate", False)) if isinstance(payload, dict) else False
+    init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        outcome = generate_electronic_slips_for_ledger(cursor, force_regenerate=force)
         conn.commit()
         return outcome
     finally:
