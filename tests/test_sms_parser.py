@@ -184,7 +184,11 @@ def test_import_phone_sms_api_endpoint(client):
     assert slip_data["tx_id"] == tx_id
     assert slip_data["raw_merchant_name"] == "씨유영등포신성점"
     assert slip_data["card_label"] == "네이버현대카드"
-    assert f"openReceiptModal({tx_id})" in client.get("/dashboard?year_month=ALL").text
+    dash_html = client.get("/dashboard?year_month=ALL").text
+    assert f"openReceiptModal({tx_id})" in dash_html
+    assert "@media print" in dash_html
+    assert "body.modal-open > section" in dash_html
+    assert "printReceiptSlip()" in dash_html
 
     # Verify Scraper Engine: targets list, HTML table (.xls) ingestion, and electronic slip generation
     targets_res = client.get("/api/v1/scraper/targets")

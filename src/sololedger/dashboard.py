@@ -884,12 +884,37 @@ def render_dashboard_html(
                  padding: 16px; font-size: 13px; line-height: 1.65; margin-bottom: 14px; }}
     .slip-title {{ text-align: center; font-size: 16px; font-weight: 800; margin-bottom: 10px;
                    border-bottom: 2px double #64748b; padding-bottom: 8px; }}
-    .slip-row {{ display: flex; justify-content: space-between; margin: 4px 0; }}
+    .slip-row {{ display: flex; justify-content: space-between; align-items: flex-start;
+                 gap: 12px; margin: 4px 0; }}
+    .slip-row > span:first-child {{ white-space: nowrap; flex-shrink: 0; color: #334155; }}
+    .slip-row code {{ word-break: break-all; text-align: right; }}
     .slip-divider {{ border-top: 1px dashed #94a3b8; margin: 8px 0; }}
     .slip-total {{ font-size: 17px; font-weight: 800; color: #1d4ed8; }}
     .receipt-img-wrap {{ text-align: center; margin-top: 10px; background: #f8fafc;
                          border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px; }}
     .receipt-img-wrap img {{ max-width: 100%; max-height: 360px; border-radius: 6px; }}
+    @media print {{
+      body.modal-open {{ background: #ffffff !important; padding: 0 !important; margin: 0 !important; }}
+      body.modal-open > header,
+      body.modal-open > section {{ display: none !important; }}
+      body.modal-open #receipt-modal-backdrop {{
+        position: static !important;
+        display: block !important;
+        background: transparent !important;
+        padding: 0 !important;
+      }}
+      body.modal-open .receipt-modal {{
+        max-width: 420px !important;
+        max-height: none !important;
+        overflow: visible !important;
+        box-shadow: none !important;
+        border: none !important;
+        margin: 0 auto !important;
+        padding: 8px !important;
+        break-inside: avoid;
+      }}
+      .no-print {{ display: none !important; }}
+    }}
   </style>
 </head>
 <body>
@@ -1025,17 +1050,17 @@ def render_dashboard_html(
     <div class="receipt-modal">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
         <h3 id="modal-header-title" style="margin:0;">🧾 신용카드 매출전표 / 영수증</h3>
-        <button class="secondary" onclick="closeReceiptModal()">✕ 닫기</button>
+        <button class="secondary no-print" onclick="closeReceiptModal()">✕ 닫기</button>
       </div>
       <div id="modal-slip-content" class="slip-box">불러오는 중...</div>
       <div id="modal-image-content" class="receipt-img-wrap"></div>
       <input type="file" id="modal-receipt-input" accept="image/*,.pdf"
              style="display:none" onchange="uploadReceiptForActiveTx(this)" />
-      <div style="display:flex; justify-content:flex-end; gap:6px; margin-top:14px;">
+      <div class="no-print" style="display:flex; justify-content:flex-end; gap:6px; margin-top:14px;">
         <button onclick="document.getElementById('modal-receipt-input').click()">
           📷 이 전표에 영수증 첨부
         </button>
-        <button class="secondary" onclick="window.print()">🖨️ 전표 인쇄</button>
+        <button class="secondary" onclick="printReceiptSlip()">🖨️ 전표 인쇄</button>
         <button class="secondary" onclick="closeReceiptModal()">닫기</button>
       </div>
     </div>
@@ -1055,6 +1080,7 @@ def render_dashboard_html(
       const backdrop = document.getElementById('receipt-modal-backdrop');
       const slipEl = document.getElementById('modal-slip-content');
       const imgEl = document.getElementById('modal-image-content');
+      document.body.classList.add('modal-open');
       backdrop.classList.add('open');
       slipEl.innerHTML = '영수증 정보를 불러오는 중...';
       imgEl.innerHTML = '';
@@ -1120,7 +1146,13 @@ def render_dashboard_html(
     }}
 
     function closeReceiptModal() {{
+      document.body.classList.remove('modal-open');
       document.getElementById('receipt-modal-backdrop').classList.remove('open');
+    }}
+
+    function printReceiptSlip() {{
+      document.body.classList.add('modal-open');
+      window.print();
     }}
 
     function onBackdropClick(ev) {{
