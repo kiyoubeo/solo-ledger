@@ -899,8 +899,22 @@ def render_dashboard_html(
   <style>
     body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
            margin: 0; padding: 24px; background: #f8fafc; color: #0f172a; }}
-    header {{ display: flex; justify-content: space-between; align-items: center;
-              margin-bottom: 24px; border-bottom: 2px solid #e2e8f0; padding-bottom: 12px; }}
+    header {{ display: flex; flex-direction: column; gap: 14px;
+              margin-bottom: 24px; border-bottom: 2px solid #e2e8f0; padding-bottom: 16px; }}
+    .header-top {{ display: flex; justify-content: space-between; align-items: flex-start;
+                   flex-wrap: wrap; gap: 12px; }}
+    .header-title-wrap h1 {{ margin: 0 0 6px 0; font-size: 22px; display: flex;
+                             align-items: center; flex-wrap: wrap; gap: 6px; }}
+    .header-meta {{ font-size: 13px; color: #475569; }}
+    .action-toolbar {{ display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }}
+    .action-toolbar button {{ margin-left: 0; }}
+    .filter-panel {{ background: #ffffff; border: 1px solid #e2e8f0; border-radius: 10px;
+                     padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; }}
+    .filter-row {{ display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }}
+    .filter-group {{ display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }}
+    .filter-group button {{ margin-left: 0; }}
+    .filter-label {{ font-size: 13px; font-weight: 700; color: #334155; white-space: nowrap; }}
+    .filter-divider {{ width: 1px; height: 20px; background: #cbd5e1; }}
     .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
               gap: 16px; margin-bottom: 24px; }}
     .card {{ background: #ffffff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 16px; }}
@@ -976,53 +990,77 @@ def render_dashboard_html(
 </head>
 <body>
   <header>
-    <div>
-      <h1>SoloLedger 경비·세무증빙 대시보드 (v{__version__})
-        <span class="badge env">{html.escape(summary['app_env'].upper())} MODE</span>
-      </h1>
-      <p>조회 기간:
-         <input type="date" id="start-date" value="{s_date}" />
-         ~
-         <input type="date" id="end-date" value="{e_date}" />
-         <button onclick="applyFilters()">기간 조회</button>
-         | 달별 조회:
-         <button class="secondary" onclick="shiftMonth(-1)" title="이전 달">◀</button>
-         <select id="month-filter" onchange="selectMonthRange(this.value)">
-           {month_select_html}
-         </select>
-         <button class="secondary" onclick="shiftMonth(1)" title="다음 달">▶</button>
-         <button class="secondary" onclick="setQuickRange('THIS_MONTH')">이번 달</button>
-         <button class="secondary" onclick="setQuickRange('LAST_MONTH')">지난 달</button>
-         <button class="secondary" onclick="setQuickRange('3M')">최근 3개월</button>
-         <button class="secondary" onclick="setQuickRange('THIS_YEAR')">올해 전체</button>
-         <button class="secondary" onclick="setQuickRange('ALL')">전체 기간</button>
-         | 카드 선택:
-         <select id="card-filter" onchange="applyFilters()">
-           {card_select_html}
-         </select>
-         | 귀속 연도: <strong>{summary['year']}</strong>
-         | DB: <code>{html.escape(Path(summary['db_path']).name)}</code></p>
-      <div class="no-print" style="margin-top:6px; display:flex; align-items:center; flex-wrap:wrap; gap:2px;">
-        <span style="font-size:12px; font-weight:600; color:#475569; margin-right:6px;">📅 월별 바로가기:</span>
-        {month_chips_html}
+    <div class="header-top">
+      <div class="header-title-wrap">
+        <h1>SoloLedger 경비·세무증빙 대시보드 (v{__version__})
+          <span class="badge env">{html.escape(summary['app_env'].upper())} MODE</span>
+        </h1>
+        <div class="header-meta">
+          귀속 연도: <strong>{summary['year']}년</strong>
+          &nbsp;|&nbsp;
+          원장 DB: <code>{html.escape(Path(summary['db_path']).name)}</code>
+        </div>
+      </div>
+      <div class="action-toolbar no-print">
+        <input type="file" id="receipt-file-input" accept="image/*,.pdf"
+               style="display:none" onchange="uploadReceiptFile(this)" />
+        <input type="file" id="csv-file-input" accept=".csv,.txt,.xls,.html,.json"
+               style="display:none" onchange="uploadCsvFile(this)" />
+        <button class="secondary" onclick="window.open('/manual', '_blank')">사용 매뉴얼(HTML)</button>
+        <button onclick="reapplyRules()">스마트 자동분류 실행</button>
+        <button onclick="generateElectronicSlips()">전자 매출전표 일괄 생성</button>
+        <button onclick="document.getElementById('receipt-file-input').click()">영수증 업로드(OCR)</button>
+        <button onclick="document.getElementById('csv-file-input').click()">카드사/홈택스 전표 업로드</button>
+        <button onclick="openCoupangModal()">🛒 쿠팡 주문·영수증 자동매칭</button>
+        <button onclick="importPhoneSms()">USB 휴대폰 문자 가져오기</button>
+        <button class="secondary" onclick="seedDemoData()">샘플 데이터 생성</button>
+        <button class="danger" onclick="resetTestLedger()">테스트 DB 초기화</button>
+        <button onclick="backupToNas()">NAS(Z:\\) 백업 동기화</button>
+        <button onclick="exportTaxPack('{summary['year_month']}')">세무사 제출용 ZIP+CSV 생성</button>
       </div>
     </div>
-    <div>
-      <input type="file" id="receipt-file-input" accept="image/*,.pdf"
-             style="display:none" onchange="uploadReceiptFile(this)" />
-      <input type="file" id="csv-file-input" accept=".csv,.txt,.xls,.html,.json"
-             style="display:none" onchange="uploadCsvFile(this)" />
-      <button class="secondary" onclick="window.open('/manual', '_blank')">사용 매뉴얼(HTML)</button>
-      <button onclick="reapplyRules()">스마트 자동분류 실행</button>
-      <button onclick="generateElectronicSlips()">전자 매출전표 일괄 생성</button>
-      <button onclick="document.getElementById('receipt-file-input').click()">영수증 업로드(OCR)</button>
-      <button onclick="document.getElementById('csv-file-input').click()">카드사/홈택스 전표 업로드</button>
-      <button onclick="openCoupangModal()">🛒 쿠팡 주문·영수증 자동매칭</button>
-      <button onclick="importPhoneSms()">USB 휴대폰 문자 가져오기</button>
-      <button class="secondary" onclick="seedDemoData()">샘플 데이터 생성</button>
-      <button class="danger" onclick="resetTestLedger()">테스트 DB 초기화</button>
-      <button onclick="backupToNas()">NAS(Z:\\) 백업 동기화</button>
-      <button onclick="exportTaxPack('{summary['year_month']}')">세무사 제출용 ZIP+CSV 생성</button>
+
+    <div class="filter-panel no-print">
+      <div class="filter-row">
+        <div class="filter-group">
+          <span class="filter-label">📆 조회 기간:</span>
+          <input type="date" id="start-date" value="{s_date}" />
+          <span>~</span>
+          <input type="date" id="end-date" value="{e_date}" />
+          <button onclick="applyFilters()">기간 조회</button>
+        </div>
+        <div class="filter-divider"></div>
+        <div class="filter-group">
+          <button class="secondary" onclick="setQuickRange('THIS_MONTH')">이번 달</button>
+          <button class="secondary" onclick="setQuickRange('LAST_MONTH')">지난 달</button>
+          <button class="secondary" onclick="setQuickRange('3M')">최근 3개월</button>
+          <button class="secondary" onclick="setQuickRange('THIS_YEAR')">올해 전체</button>
+          <button class="secondary" onclick="setQuickRange('ALL')">전체 기간</button>
+        </div>
+        <div class="filter-divider"></div>
+        <div class="filter-group">
+          <span class="filter-label">💳 카드 선택:</span>
+          <select id="card-filter" onchange="applyFilters()">
+            {card_select_html}
+          </select>
+        </div>
+      </div>
+
+      <div class="filter-row" style="border-top: 1px dashed #e2e8f0; padding-top: 8px;">
+        <div class="filter-group">
+          <span class="filter-label">📅 달별 조회:</span>
+          <button class="secondary" onclick="shiftMonth(-1)" title="이전 달">◀ 이전 달</button>
+          <select id="month-filter" onchange="selectMonthRange(this.value)">
+            {month_select_html}
+          </select>
+          <button class="secondary" onclick="shiftMonth(1)" title="다음 달">다음 달 ▶</button>
+        </div>
+        <div class="filter-divider"></div>
+        <div style="display:flex; align-items:center; flex-wrap:wrap; gap:3px;">
+          <span class="filter-label" style="margin-right:4px;">월별 바로가기:</span>
+          {month_chips_html}
+        </div>
+      </div>
     </div>
   </header>
 
