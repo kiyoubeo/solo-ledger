@@ -111,6 +111,31 @@ def reconcile_single_item(cursor: sqlite3.Cursor, item: ReconcileItem) -> Dict[s
         except ValueError:
             pass
 
+    # Stage 2b: Same-day fallback for billing statements without approval_no (e.g. Hyundai Card .xls)
+    if (
+        matched_tx_id is None
+        and not item.approval_no
+        and item.reconcile_source != "OCR_MATCHED"
+        and len(item.transacted_at) >= 10
+    ):
+        date_prefix = item.transacted_at[:10]
+        cursor.execute(
+            """
+            SELECT tx_id FROM card_transactions
+            WHERE SUBSTR(transacted_at, 1, 10) = ?
+              AND card_last4 = ?
+              AND ABS(total_amount) = ABS(?)
+              AND (reconcile_status = 'SMS_ONLY' OR raw_merchant_name = ?)
+            ORDER BY tx_id ASC
+            LIMIT 1
+            """,
+            (date_prefix, item.card_last4, item.total_amount, item.merchant_name),
+        )
+        row = cursor.fetchone()
+        if row:
+            matched_tx_id = row[0]
+            match_stage = "STAGE_2_AMOUNT_TIME_WINDOW"
+
     target_status = "CANCELED" if item.is_cancel else item.reconcile_source
 
     if matched_tx_id is not None:

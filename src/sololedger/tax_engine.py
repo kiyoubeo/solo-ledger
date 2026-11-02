@@ -72,11 +72,16 @@ _BUILTIN_INSURANCE_RE = re.compile(
     re.IGNORECASE,
 )
 _BUILTIN_TRAVEL_RE = re.compile(
-    r"(항공|놀유니버스|야놀자|인터파크|하나투어|모두투어|아고다|트립닷컴|마이리얼트립)",
+    r"(항공|고속버스|시외버스|운송사업조합|놀유니버스|야놀자|인터파크|하나투어|모두투어|아고다|트립닷컴|마이리얼트립)",
     re.IGNORECASE,
 )
 _BUILTIN_SERVICE_FEE_RE = re.compile(
-    r"(알림서비스|연회비|문자서비스|인증수수료|티머니|이비카드|후불교통)",
+    r"(알림서비스|연회비|문자서비스|인증수수료|티머니|이비카드|후불교통|"
+    r"멤버십|네이버플러스|일상케어|안심케어|나이스_마이홈)",
+    re.IGNORECASE,
+)
+_BUILTIN_RESTAURANT_RE = re.compile(
+    r"(대게|횟집|해물|초밥|스시|식당|맛집|이마트24|GS25|롯데리아|카페인클럽)",
     re.IGNORECASE,
 )
 _BUILTIN_BOOKSTORE_RE = re.compile(
@@ -166,6 +171,15 @@ def evaluate_tax_rules(
         matched_result = {
             "account_code": "830",
             "account_name": "소모품비",
+            "vat_deduction_type": "DEDUCTIBLE",
+            "non_deduct_reason": None,
+            "is_vehicle_expense": False,
+            "require_memo_prompt": False,
+        }
+    elif matched_result is None and _BUILTIN_RESTAURANT_RE.search(merchant_name or ""):
+        matched_result = {
+            "account_code": "811",
+            "account_name": "복리후생비",
             "vat_deduction_type": "DEDUCTIBLE",
             "non_deduct_reason": None,
             "is_vehicle_expense": False,

@@ -249,6 +249,27 @@ def test_import_phone_sms_api_endpoint(client):
     assert woori_csv_res.status_code == 200
     assert woori_csv_res.json()["scraped_rows_count"] == 3
 
+    # Verify real Hyundai Card HTML .xls billing statement format (colspan banner + Korean date + </td   >)
+    hyundai_xls_html = (
+        '<table cellspacing="0" cellpadding="0" border="1">'
+        '<tr><th colspan="10">2026년 11월 이용대금명세서</th></tr>'
+        '<tr><th colspan="10">결제 상세내역</th></tr>'
+        "<tr><th>이용일</th><th>이용카드</th><th>이용가맹점</th><th>이용금액</th></tr>"
+        "<tr><td>2026년 10월 01일</td><td>본인 네이버 현대카드</td>"
+        "<td>나이스카페인클럽가산먹거리촌점</td   ><td>3,800</td></tr>"
+        "<tr><td>2026년 10월 02일</td><td>본인 네이버 현대카드</td>"
+        "<td>전국고속버스운송사업조합</td   ><td>43,300</td></tr>"
+        "<tr><td>-</td><td></td><td>총 합계 2 건</td><td>0</td></tr>"
+        "</table>"
+    )
+    hyundai_res = client.post(
+        "/api/v1/scraper/ingest",
+        headers={"X-API-Key": "test-secret-key"},
+        json={"portal": "HYUNDAI", "raw_content": hyundai_xls_html, "auto_generate_slips": True},
+    )
+    assert hyundai_res.status_code == 200
+    assert hyundai_res.json()["scraped_rows_count"] == 2
+
 
 
 

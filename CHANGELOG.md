@@ -29,3 +29,4 @@
 | 2026-10-30 | `fix` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/dashboard.py, tests/test_sms_parser.py` | 영수증 팝업 모달 인쇄 시 배경 대시보드 숨김 및 1페이지 단독 출력(@media print) 수정 | `PASSED` |
 | 2026-10-30 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/archiver.py (+3 files)` | 영수증 PDF 인쇄 시 전표별 고유 식별 파일명(매출전표_일시_카드_가맹점_계정_금액_TX번호) 자동 지정 | `PASSED` |
 | 2026-11-02 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/dashboard.py, src/sololedger/importers.py (+5 files)` | 우리카드 실명세서 CSV(국내 이용내역 배너·줄바꿈 헤더·MM.DD 일시·취소금액) 파싱 및 10월 15건 원장 대사 반영 | `PASSED` |
+| 2026-11-02 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/importers.py, src/sololedger/reconciler.py (+3 files)` | 현대카드 이용대금명세서 HTML(.xls) 파싱(한글날짜·비정형 닫힘태그·소계제외·네이버현대카드 매핑) 및 10월 11건 반영 | `PASSED` |

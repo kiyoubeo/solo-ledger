@@ -102,8 +102,8 @@ SUPPORTED_SCRAPER_TARGETS: Dict[str, Dict[str, str]] = {
     },
 }
 
-_HTML_TR_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
-_HTML_CELL_RE = re.compile(r"<t[dh][^>]*>(.*?)</t[dh]>", re.IGNORECASE | re.DOTALL)
+_HTML_TR_RE = re.compile(r"<tr[^>]*>(.*?)</tr\s*>", re.IGNORECASE | re.DOTALL)
+_HTML_CELL_RE = re.compile(r"<t[dh][^>]*>(.*?)</t[dh]\s*>", re.IGNORECASE | re.DOTALL)
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
 
@@ -120,13 +120,13 @@ def extract_rows_from_html_table(html_text: str) -> List[Dict[str, str]]:
 
     header_cols: List[str] = []
     data_rows: List[Dict[str, str]] = []
-    header_keywords = ("일자", "일시", "가맹점", "상호", "금액", "승인", "카드", "상품", "주문")
+    header_keywords = ("일자", "일시", "이용일", "가맹점", "상호", "금액", "승인", "카드", "상품", "주문")
 
     for tr_inner in tr_matches:
         cells = [_strip_html_tags(c) for c in _HTML_CELL_RE.findall(tr_inner)]
         if not cells or all(not c for c in cells):
             continue
-        if not header_cols:
+        if not header_cols and len(cells) >= 3:
             joined = " ".join(cells)
             if any(k in joined for k in header_keywords):
                 header_cols = cells

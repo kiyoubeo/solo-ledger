@@ -34,7 +34,18 @@ def _extract_year_hint(text: str) -> Optional[str]:
 
 def _normalize_datetime_str(raw_dt: str, default_year: Optional[str] = None) -> str:
     """Normalize various date/time formats into `YYYY-MM-DD HH:MM:SS`."""
-    s = str(raw_dt or "").strip().replace(".", "-").replace("/", "-")
+    raw_str = str(raw_dt or "").strip()
+    m_kor = re.search(
+        r"(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?",
+        raw_str,
+    )
+    if m_kor:
+        y, mo, d, h, mi, sec = m_kor.groups()
+        if h and mi:
+            return f"{int(y):04d}-{int(mo):02d}-{int(d):02d} {int(h):02d}:{mi}:{sec or '00'}"
+        return f"{int(y):04d}-{int(mo):02d}-{int(d):02d} 12:00:00"
+
+    s = raw_str.replace(".", "-").replace("/", "-")
     # YYYY-MM-DD HH:MM:SS
     m_full = re.search(r"(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})(?::(\d{2}))?", s)
     if m_full:
@@ -60,7 +71,17 @@ def _normalize_datetime_str(raw_dt: str, default_year: Optional[str] = None) -> 
 
 
 def _extract_card_last4(raw_card: str) -> str:
-    cleaned = re.sub(r"[\s\-]", "", str(raw_card or "").strip())
+    txt = str(raw_card or "").strip()
+    if "네이버" in txt and "현대" in txt:
+        return "현대NV"
+    if "현대백화" in txt:
+        return "현대백화"
+    if "하이패스" in txt and ("KB" in txt.upper() or "국민" in txt):
+        return "KB하이"
+    m_last4 = re.findall(r"\d[\d*]{2}[\d*]", txt)
+    if m_last4:
+        return m_last4[-1]
+    cleaned = re.sub(r"[\s\-]", "", txt)
     if len(cleaned) >= 4:
         return cleaned[-4:]
     return "0000"
