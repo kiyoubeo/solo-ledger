@@ -483,14 +483,18 @@ def parse_hometax_csv(csv_text: str) -> List[ReconcileItem]:
 
         cancel_amt = abs(_parse_int_amount(_pick_col(row, ["취소금액", "cancel_amount"])))
         cancel_hint = _pick_col(row, ["취소여부", "거래구분", "상태", "결제예정일", "is_cancel"])
-        is_cancel = (
-            ("취소" in cancel_hint)
-            or (cancel_hint.lower() == "true")
-            or (total_amount < 0)
-            or (cancel_amt > 0 and cancel_amt >= abs(total_amount))
-        )
-        if is_cancel and total_amount > 0:
-            total_amount = -total_amount
+        if 0 < cancel_amt < abs(total_amount):
+            total_amount = abs(total_amount) - cancel_amt
+            is_cancel = False
+        else:
+            is_cancel = (
+                ("취소" in cancel_hint)
+                or (cancel_hint.lower() in ("true", "y", "cancel", "canceled"))
+                or (total_amount < 0)
+                or (cancel_amt > 0 and cancel_amt >= abs(total_amount))
+            )
+            if is_cancel and total_amount > 0:
+                total_amount = -total_amount
 
         tax_type_raw = _pick_col(
             row, ["과세유형", "가맹점유형", "사업자유형", "tax_type_code"], "일반과세자"

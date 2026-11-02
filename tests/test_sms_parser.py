@@ -294,4 +294,25 @@ def test_import_phone_sms_api_endpoint(client):
     assert kb_body["mode"] == "CARD_SLIP"
     assert kb_body["scraped_rows_count"] == 3
 
+    # Verify real Lotte Card multi-table HTML .xls format (summary table + detail table + partial cancel)
+    lotte_xls_html = (
+        "<table><thead><tr><th>조회기간</th><th>건수합계</th><th>금액합계(원)</th></tr></thead>"
+        "<tbody><tr><td>2025.11.02~2026.11.02</td><td>2건</td><td>39,400</td></tr></tbody></table>"
+        "<table><thead><tr><th>이용일자</th><th>이용시간</th><th>이용카드</th><th>이용가맹점</th>"
+        "<th>업종</th><th>이용금액</th><th>승인번호</th><th>취소여부</th><th>취소금액</th></tr></thead>"
+        "<tbody>"
+        "<tr><td>2026.10.30</td><td>21:07</td><td>본인 LOCA X Special SE(6*4*)</td>"
+        "<td>이마트24 가산점</td><td>편의점</td><td>28,400</td><td>64018116</td><td>N</td><td>0</td></tr>"
+        "<tr><td>2026.05.09</td><td>15:02</td><td>본인 LOCA X Special SE(6*4*)</td>"
+        "<td>(주)트리니티항공</td><td>항공사</td><td>136,000</td><td>66469034</td><td>Y</td><td>-125,000</td></tr>"
+        "</tbody></table>"
+    )
+    lotte_res = client.post(
+        "/api/v1/scraper/ingest",
+        headers={"X-API-Key": "test-secret-key"},
+        json={"portal": "LOTTE", "raw_content": lotte_xls_html, "auto_generate_slips": True},
+    )
+    assert lotte_res.status_code == 200
+    assert lotte_res.json()["scraped_rows_count"] == 2
+
 

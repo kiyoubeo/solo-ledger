@@ -72,22 +72,22 @@ _BUILTIN_INSURANCE_RE = re.compile(
     re.IGNORECASE,
 )
 _BUILTIN_TRAVEL_RE = re.compile(
-    r"(항공|고속버스|시외버스|공항버스|시티투어|카카오T대리|대리운전|운송사업조합|"
-    r"놀유니버스|야놀자|인터파크|하나투어|모두투어|아고다|트립닷컴|마이리얼트립)",
+    r"(항공|고속버스|시외버스|공항버스|시티투어|카카오T대리|대리운전|운송사업조합|해운조합|여객선|"
+    r"와이페이모어|놀유니버스|야놀자|인터파크|하나투어|모두투어|아고다|트립닷컴|마이리얼트립)",
     re.IGNORECASE,
 )
 _BUILTIN_SERVICE_FEE_RE = re.compile(
-    r"(알림서비스|연회비|문자서비스|인증수수료|티머니|이비카드|후불교통|"
-    r"멤버십|네이버플러스|일상케어|안심케어|나이스_마이홈)",
+    r"(알림서비스|연회비|문자서비스|인증수수료|티머니|이비카드|후불교통|스카이라이프|케이티에이치|"
+    r"HCN|소프트먼트|일등코리아|멤버십|네이버플러스|일상케어|안심케어|나이스_마이홈)",
     re.IGNORECASE,
 )
 _BUILTIN_RESTAURANT_RE = re.compile(
-    r"(대게|횟집|해물|초밥|스시|식당|맛집|이마트24|GS25|롯데리아|카페인클럽|"
-    r"쿠팡이츠|지코바|떡볶이|엘리시안)",
+    r"(대게|횟집|해물|초밥|스시|식당|맛집|이마트24|GS25|지에스\(GS\)25|롯데리아|카페인클럽|"
+    r"쿠팡이츠|지코바|떡볶이|엘리시안|KFC|꼬막|고칸|감자탕|김가네|바나타이거|소하계|아이스크림|은행골|호코)",
     re.IGNORECASE,
 )
 _BUILTIN_TOLL_RE = re.compile(
-    r"(터널/도로|유료도로)",
+    r"(터널/도로|유료도로|자동차세)",
     re.IGNORECASE,
 )
 _BUILTIN_BOOKSTORE_RE = re.compile(
@@ -95,7 +95,7 @@ _BUILTIN_BOOKSTORE_RE = re.compile(
     re.IGNORECASE,
 )
 _BUILTIN_OFFLINE_MART_RE = re.compile(
-    r"(다이소|아성다이소|이마트|홈플러스|롯데마트|롯데쇼핑|신세계|아울렛|"
+    r"(다이소|아성다이소|이마트|홈플러스|롯데마트|롯데쇼핑|신세계|아울렛|삼성닷컴|엠스토아|제로백|"
     r"코스트코|트레이더스|하나로마트|케이마트|휴마트|할인마트|홈마트)",
     re.IGNORECASE,
 )
@@ -116,6 +116,26 @@ def evaluate_tax_rules(
             "require_memo_prompt": False,
         }
         return _apply_cached_merchant_overrides(cursor, base_ins, merchant_name, biz_reg_no)
+    if _BUILTIN_BOOKSTORE_RE.search(m_txt):
+        base_book = {
+            "account_code": "826",
+            "account_name": "도서인쇄비",
+            "vat_deduction_type": "DEDUCTIBLE",
+            "non_deduct_reason": None,
+            "is_vehicle_expense": False,
+            "require_memo_prompt": False,
+        }
+        return _apply_cached_merchant_overrides(cursor, base_book, merchant_name, biz_reg_no)
+    if _BUILTIN_SERVICE_FEE_RE.search(m_txt):
+        base_fee = {
+            "account_code": "831",
+            "account_name": "지급수수료",
+            "vat_deduction_type": "DEDUCTIBLE",
+            "non_deduct_reason": None,
+            "is_vehicle_expense": False,
+            "require_memo_prompt": False,
+        }
+        return _apply_cached_merchant_overrides(cursor, base_fee, merchant_name, biz_reg_no)
     if "쿠팡이츠" in m_txt:
         base_eats = {
             "account_code": "811",
@@ -136,7 +156,12 @@ def evaluate_tax_rules(
             "require_memo_prompt": False,
         }
         return _apply_cached_merchant_overrides(cursor, base_wow, merchant_name, biz_reg_no)
-    if "카카오T대리" in m_txt or "대리운전" in m_txt:
+    if (
+        "카카오T대리" in m_txt
+        or "대리운전" in m_txt
+        or "와이페이모어" in m_txt
+        or "취급수수료" in m_txt
+    ):
         base_daeri = {
             "account_code": "812",
             "account_name": "여비교통비",
@@ -265,6 +290,8 @@ def generate_default_memo(
     if account_code == "822":
         if "하이패스" in m_name or "터널/도로" in m_name or "유료도로" in m_name:
             return "하이패스 통행료"
+        if "자동차세" in m_name:
+            return "업무용승용차 자동차세 납부"
         if "주차" in m_name or "파크" in m_name:
             return "차량 주차료"
         if any(k in m_name for k in ("정비", "스피드메이트", "오토큐", "모터스", "타이어", "세차")):
@@ -275,7 +302,12 @@ def generate_default_memo(
     if account_code == "812":
         if "항공" in m_name:
             return "출장·여비 항공권 발권"
-        if any(k in m_name for k in ("놀유니버스", "야놀자", "인터파크", "투어", "아고다", "트립")):
+        if "해운" in m_name:
+            return "출장·여비 선박권 발권"
+        if any(
+            k in m_name
+            for k in ("놀유니버스", "야놀자", "인터파크", "투어", "아고다", "트립", "와이페이모어", "취급수수료")
+        ):
             return "출장·여비 여행플랫폼 수수료"
         return "업무용 대중교통·여비교통비"
     if account_code == "821":

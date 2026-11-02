@@ -102,6 +102,7 @@ SUPPORTED_SCRAPER_TARGETS: Dict[str, Dict[str, str]] = {
     },
 }
 
+_HTML_TABLE_RE = re.compile(r"<table[^>]*>(.*?)</table\s*>", re.IGNORECASE | re.DOTALL)
 _HTML_TR_RE = re.compile(r"<tr[^>]*>(.*?)</tr\s*>", re.IGNORECASE | re.DOTALL)
 _HTML_CELL_RE = re.compile(r"<t[dh][^>]*>(.*?)</t[dh]\s*>", re.IGNORECASE | re.DOTALL)
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
@@ -114,30 +115,40 @@ def _strip_html_tags(raw_html: str) -> str:
 
 def extract_rows_from_html_table(html_text: str) -> List[Dict[str, str]]:
     """Extract header-mapped row dictionaries from HTML <table> (used by card issuer .xls/DOM)."""
-    tr_matches = _HTML_TR_RE.findall(html_text or "")
-    if not tr_matches:
-        return []
-
-    header_cols: List[str] = []
+    raw = html_text or ""
+    table_blocks = _HTML_TABLE_RE.findall(raw) if "<table" in raw.lower() else [raw]
     data_rows: List[Dict[str, str]] = []
     header_keywords = ("일자", "일시", "이용일", "가맹점", "상호", "금액", "승인", "카드", "상품", "주문")
+    detail_markers = ("가맹점", "상호", "이용하신곳", "승인번호", "상품", "품목")
 
-    for tr_inner in tr_matches:
-        cells = [_strip_html_tags(c) for c in _HTML_CELL_RE.findall(tr_inner)]
-        if not cells or all(not c for c in cells):
+    for block in table_blocks:
+        tr_matches = _HTML_TR_RE.findall(block)
+        if not tr_matches:
             continue
-        if not header_cols and len(cells) >= 3:
-            joined = " ".join(cells)
-            if any(k in joined for k in header_keywords):
-                header_cols = cells
+        header_cols: List[str] = []
+        for tr_inner in tr_matches:
+            cells = [_strip_html_tags(c) for c in _HTML_CELL_RE.findall(tr_inner)]
+            if not cells or all(not c for c in cells):
                 continue
-        if header_cols and len(cells) >= 3:
-            row_dict: Dict[str, str] = {}
-            for idx, col_name in enumerate(header_cols):
-                if idx < len(cells) and col_name:
-                    row_dict[col_name] = cells[idx]
-            if row_dict:
-                data_rows.append(row_dict)
+            joined = " ".join(cells)
+            is_summary_hdr = (
+                ("건수합계" in joined or "금액합계" in joined or "조회기간" in cells[0])
+                and not any(m in joined for m in detail_markers)
+            )
+            if not is_summary_hdr and len(cells) >= 3:
+                if not header_cols and any(k in joined for k in header_keywords):
+                    header_cols = cells
+                    continue
+                if "<th" in tr_inner.lower() and sum(1 for k in header_keywords if k in joined) >= 2:
+                    header_cols = cells
+                    continue
+            if header_cols and len(cells) >= 3:
+                row_dict: Dict[str, str] = {}
+                for idx, col_name in enumerate(header_cols):
+                    if idx < len(cells) and col_name:
+                        row_dict[col_name] = cells[idx]
+                if row_dict:
+                    data_rows.append(row_dict)
 
     return data_rows
 
@@ -273,14 +284,18 @@ def _row_dict_to_reconcile_item(
         row,
         ["취소여부", "거래구분", "승인구분", "매입상태", "상태", "결제예정일", "is_cancel", "cncllyn"],
     )
-    is_cancel = (
-        ("취소" in cancel_hint)
-        or (cancel_hint.lower() in ("true", "y", "cancel", "canceled"))
-        or (total_amount < 0)
-        or (cancel_amt > 0 and cancel_amt >= abs(total_amount))
-    )
-    if is_cancel and total_amount > 0:
-        total_amount = -total_amount
+    if 0 < cancel_amt < abs(total_amount):
+        total_amount = abs(total_amount) - cancel_amt
+        is_cancel = False
+    else:
+        is_cancel = (
+            ("취소" in cancel_hint)
+            or (cancel_hint.lower() in ("true", "y", "cancel", "canceled"))
+            or (total_amount < 0)
+            or (cancel_amt > 0 and cancel_amt >= abs(total_amount))
+        )
+        if is_cancel and total_amount > 0:
+            total_amount = -total_amount
 
     tax_type_raw = _pick_col(
         row,
