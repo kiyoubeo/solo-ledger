@@ -1231,6 +1231,264 @@ def render_electronic_slip_html(tx_row: Dict[str, Any]) -> str:
 </html>"""
 
 
+def render_electronic_statement_html(tx_row: Dict[str, Any]) -> str:
+    """Render a standalone printable Korean Transaction Statement (거래명세서)."""
+    c_code = str(tx_row.get("card_last4") or "0000")
+    c_label = html.escape(format_card_label(c_code))
+    tx_id = int(tx_row["tx_id"])
+    t_dt = html.escape(str(tx_row["transacted_at"]))
+    md_str = html.escape(str(tx_row["transacted_at"])[5:10].replace("-", "/"))
+    app_no = html.escape(str(tx_row.get("approval_no") or f"STMT-{tx_id:06d}"))
+    merchant = html.escape(str(tx_row["raw_merchant_name"]))
+    biz_no = html.escape(str(tx_row.get("biz_reg_no") or "미등록 (온라인/PG 가맹점)"))
+    total_amt = int(tx_row["total_amount"])
+    supply_val = int(tx_row["supply_value"])
+    vat_amt = int(tx_row["vat_amount"])
+    acc_str = html.escape(f"{tx_row['account_code']} {tx_row['account_name']}")
+    raw_memo = str(tx_row.get("counterparty_info") or "").strip()
+    item_title = html.escape(raw_memo if raw_memo else f"{tx_row['raw_merchant_name']} 구매 품목")
+    slip_title = build_receipt_print_title(
+        tx_id=tx_id,
+        transacted_at=str(tx_row["transacted_at"]),
+        card_last4=c_code,
+        merchant_name=str(tx_row["raw_merchant_name"]),
+        account_name=str(tx_row["account_name"]),
+        total_amount=total_amt,
+    )
+    stmt_title = html.escape(slip_title.replace("매출전표_", "거래명세서_", 1))
+
+    return f"""<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <title>{stmt_title}</title>
+  <style>
+    body {{ font-family: 'Malgun Gothic', -apple-system, sans-serif; background: #f1f5f9;
+           padding: 24px; color: #0f172a; }}
+    .stmt {{ max-width: 540px; margin: 0 auto; background: #ffffff; border: 2px solid #1e3a8a;
+             border-radius: 6px; padding: 22px; box-shadow: 0 6px 18px rgba(0,0,0,0.08); }}
+    h1 {{ text-align: center; font-size: 20px; color: #1e3a8a; letter-spacing: 4px;
+          margin: 0 0 4px 0; }}
+    .sub {{ text-align: center; font-size: 12px; color: #475569; margin-bottom: 14px; }}
+    table {{ width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 12px; }}
+    th, td {{ border: 1px solid #94a3b8; padding: 7px 8px; text-align: left; }}
+    th {{ background: #eff6ff; color: #1e3a8a; font-weight: 700; width: 22%; }}
+    td.num, th.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
+    .tot-bar {{ background: #eff6ff; border: 1px solid #1e3a8a; padding: 10px 14px;
+                display: flex; justify-content: space-between; font-weight: 800;
+                font-size: 15px; color: #1e3a8a; margin-bottom: 12px; }}
+    .foot {{ margin-top: 10px; font-size: 11px; color: #64748b; text-align: center; }}
+  </style>
+</head>
+<body>
+  <div class="stmt">
+    <h1>거 래 명 세 서</h1>
+    <div class="sub">(공급받는자 보관용 · 전표번호 #{tx_id})</div>
+    <table>
+      <tr>
+        <th>거래일시</th><td>{t_dt}</td>
+        <th>승인/문서번호</th><td>{app_no}</td>
+      </tr>
+      <tr>
+        <th>공급자 상호</th><td><strong>{merchant}</strong></td>
+        <th>사업자번호</th><td>{biz_no}</td>
+      </tr>
+      <tr>
+        <th>결제수단</th><td>{c_label}</td>
+        <th>회계계정</th><td><strong>{acc_str}</strong></td>
+      </tr>
+    </table>
+    <div class="tot-bar">
+      <span>합계금액 (부가세 포함)</span>
+      <span>금 {total_amt:,} 원정 (₩{total_amt:,})</span>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th style="width:14%;">월/일</th>
+          <th style="width:42%;">품목 및 규격</th>
+          <th class="num" style="width:10%;">수량</th>
+          <th class="num" style="width:17%;">공급가액</th>
+          <th class="num" style="width:17%;">세액(VAT)</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>{md_str}</td>
+          <td><strong>{item_title}</strong></td>
+          <td class="num">1</td>
+          <td class="num">{supply_val:,}원</td>
+          <td class="num">{vat_amt:,}원</td>
+        </tr>
+      </tbody>
+      <tfoot>
+        <tr>
+          <th colspan="2">합 계</th>
+          <td class="num"><strong>1</strong></td>
+          <td class="num"><strong>{supply_val:,}원</strong></td>
+          <td class="num"><strong>{vat_amt:,}원</strong></td>
+        </tr>
+      </tfoot>
+    </table>
+    <div class="foot">SoloLedger 전자 거래명세서 및 세무 소명 증빙 아카이브</div>
+  </div>
+</body>
+</html>"""
+
+
+def generate_electronic_statement_for_tx(
+    cursor: sqlite3.Cursor,
+    tx_id: int,
+    item_name: Optional[str] = None,
+    account_code: Optional[str] = None,
+    file_bytes: Optional[bytes] = None,
+    file_name: Optional[str] = None,
+    archive_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Generate or attach a Transaction Statement (거래명세서) for a specific transaction."""
+    cursor.execute("SELECT * FROM card_transactions WHERE tx_id = ?", (tx_id,))
+    row = cursor.fetchone()
+    if row is None:
+        raise ValueError(f"Transaction #{tx_id} not found.")
+    tx = dict(row)
+
+    resolved_item = (item_name or "").strip()
+    if not resolved_item and file_bytes:
+        try:
+            decoded_txt = file_bytes.decode("utf-8", errors="ignore")
+            extracted = extract_coupang_orders_from_content(decoded_txt)
+            if extracted:
+                first_row = extracted[0]
+                resolved_item = str(
+                    first_row.get("상품명")
+                    or first_row.get("품목명")
+                    or first_row.get("item_name")
+                    or ""
+                ).strip()
+        except Exception:
+            pass
+    if not resolved_item and file_name:
+        stem = Path(file_name).stem
+        clean_stem = re.sub(r"^(거래명세서|명세서|영수증|전표)[_\-\s]*", "", stem).strip()
+        if clean_stem and not clean_stem.isdigit():
+            resolved_item = f"거래명세서({clean_stem})"
+        else:
+            resolved_item = f"거래명세서 첨부({file_name})"
+    if not resolved_item:
+        resolved_item = str(tx.get("counterparty_info") or "").strip()
+    if not resolved_item:
+        resolved_item = f"{tx['raw_merchant_name']} 거래명세서 확인 품목"
+
+    new_code = account_code or str(tx["account_code"])
+    new_name = str(tx["account_name"])
+    new_vat_type = str(tx["vat_deduction_type"])
+    new_reason = tx.get("non_deduct_reason")
+
+    inferred = _detect_memo_account_override(resolved_item)
+    if inferred and not account_code:
+        inf_code, inf_name, force_non_ded, inf_reason = inferred
+        if not (new_code == "830" and inf_code == "212" and int(tx["total_amount"]) < 300_000):
+            new_code = inf_code
+            new_name = inf_name
+            new_vat_type = "NON_DEDUCTIBLE" if force_non_ded else "DEDUCTIBLE"
+            new_reason = inf_reason
+    elif new_code == "999":
+        new_code = "830"
+        new_name = "소모품비"
+        new_vat_type = "DEDUCTIBLE"
+
+    sup, vat = calculate_supply_and_vat(int(tx["total_amount"]), new_vat_type)
+    cursor.execute(
+        """
+        UPDATE card_transactions
+        SET account_code = ?,
+            account_name = ?,
+            vat_deduction_type = ?,
+            non_deduct_reason = ?,
+            supply_value = ?,
+            vat_amount = ?,
+            counterparty_info = ?,
+            reconcile_status = CASE
+                WHEN reconcile_status = 'SMS_ONLY' THEN 'OCR_MATCHED'
+                ELSE reconcile_status
+            END,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE tx_id = ?
+        """,
+        (new_code, new_name, new_vat_type, new_reason, sup, vat, resolved_item, tx_id),
+    )
+
+    cursor.execute("SELECT * FROM card_transactions WHERE tx_id = ?", (tx_id,))
+    updated_tx = dict(cursor.fetchone())
+    c_code = str(updated_tx.get("card_last4") or "0000")
+
+    if file_bytes:
+        payload_bytes = file_bytes
+        orig_name = file_name or f"statement_tx_{tx_id}.pdf"
+    else:
+        stmt_html = render_electronic_statement_html(updated_tx)
+        payload_bytes = stmt_html.encode("utf-8")
+        orig_name = f"statement_tx_{tx_id}.html"
+
+    file_hash = compute_sha256_hex(payload_bytes)
+    base_arch = build_archived_filename(
+        transacted_at=str(updated_tx["transacted_at"]),
+        merchant_name=str(updated_tx["raw_merchant_name"]),
+        account_name=str(updated_tx["account_name"]),
+        total_amount=int(updated_tx["total_amount"]),
+        item_summary=resolved_item,
+        original_file_name=orig_name,
+    )
+    arch_name = f"거래명세서_{base_arch}"
+
+    orig_path, _ = save_receipt_files(
+        payload_bytes,
+        original_file_name=orig_name,
+        archived_file_name=arch_name,
+        archive_dir=archive_dir,
+        card_last4=c_code,
+    )
+
+    cursor.execute(
+        "DELETE FROM receipt_ocr_metadata WHERE tx_id = ? AND source_channel IN ('AUTO_SLIP', 'STATEMENT')",
+        (tx_id,),
+    )
+    cursor.execute(
+        "DELETE FROM receipt_ocr_metadata WHERE file_hash_sha256 = ?",
+        (file_hash,),
+    )
+    cursor.execute(
+        """
+        INSERT INTO receipt_ocr_metadata (
+            tx_id, source_channel, original_file_path, archived_file_name,
+            file_hash_sha256, ocr_biz_reg_no, ocr_total_amount,
+            line_items_json, raw_ocr_response, ocr_confidence
+        ) VALUES (?, 'STATEMENT', ?, ?, ?, ?, ?, ?, '{"type":"TRANSACTION_STATEMENT"}', 1.0)
+        """,
+        (
+            tx_id,
+            orig_path,
+            arch_name,
+            file_hash,
+            updated_tx.get("biz_reg_no"),
+            int(updated_tx["total_amount"]),
+            json.dumps(
+                [{"item": resolved_item, "qty": 1, "price": int(updated_tx["total_amount"])}],
+                ensure_ascii=False,
+            ),
+        ),
+    )
+
+    return {
+        "status": "statement_saved",
+        "tx_id": tx_id,
+        "item_name": resolved_item,
+        "account_code": new_code,
+        "account_name": new_name,
+        "archived_file_name": arch_name,
+    }
+
+
 def generate_electronic_slips_for_ledger(
     cursor: sqlite3.Cursor,
     archive_dir: Optional[Path] = None,

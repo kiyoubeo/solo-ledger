@@ -407,5 +407,21 @@ def test_import_phone_sms_api_endpoint(client):
     assert crawl_body["collected_orders_count"] == 1
     assert crawl_body["matched_orders"] >= 1
 
+    # Verify Transaction Statement (거래명세서) generation & attachment endpoint
+    stmt_tx_id = all_sum["transactions"][0]["tx_id"]
+    stmt_res = client.post(
+        f"/api/v1/transactions/{stmt_tx_id}/statement",
+        headers={"X-API-Key": "test-secret-key"},
+        json={"item_name": "사무용 A4 복사용지 80g 5권"},
+    )
+    assert stmt_res.status_code == 200
+    stmt_body = stmt_res.json()
+    assert stmt_body["status"] == "statement_saved"
+    assert stmt_body["archived_file_name"].startswith("거래명세서_")
+
+    rec_detail = client.get(f"/api/v1/transactions/{stmt_tx_id}/receipt").json()
+    assert rec_detail["statement_print_title"].startswith("거래명세서_")
+    assert rec_detail["counterparty_info"] == "사무용 A4 복사용지 80g 5권"
+
 
 

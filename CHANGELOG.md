@@ -37,3 +37,4 @@
 | 2026-11-02 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/dashboard.py (+2 files)` | 대시보드 전용 브라우저 세션(CDP) 기반 쿠팡 주문내역 원클릭 자동 크롤러(방법 B) 구현 | `PASSED` |
 | 2026-11-02 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/dashboard.py, tests/test_sms_parser.py` | 대시보드 조회 기간에 달별 기간 조회(월 선택 드롭다운, 이전/다음달 이동, 월별 바로가기 버튼) 추가 | `PASSED` |
 | 2026-11-02 | `fix` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/dashboard.py` | 대시보드 상단 조회 기간 및 달별 조회 필터 바 줄넘김·가독성 레이아웃 정리 | `PASSED` |
+| 2026-11-02 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/dashboard.py (+2 files)` | 소명 필요 전표 및 원장에 전자 거래명세서 발급·첨부·PDF 인쇄 기능 추가 | `PASSED` |

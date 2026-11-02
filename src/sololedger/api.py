@@ -49,6 +49,7 @@ from sololedger.scraper_service import (
     auto_crawl_coupang_orders,
     build_coupang_browser_extractor_script,
     generate_electronic_slips_for_ledger,
+    generate_electronic_statement_for_tx,
     ingest_scraped_payload,
 )
 from sololedger.sms_parser import (
@@ -532,12 +533,14 @@ async def get_transaction_receipt_detail(tx_id: int):
             account_name=str(tx_dict["account_name"]),
             total_amount=int(tx_dict["total_amount"]),
         )
+        statement_print_title = print_title.replace("매출전표_", "거래명세서_", 1)
         return {
             "tx_id": tx_id,
             "card_last4": card_code,
             "card_label": format_card_label(card_code),
             "card_folder": sanitize_card_folder_name(card_code),
             "print_title": print_title,
+            "statement_print_title": statement_print_title,
             "transacted_at": tx_dict["transacted_at"],
             "approval_no": tx_dict.get("approval_no"),
             "raw_merchant_name": tx_dict["raw_merchant_name"],
@@ -556,6 +559,46 @@ async def get_transaction_receipt_detail(tx_id: int):
             "archived_file_name": archived_name,
             "receipt_file_url": f"/api/v1/transactions/{tx_id}/receipt-file" if has_file else None,
         }
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/transactions/{tx_id}/statement")
+async def save_transaction_statement_endpoint(
+    tx_id: int,
+    payload: Dict[str, Any] = Body(default_factory=dict),
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Generate an electronic Transaction Statement (거래명세서) or attach a statement file for tx_id."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    item_name = str(payload.get("item_name") or "").strip() or None
+    account_code = str(payload.get("account_code") or "").strip() or None
+    file_name = str(payload.get("file_name") or "").strip() or None
+    file_bytes: Optional[bytes] = None
+    if payload.get("file_content_b64"):
+        try:
+            file_bytes = base64.b64decode(str(payload["file_content_b64"]))
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid base64 payload: {e}") from e
+
+    init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        try:
+            outcome = generate_electronic_statement_for_tx(
+                cursor,
+                tx_id=tx_id,
+                item_name=item_name,
+                account_code=account_code,
+                file_bytes=file_bytes,
+                file_name=file_name,
+            )
+            conn.commit()
+            return outcome
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
     finally:
         conn.close()
 

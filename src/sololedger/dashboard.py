@@ -845,7 +845,11 @@ def render_dashboard_html(
             f"<td>{acc_select}</td>"
             f"<td><input type='text' id='memo-{tx_id}' value='{memo_val}' "
             f"placeholder='품목 또는 참석자 입력' /></td>"
-            f"<td><button onclick='saveTxMemo({tx_id})'>저장</button></td>"
+            f"<td style='white-space:nowrap;'>"
+            f"<button onclick='saveTxMemo({tx_id})'>저장</button>"
+            f"<button class='secondary' onclick='openStatementModal({tx_id})'>📄 거래명세서</button>"
+            f"<button class='secondary' onclick='triggerRowStatementUpload({tx_id})'>📎 명세서 첨부</button>"
+            f"</td>"
             f"</tr>"
         )
     pending_tbody = (
@@ -869,6 +873,8 @@ def render_dashboard_html(
         dt_link = (
             f"<a href='javascript:void(0)' class='tx-date-link' "
             f"onclick='openReceiptModal({tx_id})' title='클릭하여 영수증/매출전표 팝업 보기'>{t_dt} 🧾</a>"
+            f" <a href='javascript:void(0)' class='tx-date-link' style='color:#0f766e; font-size:12px;' "
+            f"onclick='openStatementModal({tx_id})' title='클릭하여 거래명세서 보기/발급'>[📄명세서]</a>"
         )
         tx_rows_html.append(
             f"<tr>"
@@ -1154,20 +1160,32 @@ def render_dashboard_html(
   </section>
 
   <div id="receipt-modal-backdrop" class="modal-backdrop" onclick="onBackdropClick(event)">
-    <div class="receipt-modal">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-        <h3 id="modal-header-title" style="margin:0;">🧾 신용카드 매출전표 / 영수증</h3>
+    <div class="receipt-modal" style="max-width:540px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+        <h3 id="modal-header-title" style="margin:0;">🧾 신용카드 매출전표 / 거래명세서</h3>
         <button class="secondary no-print" onclick="closeReceiptModal()">✕ 닫기</button>
+      </div>
+      <div class="no-print" style="display:flex; gap:6px; margin-bottom:12px;">
+        <button id="tab-btn-slip" onclick="switchModalDocTab('SLIP')">🧾 신용카드 매출전표</button>
+        <button id="tab-btn-stmt" class="secondary" onclick="switchModalDocTab('STATEMENT')">
+          📄 거래명세서 (공급받는자 보관용)
+        </button>
       </div>
       <div id="modal-slip-content" class="slip-box">불러오는 중...</div>
       <div id="modal-image-content" class="receipt-img-wrap"></div>
       <input type="file" id="modal-receipt-input" accept="image/*,.pdf"
              style="display:none" onchange="uploadReceiptForActiveTx(this)" />
+      <input type="file" id="row-stmt-file-input"
+             accept="image/*,.pdf,.html,.htm,.xls,.csv,.txt,.json"
+             style="display:none" onchange="uploadRowStatementFile(this)" />
       <div class="no-print" style="display:flex; justify-content:flex-end; gap:6px; margin-top:14px;">
         <button onclick="document.getElementById('modal-receipt-input').click()">
-          📷 이 전표에 영수증 첨부
+          📷 영수증 첨부
         </button>
-        <button class="secondary" onclick="printReceiptSlip()">🖨️ 전표 인쇄</button>
+        <button onclick="triggerRowStatementUpload(activeModalTxId)">
+          📎 거래명세서 첨부
+        </button>
+        <button class="secondary" onclick="printReceiptSlip()">🖨️ 인쇄 / PDF 저장</button>
         <button class="secondary" onclick="closeReceiptModal()">닫기</button>
       </div>
     </div>
@@ -1245,6 +1263,9 @@ def render_dashboard_html(
     const DEFAULT_DOC_TITLE = document.title;
     let activeModalTxId = null;
     let activeModalPrintTitle = '';
+    let activeModalData = null;
+    let activeModalMode = 'SLIP';
+    let targetStmtUploadTxId = null;
 
     function sanitizeFileToken(s) {{
       return String(s || '')
@@ -1267,14 +1288,128 @@ def render_dashboard_html(
         + merchTok + '_' + accTok + '_' + amtTok + '_TX' + d.tx_id;
     }}
 
-    async function openReceiptModal(txId) {{
+    function renderModalDocView() {{
+      if (!activeModalData) return;
+      const d = activeModalData;
+      const slipEl = document.getElementById('modal-slip-content');
+      const tabSlip = document.getElementById('tab-btn-slip');
+      const tabStmt = document.getElementById('tab-btn-stmt');
+      const fmt = (n) => Number(n || 0).toLocaleString('ko-KR') + '원';
+      const bizNo = d.biz_reg_no || '미등록 (SMS/RCS·PG 전표)';
+      const appNo = d.approval_no || ('TX-' + d.tx_id);
+      const rowMemoEl = document.getElementById('memo-' + d.tx_id);
+      const typedMemo = rowMemoEl && rowMemoEl.value ? rowMemoEl.value.trim() : '';
+      const memo = d.counterparty_info || typedMemo || '-';
+      const arch = d.archived_file_name
+        ? ('by_card/' + d.card_folder + '/' + d.archived_file_name)
+        : '실물 증빙 미첨부 (전자 전표)';
+
+      if (activeModalMode === 'STATEMENT') {{
+        tabSlip.className = 'secondary';
+        tabStmt.className = '';
+        const baseTitle = d.statement_print_title
+          || buildReceiptPrintTitle(d).replace(/^매출전표_/, '거래명세서_');
+        activeModalPrintTitle = baseTitle;
+        document.title = activeModalPrintTitle;
+        document.getElementById('modal-header-title').textContent =
+          '📄 거래명세서 (#' + d.tx_id + ')';
+        const mdStr = String(d.transacted_at || '').slice(5, 10).replace('-', '/');
+        const itemVal = (d.counterparty_info || typedMemo || (d.raw_merchant_name + ' 구매 품목'))
+          .replace(/"/g, '&quot;');
+        slipEl.innerHTML =
+          '<div class="slip-title" style="color:#1e3a8a;">[ 거 래 명 세 서 ] (공급받는자 보관용)</div>' +
+          '<div class="slip-row"><span>거래일시</span><strong>' + d.transacted_at + '</strong></div>' +
+          '<div class="slip-row"><span>전표/승인번호</span><span>#' + d.tx_id + ' / ' + appNo + '</span></div>' +
+          '<div class="slip-divider"></div>' +
+          '<div class="slip-row"><span>공급자 상호</span><strong>' + d.raw_merchant_name + '</strong></div>' +
+          '<div class="slip-row"><span>사업자번호</span><span>' + bizNo + '</span></div>' +
+          '<div class="slip-row"><span>결제수단</span><strong>' + d.card_label + '</strong></div>' +
+          '<div class="slip-row"><span>회계계정</span><strong>' +
+          d.account_code + ' ' + d.account_name + '</strong></div>' +
+          '<div class="slip-divider"></div>' +
+          '<table style="width:100%; border-collapse:collapse; font-size:12px; margin:8px 0;">' +
+          '<thead><tr style="background:#eff6ff;">' +
+          '<th style="border:1px solid #cbd5e1; padding:5px;">월/일</th>' +
+          '<th style="border:1px solid #cbd5e1; padding:5px;">품목 및 규격</th>' +
+          '<th style="border:1px solid #cbd5e1; padding:5px; text-align:right;">수량</th>' +
+          '<th style="border:1px solid #cbd5e1; padding:5px; text-align:right;">공급가액</th>' +
+          '<th style="border:1px solid #cbd5e1; padding:5px; text-align:right;">세액</th>' +
+          '</tr></thead><tbody><tr>' +
+          '<td style="border:1px solid #cbd5e1; padding:6px;">' + mdStr + '</td>' +
+          '<td style="border:1px solid #cbd5e1; padding:6px;"><strong>' + itemVal + '</strong></td>' +
+          '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right;">1</td>' +
+          '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right;">' +
+          fmt(d.supply_value) + '</td>' +
+          '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right;">' +
+          fmt(d.vat_amount) + '</td>' +
+          '</tr></tbody></table>' +
+          '<div class="slip-row slip-total"><span>합계금액 (VAT 포함)</span><span>' +
+          fmt(d.total_amount) + '</span></div>' +
+          '<div class="slip-divider"></div>' +
+          '<div class="no-print" style="background:#f8fafc; border:1px solid #cbd5e1; ' +
+          'border-radius:6px; padding:10px; margin:8px 0;">' +
+          '<div style="font-weight:700; font-size:12px; margin-bottom:6px; color:#1e3a8a;">' +
+          '✏️ 거래명세서 품목·규격 입력 및 전자 거래명세서 발급</div>' +
+          '<div style="display:flex; gap:6px; flex-wrap:wrap;">' +
+          '<input type="text" id="modal-stmt-item" value="' + itemVal + '" ' +
+          'style="flex:1; min-width:180px;" placeholder="품목명 또는 거래 내역 입력" />' +
+          '<button onclick="saveStatementForActiveTx()">💾 품목 반영 · 명세서 저장</button>' +
+          '</div></div>' +
+          '<div class="slip-row"><span>보관경로</span><code style="font-size:11px;">' +
+          arch + '</code></div>' +
+          '<div class="slip-row no-print"><span>PDF 저장명</span>' +
+          '<code style="font-size:11px; color:#1d4ed8;">' + activeModalPrintTitle + '.pdf</code></div>';
+      }} else {{
+        tabSlip.className = '';
+        tabStmt.className = 'secondary';
+        activeModalPrintTitle = buildReceiptPrintTitle(d);
+        document.title = activeModalPrintTitle;
+        document.getElementById('modal-header-title').textContent =
+          '🧾 신용카드 매출전표 (#' + d.tx_id + ')';
+        slipEl.innerHTML =
+          '<div class="slip-title">[신용카드 매출전표 / 적격증빙]</div>' +
+          '<div class="slip-row"><span>카드종류</span><strong>' + d.card_label + '</strong></div>' +
+          '<div class="slip-row"><span>거래일시</span><strong>' + d.transacted_at + '</strong></div>' +
+          '<div class="slip-row"><span>승인번호</span><span>' + appNo + '</span></div>' +
+          '<div class="slip-divider"></div>' +
+          '<div class="slip-row"><span>가맹점명</span><strong>' + d.raw_merchant_name + '</strong></div>' +
+          '<div class="slip-row"><span>사업자번호</span><span>' + bizNo + '</span></div>' +
+          '<div class="slip-divider"></div>' +
+          '<div class="slip-row"><span>공급가액</span><span>' + fmt(d.supply_value) + '</span></div>' +
+          '<div class="slip-row"><span>부가세액(VAT)</span><span>' + fmt(d.vat_amount) +
+          ' (' + d.vat_deduction_type + ')</span></div>' +
+          '<div class="slip-row slip-total"><span>합계금액</span><span>' +
+          fmt(d.total_amount) + '</span></div>' +
+          '<div class="slip-divider"></div>' +
+          '<div class="slip-row"><span>회계계정</span><strong>' +
+          d.account_code + ' ' + d.account_name + '</strong></div>' +
+          '<div class="slip-row"><span>적요/품목</span><span>' + memo + '</span></div>' +
+          '<div class="slip-row"><span>대사상태</span><span>' + d.reconcile_status + '</span></div>' +
+          '<div class="slip-row"><span>보관경로</span><code style="font-size:11px;">' +
+          arch + '</code></div>' +
+          '<div class="slip-row no-print"><span>PDF 저장명</span>' +
+          '<code style="font-size:11px; color:#1d4ed8;">' + activeModalPrintTitle + '.pdf</code></div>';
+      }}
+    }}
+
+    function switchModalDocTab(mode) {{
+      activeModalMode = mode || 'SLIP';
+      renderModalDocView();
+    }}
+
+    async function openStatementModal(txId) {{
+      await openReceiptModal(txId, 'STATEMENT');
+    }}
+
+    async function openReceiptModal(txId, initialMode) {{
       activeModalTxId = txId;
+      activeModalMode = initialMode || 'SLIP';
       const backdrop = document.getElementById('receipt-modal-backdrop');
       const slipEl = document.getElementById('modal-slip-content');
       const imgEl = document.getElementById('modal-image-content');
       document.body.classList.add('modal-open');
       backdrop.classList.add('open');
-      slipEl.innerHTML = '영수증 정보를 불러오는 중...';
+      slipEl.innerHTML = '전표/명세서 정보를 불러오는 중...';
       imgEl.innerHTML = '';
 
       const res = await fetch('/api/v1/transactions/' + txId + '/receipt');
@@ -1283,46 +1418,12 @@ def render_dashboard_html(
         return;
       }}
       const d = await res.json();
-      activeModalPrintTitle = buildReceiptPrintTitle(d);
-      document.title = activeModalPrintTitle;
-      document.getElementById('modal-header-title').textContent =
-        '🧾 신용카드 매출전표 (#' + d.tx_id + ')';
-
-      const fmt = (n) => Number(n || 0).toLocaleString('ko-KR') + '원';
-      const bizNo = d.biz_reg_no || '미등록 (SMS/RCS 수집 전표)';
-      const appNo = d.approval_no || '문자 승인전표';
-      const memo = d.counterparty_info || '-';
-      const arch = d.archived_file_name
-        ? ('by_card/' + d.card_folder + '/' + d.archived_file_name)
-        : '실물 영수증 미첨부 (전자 전표)';
-
-      slipEl.innerHTML =
-        '<div class="slip-title">[신용카드 매출전표 / 적격증빙]</div>' +
-        '<div class="slip-row"><span>카드종류</span><strong>' + d.card_label + '</strong></div>' +
-        '<div class="slip-row"><span>거래일시</span><strong>' + d.transacted_at + '</strong></div>' +
-        '<div class="slip-row"><span>승인번호</span><span>' + appNo + '</span></div>' +
-        '<div class="slip-divider"></div>' +
-        '<div class="slip-row"><span>가맹점명</span><strong>' + d.raw_merchant_name + '</strong></div>' +
-        '<div class="slip-row"><span>사업자번호</span><span>' + bizNo + '</span></div>' +
-        '<div class="slip-divider"></div>' +
-        '<div class="slip-row"><span>공급가액</span><span>' + fmt(d.supply_value) + '</span></div>' +
-        '<div class="slip-row"><span>부가세액(VAT)</span><span>' + fmt(d.vat_amount) +
-        ' (' + d.vat_deduction_type + ')</span></div>' +
-        '<div class="slip-row slip-total"><span>합계금액</span><span>' +
-        fmt(d.total_amount) + '</span></div>' +
-        '<div class="slip-divider"></div>' +
-        '<div class="slip-row"><span>회계계정</span><strong>' +
-        d.account_code + ' ' + d.account_name + '</strong></div>' +
-        '<div class="slip-row"><span>적요/품목</span><span>' + memo + '</span></div>' +
-        '<div class="slip-row"><span>대사상태</span><span>' + d.reconcile_status + '</span></div>' +
-        '<div class="slip-row"><span>보관경로</span><code style="font-size:11px;">' +
-        arch + '</code></div>' +
-        '<div class="slip-row no-print"><span>PDF 저장명</span><code style="font-size:11px; color:#1d4ed8;">' +
-        activeModalPrintTitle + '.pdf</code></div>';
+      activeModalData = d;
+      renderModalDocView();
 
       if (d.has_receipt_file && d.is_renderable_image) {{
         imgEl.innerHTML =
-          '<div style="margin-bottom:6px; font-weight:600; font-size:12px;">첨부된 실물 영수증 이미지</div>' +
+          '<div style="margin-bottom:6px; font-weight:600; font-size:12px;">첨부된 실물 영수증/명세서 이미지</div>' +
           '<img src="' + d.receipt_file_url + '" alt="영수증 이미지" />' +
           '<div style="margin-top:6px;"><a href="' + d.receipt_file_url +
           '" target="_blank">원본 파일 새 창으로 열기</a></div>';
@@ -1335,10 +1436,68 @@ def render_dashboard_html(
       }} else {{
         imgEl.innerHTML =
           '<div style="font-size:12px; color:#64748b;">' +
-          '실물 영수증 사진이 아직 첨부되지 않았습니다.<br/>' +
-          '하단 <b>[📷 이 전표에 영수증 첨부]</b> 버튼으로 영수증/쇼핑몰 캡처를 등록할 수 있습니다.' +
+          '실물 영수증·거래명세서 파일이 아직 첨부되지 않았습니다.<br/>' +
+          '하단 <b>[📷 영수증 첨부]</b> 또는 <b>[📎 거래명세서 첨부]</b> 버튼으로 파일을 등록할 수 있습니다.' +
           '</div>';
       }}
+    }}
+
+    async function saveStatementForActiveTx() {{
+      if (!activeModalTxId) return;
+      const inp = document.getElementById('modal-stmt-item');
+      const itemVal = inp ? inp.value.trim() : '';
+      const accSelect = document.getElementById('acc-' + activeModalTxId);
+      const bodyObj = {{ item_name: itemVal }};
+      if (accSelect && accSelect.value) {{
+        bodyObj.account_code = accSelect.value;
+      }}
+      await fetch('/api/v1/transactions/' + activeModalTxId + '/statement', {{
+        method: 'POST',
+        headers: API_HEADERS,
+        body: JSON.stringify(bodyObj)
+      }});
+      await openReceiptModal(activeModalTxId, 'STATEMENT');
+      window.location.reload();
+    }}
+
+    function triggerRowStatementUpload(txId) {{
+      if (!txId) return;
+      targetStmtUploadTxId = txId;
+      const el = document.getElementById('row-stmt-file-input');
+      el.value = '';
+      el.click();
+    }}
+
+    function uploadRowStatementFile(inputEl) {{
+      if (!inputEl.files || !inputEl.files[0] || !targetStmtUploadTxId) return;
+      const txId = targetStmtUploadTxId;
+      const file = inputEl.files[0];
+      const memoEl = document.getElementById('memo-' + txId);
+      const modalItemEl = document.getElementById('modal-stmt-item');
+      const accEl = document.getElementById('acc-' + txId);
+      const itemHint = (memoEl && memoEl.value.trim())
+        || (modalItemEl && activeModalTxId === txId && modalItemEl.value.trim())
+        || '';
+      const reader = new FileReader();
+      reader.onload = async function(ev) {{
+        const dataUrl = String(ev.target.result || '');
+        const b64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+        const bodyObj = {{
+          file_name: file.name,
+          file_content_b64: b64,
+          item_name: itemHint
+        }};
+        if (accEl && accEl.value) {{
+          bodyObj.account_code = accEl.value;
+        }}
+        await fetch('/api/v1/transactions/' + txId + '/statement', {{
+          method: 'POST',
+          headers: API_HEADERS,
+          body: JSON.stringify(bodyObj)
+        }});
+        window.location.reload();
+      }};
+      reader.readAsDataURL(file);
     }}
 
     function closeReceiptModal() {{
