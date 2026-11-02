@@ -430,6 +430,13 @@ def test_import_phone_sms_api_endpoint(client):
     rec_detail = client.get(f"/api/v1/transactions/{stmt_tx_id}/receipt").json()
     assert rec_detail["statement_print_title"].startswith("거래명세서_")
     assert rec_detail["counterparty_info"] == "사무용 A4 복사용지 80g 5권"
+    stmt_file_html = client.get(f"/api/v1/transactions/{stmt_tx_id}/receipt-file").text
+    assert "VAT 제외 가격" in stmt_file_html
+    assert "VAT 가격" in stmt_file_html
+    assert "합계 가격" in stmt_file_html
+    assert "VAT 제외 가격 (공급가액)" in dash_html
+    assert "VAT 가격 (부가세액)" in dash_html
+    assert "합계 가격 (총 결제금액)" in dash_html
 
 
 

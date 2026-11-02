@@ -1269,9 +1269,11 @@ def render_electronic_statement_html(
     merchant = html.escape(str(tx_row["raw_merchant_name"]))
     biz_no = html.escape(str(tx_row.get("biz_reg_no") or "미등록 (온라인/PG 가맹점)"))
     total_amt = int(tx_row["total_amount"])
+    vat_type = str(tx_row.get("vat_deduction_type") or "DEDUCTIBLE")
     supply_val = int(tx_row["supply_value"])
     vat_amt = int(tx_row["vat_amount"])
-    vat_type = str(tx_row.get("vat_deduction_type") or "DEDUCTIBLE")
+    if vat_type != "EXEMPT" and vat_amt == 0 and total_amt != 0:
+        supply_val, vat_amt = calculate_supply_and_vat(total_amt, "DEDUCTIBLE")
     acc_str = html.escape(f"{tx_row['account_code']} {tx_row['account_name']}")
     raw_memo = str(tx_row.get("counterparty_info") or "").strip()
     item_title = html.escape(raw_memo if raw_memo else f"{tx_row['raw_merchant_name']} 구매 품목")
@@ -1301,6 +1303,7 @@ def render_electronic_statement_html(
                 f"<td class='num'>{li_qty}</td>"
                 f"<td class='num'>{li_sup:,}원</td>"
                 f"<td class='num'>{li_vat:,}원</td>"
+                f"<td class='num'><strong>{li_price:,}원</strong></td>"
                 f"</tr>"
             )
     else:
@@ -1312,6 +1315,7 @@ def render_electronic_statement_html(
             f"<td class='num'>1</td>"
             f"<td class='num'>{supply_val:,}원</td>"
             f"<td class='num'>{vat_amt:,}원</td>"
+            f"<td class='num'><strong>{total_amt:,}원</strong></td>"
             f"</tr>"
         )
     tbody_html = "\n        ".join(tbody_rows)
@@ -1324,7 +1328,7 @@ def render_electronic_statement_html(
   <style>
     body {{ font-family: 'Malgun Gothic', -apple-system, sans-serif; background: #f1f5f9;
            padding: 24px; color: #0f172a; }}
-    .stmt {{ max-width: 540px; margin: 0 auto; background: #ffffff; border: 2px solid #1e3a8a;
+    .stmt {{ max-width: 580px; margin: 0 auto; background: #ffffff; border: 2px solid #1e3a8a;
              border-radius: 6px; padding: 22px; box-shadow: 0 6px 18px rgba(0,0,0,0.08); }}
     h1 {{ text-align: center; font-size: 20px; color: #1e3a8a; letter-spacing: 4px;
           margin: 0 0 4px 0; }}
@@ -1357,18 +1361,15 @@ def render_electronic_statement_html(
         <th>회계계정</th><td><strong>{acc_str}</strong></td>
       </tr>
     </table>
-    <div class="tot-bar">
-      <span>합계금액 (부가세 포함)</span>
-      <span>금 {total_amt:,} 원정 (₩{total_amt:,})</span>
-    </div>
     <table>
       <thead>
         <tr>
-          <th style="width:14%;">월/일</th>
-          <th style="width:42%;">품목 및 규격</th>
-          <th class="num" style="width:10%;">수량</th>
-          <th class="num" style="width:17%;">공급가액</th>
-          <th class="num" style="width:17%;">세액(VAT)</th>
+          <th style="width:12%;">월/일</th>
+          <th style="width:36%;">품목 및 규격</th>
+          <th class="num" style="width:8%;">수량</th>
+          <th class="num" style="width:15%;">VAT 제외 가격</th>
+          <th class="num" style="width:14%;">VAT 가격</th>
+          <th class="num" style="width:15%;">합계 가격</th>
         </tr>
       </thead>
       <tbody>
@@ -1380,9 +1381,28 @@ def render_electronic_statement_html(
           <td class="num"><strong>{tot_qty}</strong></td>
           <td class="num"><strong>{supply_val:,}원</strong></td>
           <td class="num"><strong>{vat_amt:,}원</strong></td>
+          <td class="num"><strong>{total_amt:,}원</strong></td>
         </tr>
       </tfoot>
     </table>
+    <table>
+      <tr>
+        <th style="width:33%;">VAT 제외 가격 (공급가액)</th>
+        <td class="num"><strong>{supply_val:,}원</strong></td>
+      </tr>
+      <tr>
+        <th>VAT 가격 (부가세액)</th>
+        <td class="num"><strong>{vat_amt:,}원 ({vat_type})</strong></td>
+      </tr>
+      <tr>
+        <th>합계 가격 (총 결제금액)</th>
+        <td class="num"><strong style="color:#1e3a8a; font-size:14px;">{total_amt:,}원</strong></td>
+      </tr>
+    </table>
+    <div class="tot-bar">
+      <span>합계 가격 (VAT 포함)</span>
+      <span>금 {total_amt:,} 원정 (₩{total_amt:,})</span>
+    </div>
     <div class="foot">SoloLedger 전자 거래명세서 및 세무 소명 증빙 아카이브</div>
   </div>
 </body>

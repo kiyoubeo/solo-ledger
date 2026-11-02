@@ -1316,16 +1316,25 @@ def render_dashboard_html(
         const mdStr = String(d.transacted_at || '').slice(5, 10).replace('-', '/');
         const itemVal = (d.counterparty_info || typedMemo || (d.raw_merchant_name + ' 구매 품목'))
           .replace(/"/g, '&quot;');
+        const totAmt = Number(d.total_amount || 0);
+        const supAmt = (d.vat_deduction_type === 'EXEMPT')
+          ? totAmt
+          : (Number(d.vat_amount || 0) !== 0
+              ? Number(d.supply_value || 0)
+              : Math.round(totAmt / 1.1));
+        const vatAmt = totAmt - supAmt;
         let tbodyHtml = '';
+        let totQty = 0;
         if (Array.isArray(d.line_items) && d.line_items.length > 0) {{
           d.line_items.forEach((li) => {{
             const liName = String(li.item || li.name || itemVal).replace(/</g, '&lt;');
             const liQty = Math.max(1, parseInt(li.qty || 1, 10) || 1);
-            const liTot = parseInt(li.price || li.amount || d.total_amount || 0, 10);
-            const liSup = d.vat_deduction_type === 'DEDUCTIBLE'
-              ? Math.round(liTot / 1.1)
-              : liTot;
+            const liTot = parseInt(li.price || li.amount || totAmt, 10);
+            const liSup = d.vat_deduction_type === 'EXEMPT'
+              ? liTot
+              : Math.round(liTot / 1.1);
             const liVat = liTot - liSup;
+            totQty += liQty;
             tbodyHtml += '<tr>' +
               '<td style="border:1px solid #cbd5e1; padding:6px;">' + mdStr + '</td>' +
               '<td style="border:1px solid #cbd5e1; padding:6px;"><strong>' + liName + '</strong></td>' +
@@ -1334,17 +1343,22 @@ def render_dashboard_html(
               fmt(liSup) + '</td>' +
               '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right;">' +
               fmt(liVat) + '</td>' +
+              '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right;"><strong>' +
+              fmt(liTot) + '</strong></td>' +
               '</tr>';
           }});
         }} else {{
+          totQty = 1;
           tbodyHtml = '<tr>' +
             '<td style="border:1px solid #cbd5e1; padding:6px;">' + mdStr + '</td>' +
             '<td style="border:1px solid #cbd5e1; padding:6px;"><strong>' + itemVal + '</strong></td>' +
             '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right;">1</td>' +
             '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right;">' +
-            fmt(d.supply_value) + '</td>' +
+            fmt(supAmt) + '</td>' +
             '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right;">' +
-            fmt(d.vat_amount) + '</td>' +
+            fmt(vatAmt) + '</td>' +
+            '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right;"><strong>' +
+            fmt(totAmt) + '</strong></td>' +
             '</tr>';
         }}
         slipEl.innerHTML =
@@ -1363,11 +1377,26 @@ def render_dashboard_html(
           '<th style="border:1px solid #cbd5e1; padding:5px;">월/일</th>' +
           '<th style="border:1px solid #cbd5e1; padding:5px;">품목 및 규격</th>' +
           '<th style="border:1px solid #cbd5e1; padding:5px; text-align:right;">수량</th>' +
-          '<th style="border:1px solid #cbd5e1; padding:5px; text-align:right;">공급가액</th>' +
-          '<th style="border:1px solid #cbd5e1; padding:5px; text-align:right;">세액</th>' +
-          '</tr></thead><tbody>' + tbodyHtml + '</tbody></table>' +
-          '<div class="slip-row slip-total"><span>합계금액 (VAT 포함)</span><span>' +
-          fmt(d.total_amount) + '</span></div>' +
+          '<th style="border:1px solid #cbd5e1; padding:5px; text-align:right;">VAT 제외 가격</th>' +
+          '<th style="border:1px solid #cbd5e1; padding:5px; text-align:right;">VAT 가격</th>' +
+          '<th style="border:1px solid #cbd5e1; padding:5px; text-align:right;">합계 가격</th>' +
+          '</tr></thead><tbody>' + tbodyHtml + '</tbody>' +
+          '<tfoot><tr style="background:#f8fafc; font-weight:700;">' +
+          '<td colspan="2" style="border:1px solid #cbd5e1; padding:6px; text-align:center;">합 계</td>' +
+          '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right;">' + totQty + '</td>' +
+          '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right;">' +
+          fmt(supAmt) + '</td>' +
+          '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right;">' +
+          fmt(vatAmt) + '</td>' +
+          '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right; color:#1e3a8a;">' +
+          fmt(totAmt) + '</td>' +
+          '</tr></tfoot></table>' +
+          '<div class="slip-row"><span>VAT 제외 가격 (공급가액)</span><strong>' +
+          fmt(supAmt) + '</strong></div>' +
+          '<div class="slip-row"><span>VAT 가격 (부가세액)</span><strong>' +
+          fmt(vatAmt) + ' (' + d.vat_deduction_type + ')</strong></div>' +
+          '<div class="slip-row slip-total"><span>합계 가격 (총 결제금액)</span><span>' +
+          fmt(totAmt) + '</span></div>' +
           '<div class="slip-divider"></div>' +
           '<div class="no-print" style="background:#f8fafc; border:1px solid #cbd5e1; ' +
           'border-radius:6px; padding:10px; margin:8px 0;">' +

@@ -51,3 +51,4 @@
 | 2026-11-02 | logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/dashboard.py | [fix] 대시보드 상단 조회 기간 및 달별 조회 필터 바 줄넘김·가독성 레이아웃 정리 |
 | 2026-11-02 | logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/dashboard.py (+2 files) | [feat] 소명 필요 전표 및 원장에 전자 거래명세서 발급·첨부·PDF 인쇄 기능 추가 |
 | 2026-11-02 | logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/dashboard.py (+2 files) | [feat] 쿠팡 자동 크롤링 및 스크롤 수집 내역 기반 다품목 전자 거래명세서 자동 작성 구현 |
+| 2026-11-02 | logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/dashboard.py, src/sololedger/scraper_service.py (+1 files) | [feat] 거래명세서 합계 영역에 VAT 제외 가격, VAT 가격, 합계 가격 명시적 표시 |
