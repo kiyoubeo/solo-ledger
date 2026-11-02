@@ -438,5 +438,88 @@ def test_import_phone_sms_api_endpoint(client):
     assert "VAT 가격 (부가세액)" in dash_html
     assert "합계 가격 (총 결제금액)" in dash_html
 
+    # Verify Real-Time Email Order Webhook & IMAP Sync
+    email_html_body = """
+    <table>
+      <tr><th>상점명</th><td>컴퓨존</td></tr>
+      <tr><th>상품명</th><td>로지텍 MX Master 3S 무선 마우스</td></tr>
+      <tr><th>결제금액</th><td>12,170원</td></tr>
+      <tr><th>결제일시</th><td>2026-11-01 18:10:00</td></tr>
+    </table>
+    """
+    em_wh_res = client.post(
+        "/api/v1/scraper/email-webhook",
+        headers={"X-API-Key": "test-secret-key"},
+        json={"raw_content": email_html_body, "subject": "[KG이니시스] 결제확인 안내"},
+    )
+    assert em_wh_res.status_code == 200
+    em_wh_body = em_wh_res.json()
+    assert em_wh_body["parsed_orders_count"] == 1
+    assert em_wh_body["matched_count"] == 1
+    em_tx_id = em_wh_body["updated_tx_ids"][0]
+    em_rec = client.get(f"/api/v1/transactions/{em_tx_id}/receipt").json()
+    assert "[컴퓨존] 로지텍 MX Master 3S 무선 마우스" in em_rec["counterparty_info"]
+    assert em_rec["archived_file_name"].startswith("거래명세서_")
+
+    # Verify IMAP config save & mocked IMAP sync
+    import imaplib
+
+    class _DummyImapSsl:
+        def __init__(self, host: str, port: int, timeout: float = 20.0) -> None:
+            self.host = host
+
+        def login(self, user: str, pw: str):
+            return "OK", [b"Logged in"]
+
+        def select(self, mailbox: str, readonly: bool = True):
+            return "OK", [b"1"]
+
+        def search(self, charset, criterion: str):
+            return "OK", [b"1"]
+
+        def fetch(self, num: bytes, parts: str):
+            if "HEADER.FIELDS" in parts:
+                hdr = (
+                    b"Subject: [Coupang] Order Payment Completed\r\n"
+                    b"From: noreply@coupang.com\r\n"
+                    b"Date: Sun, 01 Nov 2026 18:10:00 +0900\r\n"
+                    b"Message-ID: <test-order-101@coupang.com>\r\n\r\n"
+                )
+                return "OK", [(b"1 (BODY[HEADER] {120})", hdr)]
+            eml = (
+                "MIME-Version: 1.0\r\n"
+                "Subject: [쿠팡] 주문 결제완료 안내\r\n"
+                "From: noreply@coupang.com\r\n"
+                "Date: Sun, 01 Nov 2026 18:10:00 +0900\r\n"
+                "Content-Type: text/html; charset=utf-8\r\n\r\n"
+                "<table><tr><th>주문일자</th><td>2026-11-01</td></tr>"
+                "<tr><th>상품명</th><td>쓰리엠 스카치 다목적 가위 3개입</td></tr>"
+                "<tr><th>결제금액</th><td>12,170원</td></tr></table>"
+            ).encode("utf-8")
+            return "OK", [(b"1 (BODY[] {300})", eml)]
+
+        def logout(self):
+            return "BYE", [b"Logout"]
+
+    with patch.object(imaplib, "IMAP4_SSL", _DummyImapSsl):
+        cfg_res = client.post(
+            "/api/v1/scraper/email-config",
+            headers={"X-API-Key": "test-secret-key"},
+            json={
+                "provider": "NAVER",
+                "email_address": "ceo@naver.com",
+                "app_password": "test-app-password",
+                "auto_poll_enabled": True,
+                "sync_now": True,
+                "force_rescan": True,
+            },
+        )
+    assert cfg_res.status_code == 200
+    cfg_body = cfg_res.json()
+    assert cfg_body["has_password"] is True
+    assert cfg_body["sync_result"]["status"] == "synced"
+    assert cfg_body["sync_result"]["matched_count"] == 1
+
+
 
 

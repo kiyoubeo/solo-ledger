@@ -1107,13 +1107,14 @@ def reconcile_scraped_ecommerce_orders(
     cursor: sqlite3.Cursor,
     raw_content: str,
     archive_dir: Optional[Path] = None,
+    orders_list: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """Match scraped Coupang / NaverPay / KakaoPay order items against PG card transactions."""
+    """Match scraped Coupang / NaverPay / KakaoPay / PG order items against card transactions."""
     content = (raw_content or "").strip()
-    if not content:
+    if not content and not orders_list:
         return {"status": "empty", "matched_count": 0, "updated_tx_ids": []}
 
-    order_rows = extract_coupang_orders_from_content(content)
+    order_rows = orders_list if orders_list is not None else extract_coupang_orders_from_content(content)
 
     updated_tx_ids: List[int] = []
     used_tx_ids: set[int] = set()
@@ -1136,18 +1137,33 @@ def reconcile_scraped_ecommerce_orders(
         if amount <= 0 or len(date_prefix) < 10:
             continue
 
+        shop_name = str(row.get("상점명") or row.get("가맹점명") or "").strip()
+        app_no = str(row.get("승인번호") or "").strip()
+
         cursor.execute(
             """
             SELECT * FROM card_transactions
             WHERE total_amount = ?
-              AND ABS(julianday(SUBSTR(transacted_at, 1, 10)) - julianday(?)) <= 2.5
+              AND ABS(julianday(SUBSTR(transacted_at, 1, 10)) - julianday(?)) <= 3.0
               AND reconcile_status != 'CANCELED'
             ORDER BY
+              CASE
+                WHEN ? != '' AND approval_no = ? THEN 0
+                ELSE 1
+              END ASC,
               CASE
                 WHEN raw_merchant_name LIKE '%쿠팡%'
                   OR raw_merchant_name LIKE '%네이버%'
                   OR raw_merchant_name LIKE '%카카오%'
-                  OR raw_merchant_name LIKE '%이니시스%' THEN 0
+                  OR raw_merchant_name LIKE '%이니시스%'
+                  OR raw_merchant_name LIKE '%토스%'
+                  OR raw_merchant_name LIKE '%케이씨피%'
+                  OR raw_merchant_name LIKE '%KCP%'
+                  OR raw_merchant_name LIKE '%나이스%'
+                  OR raw_merchant_name LIKE '%다날%'
+                  OR raw_merchant_name LIKE '%페이코%'
+                  OR raw_merchant_name LIKE '%11번가%'
+                  OR raw_merchant_name LIKE '%지마켓%' THEN 0
                 ELSE 1
               END ASC,
               CASE
@@ -1157,7 +1173,7 @@ def reconcile_scraped_ecommerce_orders(
               ABS(julianday(SUBSTR(transacted_at, 1, 10)) - julianday(?)) ASC,
               tx_id DESC
             """,
-            (amount, date_prefix, date_prefix),
+            (amount, date_prefix, app_no, app_no, date_prefix),
         )
         candidates = cursor.fetchall()
         tx_row = next((c for c in candidates if int(c["tx_id"]) not in used_tx_ids), None)
@@ -1166,13 +1182,17 @@ def reconcile_scraped_ecommerce_orders(
 
         tx_id = int(tx_row["tx_id"])
         used_tx_ids.add(tx_id)
+        final_item_name = item_name
+        if shop_name and shop_name not in final_item_name:
+            final_item_name = f"[{shop_name}] {final_item_name}"
+
         raw_lines = row.get("품목내역") or row.get("line_items")
         row_line_items = raw_lines if isinstance(raw_lines, list) else None
 
         generate_electronic_statement_for_tx(
             cursor,
             tx_id=tx_id,
-            item_name=item_name,
+            item_name=final_item_name,
             line_items=row_line_items,
             archive_dir=archive_dir,
         )

@@ -40,3 +40,4 @@
 | 2026-11-02 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/dashboard.py (+2 files)` | 소명 필요 전표 및 원장에 전자 거래명세서 발급·첨부·PDF 인쇄 기능 추가 | `PASSED` |
 | 2026-11-02 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/dashboard.py (+2 files)` | 쿠팡 자동 크롤링 및 스크롤 수집 내역 기반 다품목 전자 거래명세서 자동 작성 구현 | `PASSED` |
 | 2026-11-02 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/dashboard.py, src/sololedger/scraper_service.py (+1 files)` | 거래명세서 합계 영역에 VAT 제외 가격, VAT 가격, 합계 가격 명시적 표시 | `PASSED` |
+| 2026-11-02 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/dashboard.py (+3 files)` | 실시간 이메일 주문·결제내역 IMAP 자동 감지 및 웹훅 연동, 전자 거래명세서 자동 작성 구현 | `PASSED` |

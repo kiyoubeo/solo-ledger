@@ -24,6 +24,13 @@ from sololedger.dashboard import (
     update_transaction_classification,
 )
 from sololedger.db import get_connection, init_db
+from sololedger.email_watcher import (
+    get_public_email_watcher_config,
+    ingest_email_order_payload,
+    load_email_watcher_config,
+    save_email_watcher_config,
+    sync_imap_order_emails,
+)
 from sololedger.exporters import generate_tax_accountant_pack
 from sololedger.importers import decode_csv_bytes, import_and_reconcile_hometax_csv
 from sololedger.merchant_service import (
@@ -63,11 +70,47 @@ from sololedger.telegram_bot import handle_telegram_update
 from sololedger.vehicle_tracker import get_vehicle_expense_summary
 
 
+async def _background_email_watcher_loop() -> None:
+    """Periodically poll IMAP inbox in the background when auto_poll_enabled is active."""
+    last_run_ts = 0.0
+    while True:
+        await asyncio.sleep(5.0)
+        try:
+            cfg = load_email_watcher_config()
+            if not cfg.get("auto_poll_enabled"):
+                continue
+            interval = max(30, int(cfg.get("poll_interval_sec") or 120))
+            now_ts = datetime.now().timestamp()
+            if now_ts - last_run_ts < interval:
+                continue
+            last_run_ts = now_ts
+
+            def _poll_once() -> None:
+                init_db()
+                conn = get_connection()
+                cur = conn.cursor()
+                try:
+                    sync_imap_order_emails(cur)
+                    conn.commit()
+                finally:
+                    conn.close()
+
+            await asyncio.to_thread(_poll_once)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize SQLite schema and seed rules on startup."""
+    """Initialize SQLite schema, seed rules, and start background email watcher on startup."""
     init_db()
-    yield
+    watcher_task = asyncio.create_task(_background_email_watcher_loop())
+    try:
+        yield
+    finally:
+        watcher_task.cancel()
 
 
 app = FastAPI(
@@ -828,6 +871,106 @@ async def coupang_auto_crawl_endpoint(
             conn.close()
 
     return await asyncio.to_thread(_run_sync)
+
+
+@app.get("/api/v1/scraper/email-config")
+async def get_email_watcher_config_endpoint():
+    """Return current IMAP email watcher configuration (with password masked) and sync status."""
+    return get_public_email_watcher_config()
+
+
+@app.post("/api/v1/scraper/email-config")
+async def update_email_watcher_config_endpoint(
+    payload: Dict[str, Any] = Body(default_factory=dict),
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Save IMAP email watcher configuration and optionally run an immediate sync."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    save_email_watcher_config(payload if isinstance(payload, dict) else {})
+    sync_result: Optional[Dict[str, Any]] = None
+    if isinstance(payload, dict) and payload.get("sync_now"):
+
+        def _run_sync() -> Dict[str, Any]:
+            init_db()
+            conn = get_connection()
+            cur = conn.cursor()
+            try:
+                res = sync_imap_order_emails(
+                    cur,
+                    force_rescan=bool(payload.get("force_rescan", False)),
+                )
+                conn.commit()
+                return res
+            finally:
+                conn.close()
+
+        sync_result = await asyncio.to_thread(_run_sync)
+
+    out = get_public_email_watcher_config()
+    if sync_result is not None:
+        out["sync_result"] = sync_result
+    return out
+
+
+@app.post("/api/v1/scraper/email-sync")
+async def sync_email_orders_endpoint(
+    payload: Dict[str, Any] = Body(default_factory=dict),
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Immediately scan the configured IMAP mailbox for order/payment emails and reconcile."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    force = bool(payload.get("force_rescan", False)) if isinstance(payload, dict) else False
+    max_msgs = int(payload.get("max_messages", 80)) if isinstance(payload, dict) else 80
+
+    def _run_sync() -> Dict[str, Any]:
+        init_db()
+        conn = get_connection()
+        cur = conn.cursor()
+        try:
+            res = sync_imap_order_emails(cur, max_messages=max_msgs, force_rescan=force)
+            conn.commit()
+            return res
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_run_sync)
+
+
+@app.post("/api/v1/scraper/email-webhook")
+async def email_order_webhook_endpoint(
+    payload: Dict[str, Any] = Body(default_factory=dict),
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Ingest a forwarded order email (.eml base64 or HTML/text body) and generate statements."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    raw_input: bytes | str = ""
+    if payload.get("content_b64"):
+        raw_input = base64.b64decode(str(payload["content_b64"]))
+    elif payload.get("raw_content"):
+        raw_input = str(payload["raw_content"])
+    if not raw_input:
+        raise HTTPException(
+            status_code=400,
+            detail="Either raw_content or content_b64 must be provided.",
+        )
+
+    init_db()
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        outcome = ingest_email_order_payload(
+            cur,
+            raw_content=raw_input,
+            subject=str(payload.get("subject") or ""),
+            date_str=str(payload.get("date_str") or ""),
+        )
+        conn.commit()
+        return outcome
+    finally:
+        conn.close()
 
 
 @app.post("/api/v1/scraper/ingest")

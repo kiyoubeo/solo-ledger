@@ -1018,6 +1018,9 @@ def render_dashboard_html(
         <button onclick="document.getElementById('receipt-file-input').click()">영수증 업로드(OCR)</button>
         <button onclick="document.getElementById('csv-file-input').click()">카드사/홈택스 전표 업로드</button>
         <button onclick="openCoupangModal()">🛒 쿠팡 주문·영수증 자동매칭</button>
+        <button onclick="openEmailOrderModal()">📧 이메일 주문내역 실시간 연동</button>
+        <input type="file" id="eml-file-input" accept=".eml,.html,.htm,.txt"
+               style="display:none" onchange="uploadEmlFile(this)" />
         <button onclick="importPhoneSms()">USB 휴대폰 문자 가져오기</button>
         <button class="secondary" onclick="seedDemoData()">샘플 데이터 생성</button>
         <button class="danger" onclick="resetTestLedger()">테스트 DB 초기화</button>
@@ -1248,6 +1251,127 @@ def render_dashboard_html(
         <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:8px;">
           <button onclick="submitCoupangPaste()">⚡ 붙여넣은 주문내역 즉시 매칭 실행</button>
           <button class="secondary" onclick="closeCoupangModal()">닫기</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 이메일 주문내역 실시간 연동 모달 -->
+  <div id="email-modal-backdrop" class="modal-backdrop no-print"
+       onclick="onEmailBackdropClick(event)">
+    <div class="modal-card" style="max-width:700px;">
+      <div class="modal-header">
+        <strong>📧 이메일 주문·결제내역 실시간 연동 및 거래명세서 자동 작성</strong>
+        <button class="secondary" onclick="closeEmailOrderModal()">닫기 (ESC)</button>
+      </div>
+      <div class="slip-box"
+           style="margin-bottom:12px; font-size:13px; line-height:1.6;
+                  border:2px solid #2563eb; background:#eff6ff;">
+        <div style="font-weight:800; color:#1e3a8a; font-size:14px; margin-bottom:6px;">
+          ⚡ [실시간 자동 연동] IMAP 메일함 연결 (쿠팡 · 네이버페이 · 이니시스 · KCP · 토스 등)
+        </div>
+        <div style="color:#1e293b; margin-bottom:10px; font-size:12px;">
+          메일함으로 수신되는 <strong>주문확인 / 결제완료 / 구매영수증 / 거래명세서</strong> 메일을
+          실시간으로 감지하여 카드전표의 품목명과 회계계정을 채우고
+          <strong>다품목 전자 거래명세서(VAT 제외·VAT·합계 포함)</strong>를 자동 발급합니다.
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:8px;">
+          <div>
+            <label style="font-size:11px; font-weight:700; display:block; margin-bottom:3px;">
+              메일 서비스 선택
+            </label>
+            <select id="email-provider" style="width:100%;" onchange="onEmailProviderChange()">
+              <option value="NAVER">네이버 메일 (imap.naver.com)</option>
+              <option value="GMAIL">Google Gmail (imap.gmail.com)</option>
+              <option value="DAUM_KAKAO">다음 / 카카오 메일 (imap.daum.net)</option>
+              <option value="WORKSMOBILE">네이버웍스 (imap.worksmobile.com)</option>
+              <option value="OUTLOOK">Outlook / M365 (outlook.office365.com)</option>
+              <option value="CUSTOM">직접 입력 (사내 웹메일 / 기타 IMAP)</option>
+            </select>
+          </div>
+          <div style="display:flex; gap:6px;">
+            <div style="flex:2;">
+              <label style="font-size:11px; font-weight:700; display:block; margin-bottom:3px;">
+                IMAP 호스트
+              </label>
+              <input type="text" id="email-imap-host" value="imap.naver.com" style="width:100%;" />
+            </div>
+            <div style="flex:1;">
+              <label style="font-size:11px; font-weight:700; display:block; margin-bottom:3px;">
+                포트(SSL)
+              </label>
+              <input type="text" id="email-imap-port" value="993" style="width:100%;" />
+            </div>
+          </div>
+          <div>
+            <label style="font-size:11px; font-weight:700; display:block; margin-bottom:3px;">
+              이메일 주소 (로그인 ID)
+            </label>
+            <input type="text" id="email-address"
+                   placeholder="예: mycorp@naver.com" style="width:100%;" />
+          </div>
+          <div>
+            <label style="font-size:11px; font-weight:700; display:block; margin-bottom:3px;">
+              IMAP 비밀번호 (2단계 인증 시 앱 비밀번호)
+            </label>
+            <input type="password" id="email-app-password"
+                   placeholder="비밀번호 또는 앱 비밀번호 입력" style="width:100%;" />
+          </div>
+          <div>
+            <label style="font-size:11px; font-weight:700; display:block; margin-bottom:3px;">
+              스캔 기간 (최근 일수)
+            </label>
+            <input type="text" id="email-lookback-days" value="60" style="width:100%;" />
+          </div>
+          <div>
+            <label style="font-size:11px; font-weight:700; display:block; margin-bottom:3px;">
+              백그라운드 실시간 감지 주기(초)
+            </label>
+            <div style="display:flex; align-items:center; gap:8px;">
+              <input type="text" id="email-poll-interval" value="120" style="width:80px;" />
+              <label style="font-size:12px; font-weight:700; color:#1e40af; cursor:pointer;">
+                <input type="checkbox" id="email-auto-poll" /> 실시간 자동 감지 ON
+              </label>
+            </div>
+          </div>
+        </div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:10px;">
+          <button id="btn-email-save-sync" onclick="saveAndSyncEmailWatcher(true)">
+            💾 설정 저장 및 지금 즉시 메일함 스캔
+          </button>
+          <button class="secondary" onclick="triggerEmailSyncNow(true)">
+            🔄 전체 기간 다시 스캔 (강제 재매칭)
+          </button>
+          <button class="secondary" onclick="saveAndSyncEmailWatcher(false)">
+            설정만 저장
+          </button>
+        </div>
+        <div id="email-sync-status"
+             style="margin-top:8px; font-size:12px; font-weight:700; color:#1e40af;"></div>
+        <div style="margin-top:6px; font-size:11px; color:#475569;">
+          💡 <strong>IMAP 설정 팁</strong>: 네이버 메일(환경설정 → POP3/IMAP 설정 → IMAP 사용함) /
+          Gmail(Google 계정 → 보안 → 2단계 인증 → 앱 비밀번호 발급)
+        </div>
+      </div>
+
+      <div class="slip-box" style="font-size:13px; line-height:1.55;">
+        <div style="font-weight:700; color:#0f172a; margin-bottom:6px;">
+          [수동 즉시 매칭] 수신된 주문/결제 메일 본문 붙여넣기 또는 <code>.eml</code> 메일 파일 업로드
+        </div>
+        <textarea id="email-paste-input" rows="4"
+          style="width:100%; box-sizing:border-box; padding:8px;
+                 border:1px solid #cbd5e1; border-radius:6px; font-size:12px;"
+          placeholder="이니시스·쿠팡·네이버페이·KCP·토스 결제완료 메일 본문을 복사해 붙여넣으세요..."
+        ></textarea>
+        <div style="display:flex; justify-content:space-between; gap:8px; margin-top:8px; flex-wrap:wrap;">
+          <button class="secondary"
+            onclick="document.getElementById('eml-file-input').click()">
+            📎 .eml / .html 메일 파일 직접 업로드
+          </button>
+          <div style="display:flex; gap:8px;">
+            <button onclick="submitEmailPaste()">⚡ 붙여넣은 메일 즉시 매칭 · 명세서 생성</button>
+            <button class="secondary" onclick="closeEmailOrderModal()">닫기</button>
+          </div>
         </div>
       </div>
     </div>
@@ -1851,6 +1975,169 @@ def render_dashboard_html(
         }})
       }});
       window.location.href = '/dashboard?year_month=ALL';
+    }}
+    const EMAIL_HOST_MAP = {{
+      NAVER: {{ host: 'imap.naver.com', port: 993 }},
+      GMAIL: {{ host: 'imap.gmail.com', port: 993 }},
+      DAUM_KAKAO: {{ host: 'imap.daum.net', port: 993 }},
+      WORKSMOBILE: {{ host: 'imap.worksmobile.com', port: 993 }},
+      OUTLOOK: {{ host: 'outlook.office365.com', port: 993 }},
+      CUSTOM: {{ host: '', port: 993 }}
+    }};
+    function onEmailProviderChange() {{
+      const prov = document.getElementById('email-provider').value;
+      const preset = EMAIL_HOST_MAP[prov];
+      if (preset && preset.host) {{
+        document.getElementById('email-imap-host').value = preset.host;
+        document.getElementById('email-imap-port').value = preset.port;
+      }}
+    }}
+    async function openEmailOrderModal() {{
+      document.getElementById('email-modal-backdrop').classList.add('open');
+      try {{
+        const res = await fetch('/api/v1/scraper/email-config');
+        if (!res.ok) return;
+        const cfg = await res.json();
+        document.getElementById('email-provider').value = cfg.provider || 'NAVER';
+        document.getElementById('email-imap-host').value = cfg.imap_host || 'imap.naver.com';
+        document.getElementById('email-imap-port').value = cfg.imap_port || 993;
+        document.getElementById('email-address').value = cfg.email_address || '';
+        document.getElementById('email-app-password').value = cfg.app_password || '';
+        document.getElementById('email-lookback-days').value = cfg.lookback_days || 60;
+        document.getElementById('email-poll-interval').value = cfg.poll_interval_sec || 120;
+        document.getElementById('email-auto-poll').checked = !!cfg.auto_poll_enabled;
+        const st = document.getElementById('email-sync-status');
+        if (cfg.last_sync_at) {{
+          st.textContent = `최근 동기화 (${{cfg.last_sync_at}}): ${{cfg.last_sync_message || ''}}`;
+        }} else {{
+          st.textContent = cfg.last_sync_message || '';
+        }}
+      }} catch (e) {{}}
+    }}
+    function closeEmailOrderModal() {{
+      document.getElementById('email-modal-backdrop').classList.remove('open');
+    }}
+    function onEmailBackdropClick(ev) {{
+      if (ev.target && ev.target.id === 'email-modal-backdrop') {{
+        closeEmailOrderModal();
+      }}
+    }}
+    async function saveAndSyncEmailWatcher(syncNow) {{
+      const st = document.getElementById('email-sync-status');
+      const btn = document.getElementById('btn-email-save-sync');
+      btn.disabled = true;
+      st.style.color = '#1e40af';
+      st.textContent = syncNow
+        ? '⏳ IMAP 메일함에 연결하여 주문·결제 메일을 스캔하고 거래명세서를 작성 중입니다...'
+        : '⏳ 설정을 저장하는 중...';
+      try {{
+        const bodyObj = {{
+          provider: document.getElementById('email-provider').value,
+          imap_host: document.getElementById('email-imap-host').value.trim(),
+          imap_port: parseInt(document.getElementById('email-imap-port').value || '993', 10),
+          email_address: document.getElementById('email-address').value.trim(),
+          app_password: document.getElementById('email-app-password').value,
+          lookback_days: parseInt(document.getElementById('email-lookback-days').value || '60', 10),
+          poll_interval_sec: parseInt(document.getElementById('email-poll-interval').value || '120', 10),
+          auto_poll_enabled: document.getElementById('email-auto-poll').checked,
+          sync_now: !!syncNow
+        }};
+        const res = await fetch('/api/v1/scraper/email-config', {{
+          method: 'POST',
+          headers: API_HEADERS,
+          body: JSON.stringify(bodyObj)
+        }});
+        const data = await res.json();
+        btn.disabled = false;
+        if (syncNow && data.sync_result) {{
+          const sr = data.sync_result;
+          if (sr.status === 'synced') {{
+            st.style.color = '#15803d';
+            st.textContent = `✅ ${{sr.message}}`;
+            if (sr.matched_count > 0) {{
+              setTimeout(() => {{ window.location.reload(); }}, 1100);
+            }}
+          }} else {{
+            st.style.color = '#b91c1c';
+            st.textContent = `⚠️ ${{sr.message || '동기화 실패'}}`;
+          }}
+        }} else {{
+          st.style.color = '#15803d';
+          st.textContent = '✅ 이메일 실시간 연동 설정이 저장되었습니다.';
+        }}
+      }} catch (err) {{
+        btn.disabled = false;
+        st.style.color = '#b91c1c';
+        st.textContent = '⚠️ 이메일 설정 저장 또는 동기화 중 오류가 발생했습니다.';
+      }}
+    }}
+    async function triggerEmailSyncNow(forceRescan) {{
+      const st = document.getElementById('email-sync-status');
+      st.style.color = '#1e40af';
+      st.textContent = '⏳ 메일함을 전체 스캔하여 주문내역 및 거래명세서를 매칭 중입니다...';
+      const res = await fetch('/api/v1/scraper/email-sync', {{
+        method: 'POST',
+        headers: API_HEADERS,
+        body: JSON.stringify({{ force_rescan: !!forceRescan }})
+      }});
+      const sr = await res.json();
+      if (sr.status === 'synced') {{
+        st.style.color = '#15803d';
+        st.textContent = `✅ ${{sr.message}}`;
+        if (sr.matched_count > 0) {{
+          setTimeout(() => {{ window.location.reload(); }}, 1100);
+        }}
+      }} else {{
+        st.style.color = '#b91c1c';
+        st.textContent = `⚠️ ${{sr.message || '동기화 실패'}}`;
+      }}
+    }}
+    async function submitEmailPaste() {{
+      const txt = (document.getElementById('email-paste-input').value || '').trim();
+      if (!txt) return;
+      const st = document.getElementById('email-sync-status');
+      st.style.color = '#1e40af';
+      st.textContent = '⏳ 붙여넣은 이메일 내역을 분석하여 전표 매칭 및 거래명세서를 작성 중입니다...';
+      const res = await fetch('/api/v1/scraper/email-webhook', {{
+        method: 'POST',
+        headers: API_HEADERS,
+        body: JSON.stringify({{ raw_content: txt }})
+      }});
+      const data = await res.json();
+      if (data.matched_count > 0) {{
+        st.style.color = '#15803d';
+        st.textContent =
+          `✅ 주문 ${{data.parsed_orders_count}}건 추출 · 전표 ${{data.matched_count}}건 매칭 및 거래명세서 작성 완료!`;
+        setTimeout(() => {{ window.location.reload(); }}, 900);
+      }} else {{
+        st.style.color = '#b91c1c';
+        st.textContent =
+          `⚠️ 추출된 주문(${{data.parsed_orders_count || 0}}건)과 일치하는 금액·날짜의 카드 전표를 찾지 못했습니다.`;
+      }}
+    }}
+    function uploadEmlFile(inputEl) {{
+      if (!inputEl.files || !inputEl.files[0]) return;
+      const file = inputEl.files[0];
+      const reader = new FileReader();
+      reader.onload = async function(ev) {{
+        const dataUrl = String(ev.target.result || '');
+        const b64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+        const res = await fetch('/api/v1/scraper/email-webhook', {{
+          method: 'POST',
+          headers: API_HEADERS,
+          body: JSON.stringify({{ content_b64: b64 }})
+        }});
+        const data = await res.json();
+        const st = document.getElementById('email-sync-status');
+        if (st) {{
+          st.style.color = data.matched_count > 0 ? '#15803d' : '#b91c1c';
+          st.textContent =
+            `✅ 파일(${{file.name}}) 주문 ${{data.parsed_orders_count || 0}}건 추출 · ` +
+            `전표 ${{data.matched_count || 0}}건 매칭 완료!`;
+        }}
+        window.location.reload();
+      }};
+      reader.readAsDataURL(file);
     }}
   </script>
 </body>
