@@ -67,6 +67,18 @@ def _apply_cached_merchant_overrides(
     return result
 
 
+_BUILTIN_INSURANCE_RE = re.compile(
+    r"(손해보험|생명보험|화재보험|보증보험|해상보험)",
+    re.IGNORECASE,
+)
+_BUILTIN_TRAVEL_RE = re.compile(
+    r"(항공|놀유니버스|야놀자|인터파크|하나투어|모두투어|아고다|트립닷컴|마이리얼트립)",
+    re.IGNORECASE,
+)
+_BUILTIN_SERVICE_FEE_RE = re.compile(
+    r"(알림서비스|연회비|문자서비스|인증수수료|티머니|이비카드|후불교통)",
+    re.IGNORECASE,
+)
 _BUILTIN_BOOKSTORE_RE = re.compile(
     r"(교보문고|영풍문고|알라딘|예스24|오피스디포|알파문구)",
     re.IGNORECASE,
@@ -82,6 +94,17 @@ def evaluate_tax_rules(
     cursor: sqlite3.Cursor, merchant_name: str, biz_reg_no: Optional[str] = None
 ) -> Dict[str, Any]:
     """Evaluate merchant_name against active tax_classification_rules and cached merchant data."""
+    if _BUILTIN_INSURANCE_RE.search(merchant_name or ""):
+        base_ins = {
+            "account_code": "821",
+            "account_name": "보험료",
+            "vat_deduction_type": "EXEMPT",
+            "non_deduct_reason": "SIMPLIFIED_TAX",
+            "is_vehicle_expense": False,
+            "require_memo_prompt": False,
+        }
+        return _apply_cached_merchant_overrides(cursor, base_ins, merchant_name, biz_reg_no)
+
     cursor.execute(
         """
         SELECT match_pattern, target_account_code, target_account_name,
@@ -112,7 +135,25 @@ def evaluate_tax_rules(
             }
             break
 
-    if matched_result is None and _BUILTIN_BOOKSTORE_RE.search(merchant_name or ""):
+    if matched_result is None and _BUILTIN_TRAVEL_RE.search(merchant_name or ""):
+        matched_result = {
+            "account_code": "812",
+            "account_name": "여비교통비",
+            "vat_deduction_type": "NON_DEDUCTIBLE",
+            "non_deduct_reason": "PASSENGER_TRANSPORT",
+            "is_vehicle_expense": False,
+            "require_memo_prompt": False,
+        }
+    elif matched_result is None and _BUILTIN_SERVICE_FEE_RE.search(merchant_name or ""):
+        matched_result = {
+            "account_code": "831",
+            "account_name": "지급수수료",
+            "vat_deduction_type": "DEDUCTIBLE",
+            "non_deduct_reason": None,
+            "is_vehicle_expense": False,
+            "require_memo_prompt": False,
+        }
+    elif matched_result is None and _BUILTIN_BOOKSTORE_RE.search(merchant_name or ""):
         matched_result = {
             "account_code": "826",
             "account_name": "도서인쇄비",
@@ -170,11 +211,23 @@ def generate_default_memo(
         return "업무용승용차 주유비"
     if account_code == "811":
         return "대표자(임직원) 식대 및 복리후생"
+    if account_code == "812":
+        if "항공" in m_name:
+            return "출장·여비 항공권 발권"
+        if any(k in m_name for k in ("놀유니버스", "야놀자", "인터파크", "투어", "아고다", "트립")):
+            return "출장·여비 여행플랫폼 수수료"
+        return "업무용 대중교통·여비교통비"
+    if account_code == "821":
+        return "업무용 보험료(여행자·배상책임 등)"
     if account_code == "826":
         return "업무용 도서 구입 및 인쇄"
     if account_code == "830":
         return "사무실 소모품 및 생활잡화 구입"
     if account_code == "831":
+        if "티머니" in m_name or "이비카드" in m_name:
+            return "대중교통(버스·지하철) 교통카드 이용"
+        if "알림서비스" in m_name:
+            return "법인카드 알림서비스 수수료"
         return "업무용 IT구독·통신·교통 수수료"
     if account_code == "212":
         return "사무용 비품 취득"

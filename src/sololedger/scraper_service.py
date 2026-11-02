@@ -28,6 +28,7 @@ from sololedger.archiver import (
 from sololedger.config import settings
 from sololedger.importers import (
     _extract_card_last4,
+    _extract_year_hint,
     _map_tax_type_and_status,
     _normalize_datetime_str,
     _parse_int_amount,
@@ -141,7 +142,9 @@ def extract_rows_from_html_table(html_text: str) -> List[Dict[str, str]]:
     return data_rows
 
 
-def _row_dict_to_reconcile_item(row: Dict[str, Any]) -> Optional[ReconcileItem]:
+def _row_dict_to_reconcile_item(
+    row: Dict[str, Any], default_year: Optional[str] = None
+) -> Optional[ReconcileItem]:
     """Convert a normalized or raw dictionary (JSON/HTML/CSV) from any Korean card issuer."""
     raw_dt = _pick_col(
         row,
@@ -150,6 +153,7 @@ def _row_dict_to_reconcile_item(row: Dict[str, Any]) -> Optional[ReconcileItem]:
             "승인일시",
             "이용일시",
             "결제일시",
+            "이용일",
             "transacted_at",
             "trnsdt",
             "aprvdt",
@@ -161,23 +165,25 @@ def _row_dict_to_reconcile_item(row: Dict[str, Any]) -> Optional[ReconcileItem]:
             row,
             ["거래일자", "승인일자", "이용일자", "결제일자", "일자", "aprvdy", "trnsdy"],
         )
-        t_part = _pick_col(
-            row,
-            ["거래시간", "승인시간", "이용시간", "결제시간", "시간", "aprvtm", "trnstm"],
-            "12:00:00",
-        )
-        if d_part and len(re.sub(r"\D", "", d_part)) == 8:
-            digits = re.sub(r"\D", "", d_part)
-            d_part = f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}"
-        if t_part and len(re.sub(r"\D", "", t_part)) == 6:
-            td = re.sub(r"\D", "", t_part)
-            t_part = f"{td[:2]}:{td[2:4]}:{td[4:6]}"
-        raw_dt = f"{d_part} {t_part}".strip()
+        if d_part:
+            t_part = _pick_col(
+                row,
+                ["거래시간", "승인시간", "이용시간", "결제시간", "시간", "aprvtm", "trnstm"],
+                "12:00:00",
+            )
+            if len(re.sub(r"\D", "", d_part)) == 8:
+                digits = re.sub(r"\D", "", d_part)
+                d_part = f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}"
+            if t_part and len(re.sub(r"\D", "", t_part)) == 6:
+                td = re.sub(r"\D", "", t_part)
+                t_part = f"{td[:2]}:{td[2:4]}:{td[4:6]}"
+            raw_dt = f"{d_part} {t_part}".strip()
 
     if not raw_dt:
         return None
 
-    transacted_at = _normalize_datetime_str(raw_dt)
+    row_year = default_year or _extract_year_hint(_pick_col(row, ["결제예정일", "청구일자"]))
+    transacted_at = _normalize_datetime_str(raw_dt, default_year=row_year)
     if len(transacted_at) < 10 or not transacted_at[:4].isdigit():
         return None
 
@@ -249,13 +255,18 @@ def _row_dict_to_reconcile_item(row: Dict[str, Any]) -> Optional[ReconcileItem]:
     if total_amount == 0:
         return None
 
+    cancel_amt = abs(
+        _parse_int_amount(_pick_col(row, ["취소금액", "취소원금", "cancel_amount", "cnclamt"]))
+    )
     cancel_hint = _pick_col(
-        row, ["취소여부", "거래구분", "승인구분", "매입상태", "상태", "is_cancel", "cncllyn"]
+        row,
+        ["취소여부", "거래구분", "승인구분", "매입상태", "상태", "결제예정일", "is_cancel", "cncllyn"],
     )
     is_cancel = (
         ("취소" in cancel_hint)
         or (cancel_hint.lower() in ("true", "y", "cancel", "canceled"))
         or (total_amount < 0)
+        or (cancel_amt > 0 and cancel_amt >= abs(total_amount))
     )
     if is_cancel and total_amount > 0:
         total_amount = -total_amount
@@ -287,6 +298,8 @@ def parse_scraped_card_statement(raw_content: str) -> List[ReconcileItem]:
     if not content:
         return []
 
+    default_year = _extract_year_hint(content[:400])
+
     # 1. JSON XHR / API response format
     if content.startswith("{") or content.startswith("["):
         try:
@@ -304,7 +317,7 @@ def parse_scraped_card_statement(raw_content: str) -> List[ReconcileItem]:
                     rows_list = [parsed_json]
             items = []
             for r in rows_list:
-                item = _row_dict_to_reconcile_item(r)
+                item = _row_dict_to_reconcile_item(r, default_year=default_year)
                 if item is not None:
                     items.append(item)
             return items
@@ -316,31 +329,40 @@ def parse_scraped_card_statement(raw_content: str) -> List[ReconcileItem]:
         html_rows = extract_rows_from_html_table(content)
         items = []
         for r in html_rows:
-            item = _row_dict_to_reconcile_item(r)
+            item = _row_dict_to_reconcile_item(r, default_year=default_year)
             if item is not None:
                 items.append(item)
         if items:
             return items
 
-    # 3. Multi-issuer CSV / TSV format (skip preamble lines before header row if present)
-    lines = [ln for ln in content.splitlines() if ln.strip()]
+    # 3. Multi-issuer CSV / TSV format (skip preamble lines and handle multiline quoted headers)
+    first_line = next((ln for ln in content.splitlines() if ln.strip()), "")
+    delimiter = "\t" if "\t" in first_line and "," not in first_line else ","
+    all_csv_rows = list(csv.reader(io.StringIO(content), delimiter=delimiter))
     header_idx = 0
-    for idx, ln in enumerate(lines[:15]):
-        if any(k in ln for k in ("일자", "일시", "가맹점", "상호", "승인번호", "transacted_at")):
+    for idx, cells in enumerate(all_csv_rows[:15]):
+        joined = " ".join(str(c) for c in cells)
+        if any(
+            k in joined
+            for k in ("일자", "일시", "이용일", "가맹점", "상호", "승인번호", "transacted_at")
+        ):
             header_idx = idx
             break
-    trimmed_csv = "\n".join(lines[header_idx:])
-    delimiter = "\t" if "\t" in lines[header_idx] and "," not in lines[header_idx] else ","
-    reader = csv.DictReader(io.StringIO(trimmed_csv), delimiter=delimiter)
-    items = []
-    for r in reader:
-        item = _row_dict_to_reconcile_item(r)
-        if item is not None:
-            items.append(item)
-    if items:
-        return items
 
-    return parse_hometax_csv(trimmed_csv)
+    if header_idx < len(all_csv_rows):
+        headers = [re.sub(r"\s+", "", str(h)) for h in all_csv_rows[header_idx]]
+        items = []
+        for cells in all_csv_rows[header_idx + 1 :]:
+            if not any(str(c).strip() for c in cells):
+                continue
+            row_dict = {headers[i]: cells[i] for i in range(min(len(headers), len(cells)))}
+            item = _row_dict_to_reconcile_item(row_dict, default_year=default_year)
+            if item is not None:
+                items.append(item)
+        if items:
+            return items
+
+    return parse_hometax_csv(content)
 
 
 def reconcile_scraped_ecommerce_orders(
@@ -649,6 +671,11 @@ def ingest_scraped_payload(
     for r in results:
         st = r["match_stage"]
         stage_counts[st] = stage_counts.get(st, 0) + 1
+        if r.get("action") == "updated" and r.get("tx_id"):
+            cursor.execute(
+                "DELETE FROM receipt_ocr_metadata WHERE tx_id = ? AND source_channel = 'AUTO_SLIP'",
+                (r["tx_id"],),
+            )
 
     slip_res = (
         generate_electronic_slips_for_ledger(cursor, archive_dir=archive_dir)

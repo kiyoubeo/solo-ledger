@@ -40,3 +40,4 @@
 | 2026-10-30 | logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/dashboard.py (+2 files) | [feat] 자체 스크래핑 수집 엔진(7대 카드사·홈택스·쇼핑몰) 및 카드별 전자 매출전표 영수증 일괄 생성기 구현 |
 | 2026-10-30 | logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/dashboard.py, tests/test_sms_parser.py | [fix] 영수증 팝업 모달 인쇄 시 배경 대시보드 숨김 및 1페이지 단독 출력(@media print) 수정 |
 | 2026-10-30 | logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/archiver.py (+3 files) | [feat] 영수증 PDF 인쇄 시 전표별 고유 식별 파일명(매출전표_일시_카드_가맹점_계정_금액_TX번호) 자동 지정 |
+| 2026-11-02 | logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/dashboard.py, src/sololedger/importers.py (+5 files) | [feat] 우리카드 실명세서 CSV(국내 이용내역 배너·줄바꿈 헤더·MM.DD 일시·취소금액) 파싱 및 10월 15건 원장 대사 반영 |

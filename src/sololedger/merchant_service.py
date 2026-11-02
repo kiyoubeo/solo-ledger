@@ -22,16 +22,22 @@ _PG_PROVIDER_PATTERN = re.compile(
 
 ACCOUNT_CODE_NAMES = {
     "811": "복리후생비",
+    "812": "여비교통비",
     "813": "기업업무추진비",
+    "821": "보험료",
     "822": "차량유지비",
+    "826": "도서인쇄비",
     "830": "소모품비",
     "831": "지급수수료",
+    "212": "비품",
     "999": "미분류",
 }
 
 
 def detect_pg_provider(merchant_name: str) -> bool:
     """Return True if merchant_name matches known PG / e-commerce platforms."""
+    if "보험" in (merchant_name or ""):
+        return False
     return bool(_PG_PROVIDER_PATTERN.search(merchant_name or ""))
 
 

@@ -23,7 +23,9 @@ from sololedger.vehicle_tracker import get_vehicle_expense_summary
 
 ACCOUNT_CODE_CATALOG: Dict[str, str] = {
     "811": "복리후생비",
+    "812": "여비교통비",
     "813": "기업업무추진비",
+    "821": "보험료",
     "822": "차량유지비",
     "826": "도서인쇄비",
     "830": "소모품비",

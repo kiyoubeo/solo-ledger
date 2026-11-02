@@ -232,6 +232,23 @@ def test_import_phone_sms_api_endpoint(client):
     assert file_res.status_code == 200
     assert "신용카드 매출전표" in file_res.text
 
+    # Verify real Woori Card CSV format (preamble banner + multiline header + MM.DD HH:MM:SS + cancel amount)
+    woori_real_csv = (
+        " ▶ 국내 이용내역,,(2026.10.01 ~ 2026.10.31),,,,,,,\n"
+        '이용일,승인번호,이용카드,이용가맹점(은행)명,사업자번호,이용구분,"할부\n개월",'
+        "이용금액(원),취소금액(원),결제예정일\n"
+        '10.24 10:12:43,80797125,6534,모바일티머니_버스1건,1048183559,일시불,,"1,500",0,2026.11.14\n'
+        '10.04 09:45:26,85561585,6534,주식회사 카카오페이손해보험,1138521083,일시불,,"23,050",0,2026.11.14\n'
+        '10.04 09:25:08,56550426,6534,세부퍼시픽항공（ＢＳ,5628400022,일시불,,"586,400","586,400",미접수/취소\n'
+    )
+    woori_csv_res = client.post(
+        "/api/v1/scraper/ingest",
+        headers={"X-API-Key": "test-secret-key"},
+        json={"portal": "WOORI", "raw_content": woori_real_csv, "auto_generate_slips": True},
+    )
+    assert woori_csv_res.status_code == 200
+    assert woori_csv_res.json()["scraped_rows_count"] == 3
+
 
 
 
