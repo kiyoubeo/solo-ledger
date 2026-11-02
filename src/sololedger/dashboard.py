@@ -270,16 +270,44 @@ def build_dashboard_summary(
 
     cursor.execute(
         """
-        SELECT DISTINCT SUBSTR(transacted_at, 1, 4) || SUBSTR(transacted_at, 6, 2) AS ym
+        SELECT SUBSTR(transacted_at, 1, 4) || SUBSTR(transacted_at, 6, 2) AS ym,
+               COUNT(*) AS cnt
         FROM card_transactions
         WHERE LENGTH(transacted_at) >= 7
+          AND reconcile_status != 'CANCELED'
+        GROUP BY ym
         ORDER BY ym DESC
         """
     )
-    available_months = [r[0] for r in cursor.fetchall() if r[0]]
+    ym_rows = cursor.fetchall()
+    monthly_counts: Dict[str, int] = {str(r[0]): int(r[1]) for r in ym_rows if r[0]}
+    available_months = [str(r[0]) for r in ym_rows if r[0]]
     current_ym = now.strftime("%Y%m")
     if current_ym not in available_months:
         available_months.insert(0, current_ym)
+
+    monthly_periods: List[Dict[str, Any]] = []
+    for ym_val in available_months:
+        if len(ym_val) >= 6 and ym_val[:4].isdigit() and ym_val[4:6].isdigit():
+            y_i = int(ym_val[:4])
+            m_i = int(ym_val[4:6])
+            if 1 <= m_i <= 12:
+                last_d = calendar.monthrange(y_i, m_i)[1]
+                m_start = f"{y_i:04d}-{m_i:02d}-01"
+                m_end = f"{y_i:04d}-{m_i:02d}-{last_d:02d}"
+                cnt = monthly_counts.get(ym_val, 0)
+                monthly_periods.append(
+                    {
+                        "ym": ym_val,
+                        "year": y_i,
+                        "month": m_i,
+                        "label": f"{y_i}년 {m_i:02d}월 ({cnt}건)",
+                        "short_label": f"{str(y_i)[2:]}.{m_i:02d}월",
+                        "start_date": m_start,
+                        "end_date": m_end,
+                        "tx_count": cnt,
+                    }
+                )
 
     norm_start = _normalize_date_str(start_date)
     norm_end = _normalize_date_str(end_date)
@@ -462,6 +490,7 @@ def build_dashboard_summary(
         "max_tx_date": max_tx_date,
         "card_last4": target_card,
         "available_months": available_months,
+        "monthly_periods": monthly_periods,
         "card_breakdown": card_breakdown,
         "account_breakdown": account_breakdown,
         "year": target_year,
@@ -718,6 +747,33 @@ def render_dashboard_html(
         card_options_html.append(f"<option value='{c_val}' {sel}>{c_lbl}</option>")
     card_select_html = "".join(card_options_html)
 
+    month_options_html = ["<option value=''>-- 달별 선택 --</option>"]
+    month_chips_list = []
+    for mp in summary.get("monthly_periods", []):
+        m_val = f"{mp['start_date']}|{mp['end_date']}"
+        m_lbl = html.escape(str(mp["label"]))
+        is_active = (
+            summary["start_date"] == mp["start_date"]
+            and summary["end_date"] == mp["end_date"]
+        )
+        m_sel = "selected" if is_active else ""
+        month_options_html.append(f"<option value='{m_val}' {m_sel}>{m_lbl}</option>")
+    month_select_html = "".join(month_options_html)
+
+    for mp in sorted(summary.get("monthly_periods", []), key=lambda x: str(x["ym"])):
+        m_val = f"{mp['start_date']}|{mp['end_date']}"
+        s_lbl = html.escape(f"{mp['short_label']}({mp['tx_count']})")
+        is_active = (
+            summary["start_date"] == mp["start_date"]
+            and summary["end_date"] == mp["end_date"]
+        )
+        btn_cls = "" if is_active else "secondary"
+        month_chips_list.append(
+            f"<button class='{btn_cls}' style='padding:4px 9px; font-size:12px; margin:2px;' "
+            f"onclick=\"selectMonthRange('{m_val}')\">{s_lbl}</button>"
+        )
+    month_chips_html = "".join(month_chips_list)
+
     card_breakdown_rows = []
     for cb in summary.get("card_breakdown", []):
         c_val = html.escape(str(cb["card_last4"]))
@@ -929,7 +985,14 @@ def render_dashboard_html(
          ~
          <input type="date" id="end-date" value="{e_date}" />
          <button onclick="applyFilters()">기간 조회</button>
+         | 달별 조회:
+         <button class="secondary" onclick="shiftMonth(-1)" title="이전 달">◀</button>
+         <select id="month-filter" onchange="selectMonthRange(this.value)">
+           {month_select_html}
+         </select>
+         <button class="secondary" onclick="shiftMonth(1)" title="다음 달">▶</button>
          <button class="secondary" onclick="setQuickRange('THIS_MONTH')">이번 달</button>
+         <button class="secondary" onclick="setQuickRange('LAST_MONTH')">지난 달</button>
          <button class="secondary" onclick="setQuickRange('3M')">최근 3개월</button>
          <button class="secondary" onclick="setQuickRange('THIS_YEAR')">올해 전체</button>
          <button class="secondary" onclick="setQuickRange('ALL')">전체 기간</button>
@@ -939,6 +1002,10 @@ def render_dashboard_html(
          </select>
          | 귀속 연도: <strong>{summary['year']}</strong>
          | DB: <code>{html.escape(Path(summary['db_path']).name)}</code></p>
+      <div class="no-print" style="margin-top:6px; display:flex; align-items:center; flex-wrap:wrap; gap:2px;">
+        <span style="font-size:12px; font-weight:600; color:#475569; margin-right:6px;">📅 월별 바로가기:</span>
+        {month_chips_html}
+      </div>
     </div>
     <div>
       <input type="file" id="receipt-file-input" accept="image/*,.pdf"
@@ -1296,6 +1363,34 @@ def render_dashboard_html(
               + '&card_last4=' + encodeURIComponent(cardCode);
       window.location.href = '/dashboard' + q;
     }}
+    function selectMonthRange(val) {{
+      if (!val || !val.includes('|')) return;
+      const parts = val.split('|');
+      document.getElementById('start-date').value = parts[0];
+      document.getElementById('end-date').value = parts[1];
+      applyFilters();
+    }}
+    function shiftMonth(delta) {{
+      const curStart = document.getElementById('start-date').value || '';
+      const pad = (n) => String(n).padStart(2, '0');
+      let y = new Date().getFullYear();
+      let m = new Date().getMonth() + 1;
+      if (curStart.length >= 7) {{
+        const py = parseInt(curStart.slice(0, 4), 10);
+        const pm = parseInt(curStart.slice(5, 7), 10);
+        if (!isNaN(py) && !isNaN(pm)) {{
+          y = py;
+          m = pm;
+        }}
+      }}
+      const target = new Date(y, m - 1 + delta, 1);
+      const ty = target.getFullYear();
+      const tm = target.getMonth() + 1;
+      const lastDay = new Date(ty, tm, 0).getDate();
+      document.getElementById('start-date').value = ty + '-' + pad(tm) + '-01';
+      document.getElementById('end-date').value = ty + '-' + pad(tm) + '-' + pad(lastDay);
+      applyFilters();
+    }}
     function setQuickRange(mode) {{
       const now = new Date();
       const pad = (n) => String(n).padStart(2, '0');
@@ -1307,6 +1402,13 @@ def render_dashboard_html(
       if (mode === 'THIS_MONTH') {{
         s = y + '-' + pad(m) + '-01';
         e = y + '-' + pad(m) + '-' + pad(lastDay);
+      }} else if (mode === 'LAST_MONTH') {{
+        const prev = new Date(y, m - 2, 1);
+        const py = prev.getFullYear();
+        const pm = prev.getMonth() + 1;
+        const pLast = new Date(py, pm, 0).getDate();
+        s = py + '-' + pad(pm) + '-01';
+        e = py + '-' + pad(pm) + '-' + pad(pLast);
       }} else if (mode === '3M') {{
         const d3 = new Date(y, m - 3, 1);
         s = d3.getFullYear() + '-' + pad(d3.getMonth() + 1) + '-01';

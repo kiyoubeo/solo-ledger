@@ -322,6 +322,10 @@ def test_import_phone_sms_api_endpoint(client):
     ).json()
     c_labels = [c["card_label"] for c in all_sum["card_breakdown"]]
     assert c_labels == sorted(c_labels)
+    assert len(all_sum["monthly_periods"]) >= 1
+    dash_html = client.get("/dashboard?year_month=ALL").text
+    assert 'id="month-filter"' in dash_html
+    assert "selectMonthRange(" in dash_html
 
     # Verify Coupang 1-click browser extractor script endpoint
     cp_script_res = client.get("/api/v1/scraper/coupang-script")

@@ -47,3 +47,4 @@
 | 2026-11-02 | logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/dashboard.py, tests/test_sms_parser.py | [feat] 대시보드 카드별 지출 및 영수증 분류 현황을 카드 이름순(오름차순)으로 정렬 |
 | 2026-11-02 | logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/dashboard.py (+2 files) | [feat] 쿠팡 주문목록 원클릭 브라우저 수집 스크립트 및 화면복사(DOM/SSR) 자동매칭 구현 |
 | 2026-11-02 | logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/dashboard.py (+2 files) | [feat] 대시보드 전용 브라우저 세션(CDP) 기반 쿠팡 주문내역 원클릭 자동 크롤러(방법 B) 구현 |
+| 2026-11-02 | logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/dashboard.py, tests/test_sms_parser.py | [feat] 대시보드 조회 기간에 달별 기간 조회(월 선택 드롭다운, 이전/다음달 이동, 월별 바로가기 버튼) 추가 |
