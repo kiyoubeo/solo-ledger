@@ -315,4 +315,12 @@ def test_import_phone_sms_api_endpoint(client):
     assert lotte_res.status_code == 200
     assert lotte_res.json()["scraped_rows_count"] == 2
 
+    # Verify card_breakdown in dashboard summary is sorted by card_label ascending (이름순)
+    all_sum = client.get(
+        "/api/v1/dashboard/summary?year_month=ALL",
+        headers={"X-API-Key": "test-secret-key"},
+    ).json()
+    c_labels = [c["card_label"] for c in all_sum["card_breakdown"]]
+    assert c_labels == sorted(c_labels)
+
 

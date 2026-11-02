@@ -387,8 +387,7 @@ def build_dashboard_summary(
 
     card_breakdown = sorted(
         card_stats.values(),
-        key=lambda x: (x["tx_count"], x["total_expenditure"]),
-        reverse=True,
+        key=lambda x: (str(x["card_label"]), str(x["card_last4"])),
     )
 
     if target_card and target_card != "ALL":

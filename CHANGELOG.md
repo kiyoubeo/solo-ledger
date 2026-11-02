@@ -32,3 +32,4 @@
 | 2026-11-02 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/importers.py, src/sololedger/reconciler.py (+3 files)` | 현대카드 이용대금명세서 HTML(.xls) 파싱(한글날짜·비정형 닫힘태그·소계제외·네이버현대카드 매핑) 및 10월 11건 반영 | `PASSED` |
 | 2026-11-02 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/dashboard.py, src/sololedger/importers.py (+4 files)` | KB국민카드 바이너리 XLS(BIFF8) 및 이용내역 120건(쿠팡와우·하이패스·마이위시) 파서 보강 및 원장 대사 반영 | `PASSED` |
 | 2026-11-02 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/importers.py, src/sololedger/scraper_service.py (+3 files)` | 롯데카드 다중 테이블 HTML(.xls) 및 부분취소 파싱 지원, 117건 이용내역 원장 대사 반영 | `PASSED` |
+| 2026-11-02 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/dashboard.py, tests/test_sms_parser.py` | 대시보드 카드별 지출 및 영수증 분류 현황을 카드 이름순(오름차순)으로 정렬 | `PASSED` |
