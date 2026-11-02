@@ -270,8 +270,28 @@ def test_import_phone_sms_api_endpoint(client):
     assert hyundai_res.status_code == 200
     assert hyundai_res.json()["scraped_rows_count"] == 2
 
-
-
-
+    # Verify real KB Kookmin Card statement format (multi-row preamble, empty 가맹점정보 col, .0 amounts)
+    kb_csv = (
+        ",,,,,,,,,,,,,\n"
+        "조회기간,2025-11-02 ~ 2026-11-02,,,,,,,,,,,,\n"
+        "카드번호,전체,,,,,,이용구분,일시불/할부,,,,,\n"
+        '이용일,"이용\n시간","이용\n고객명",이용카드명,이용하신곳,"국내이용금액\n(원)",'
+        '"해외이용금액\n($)",결제방법,"가맹점\n정보",할인금액,"적립(예상)\n포인트리",상태,결제예정일,승인번호\n'
+        "2026-11-01,21:38,김영범,(신) 쿠팡 와우 카드,쿠팡(쿠페이),12170.0,0.0,일시불,,"
+        "0.0,0,전표매입,2026-12-14,30001964\n"
+        "2026-09-30,06:28,김영범,KB국민 하이패스2.0카드,터널/도로 1 건,1700.0,0.0,일시불,,"
+        "0.0,1,전표매입,2026-10-14,45477777\n"
+        "2025-12-30,18:51,김영범,(구)KB국민 My WE:SH(마이 위시) 카드,지코바,20500.0,0.0,일시불,,"
+        "0.0,0,전표매입,2026-01-14,30000984\n"
+    )
+    kb_res = client.post(
+        "/api/v1/scraper/ingest",
+        headers={"X-API-Key": "test-secret-key"},
+        json={"portal": "COUPANG", "raw_content": kb_csv, "auto_generate_slips": True},
+    )
+    assert kb_res.status_code == 200
+    kb_body = kb_res.json()
+    assert kb_body["mode"] == "CARD_SLIP"
+    assert kb_body["scraped_rows_count"] == 3
 
 

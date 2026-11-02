@@ -72,7 +72,8 @@ _BUILTIN_INSURANCE_RE = re.compile(
     re.IGNORECASE,
 )
 _BUILTIN_TRAVEL_RE = re.compile(
-    r"(항공|고속버스|시외버스|운송사업조합|놀유니버스|야놀자|인터파크|하나투어|모두투어|아고다|트립닷컴|마이리얼트립)",
+    r"(항공|고속버스|시외버스|공항버스|시티투어|카카오T대리|대리운전|운송사업조합|"
+    r"놀유니버스|야놀자|인터파크|하나투어|모두투어|아고다|트립닷컴|마이리얼트립)",
     re.IGNORECASE,
 )
 _BUILTIN_SERVICE_FEE_RE = re.compile(
@@ -81,7 +82,12 @@ _BUILTIN_SERVICE_FEE_RE = re.compile(
     re.IGNORECASE,
 )
 _BUILTIN_RESTAURANT_RE = re.compile(
-    r"(대게|횟집|해물|초밥|스시|식당|맛집|이마트24|GS25|롯데리아|카페인클럽)",
+    r"(대게|횟집|해물|초밥|스시|식당|맛집|이마트24|GS25|롯데리아|카페인클럽|"
+    r"쿠팡이츠|지코바|떡볶이|엘리시안)",
+    re.IGNORECASE,
+)
+_BUILTIN_TOLL_RE = re.compile(
+    r"(터널/도로|유료도로)",
     re.IGNORECASE,
 )
 _BUILTIN_BOOKSTORE_RE = re.compile(
@@ -99,7 +105,8 @@ def evaluate_tax_rules(
     cursor: sqlite3.Cursor, merchant_name: str, biz_reg_no: Optional[str] = None
 ) -> Dict[str, Any]:
     """Evaluate merchant_name against active tax_classification_rules and cached merchant data."""
-    if _BUILTIN_INSURANCE_RE.search(merchant_name or ""):
+    m_txt = merchant_name or ""
+    if _BUILTIN_INSURANCE_RE.search(m_txt):
         base_ins = {
             "account_code": "821",
             "account_name": "보험료",
@@ -109,6 +116,46 @@ def evaluate_tax_rules(
             "require_memo_prompt": False,
         }
         return _apply_cached_merchant_overrides(cursor, base_ins, merchant_name, biz_reg_no)
+    if "쿠팡이츠" in m_txt:
+        base_eats = {
+            "account_code": "811",
+            "account_name": "복리후생비",
+            "vat_deduction_type": "DEDUCTIBLE",
+            "non_deduct_reason": None,
+            "is_vehicle_expense": False,
+            "require_memo_prompt": False,
+        }
+        return _apply_cached_merchant_overrides(cursor, base_eats, merchant_name, biz_reg_no)
+    if "와우 멤버십" in m_txt or "와우멤버십" in m_txt:
+        base_wow = {
+            "account_code": "831",
+            "account_name": "지급수수료",
+            "vat_deduction_type": "DEDUCTIBLE",
+            "non_deduct_reason": None,
+            "is_vehicle_expense": False,
+            "require_memo_prompt": False,
+        }
+        return _apply_cached_merchant_overrides(cursor, base_wow, merchant_name, biz_reg_no)
+    if "카카오T대리" in m_txt or "대리운전" in m_txt:
+        base_daeri = {
+            "account_code": "812",
+            "account_name": "여비교통비",
+            "vat_deduction_type": "NON_DEDUCTIBLE",
+            "non_deduct_reason": "PASSENGER_TRANSPORT",
+            "is_vehicle_expense": False,
+            "require_memo_prompt": False,
+        }
+        return _apply_cached_merchant_overrides(cursor, base_daeri, merchant_name, biz_reg_no)
+    if _BUILTIN_TOLL_RE.search(m_txt):
+        base_toll = {
+            "account_code": "822",
+            "account_name": "차량유지비",
+            "vat_deduction_type": "NON_DEDUCTIBLE",
+            "non_deduct_reason": "PASSENGER_CAR",
+            "is_vehicle_expense": True,
+            "require_memo_prompt": False,
+        }
+        return _apply_cached_merchant_overrides(cursor, base_toll, merchant_name, biz_reg_no)
 
     cursor.execute(
         """
@@ -216,7 +263,7 @@ def generate_default_memo(
 
     m_name = (merchant_name or "").strip()
     if account_code == "822":
-        if "하이패스" in m_name:
+        if "하이패스" in m_name or "터널/도로" in m_name or "유료도로" in m_name:
             return "하이패스 통행료"
         if "주차" in m_name or "파크" in m_name:
             return "차량 주차료"

@@ -1336,7 +1336,7 @@ def render_dashboard_html(
             auto_generate_slips: true
           }})
         }});
-        window.location.reload();
+        window.location.href = '/dashboard?year_month=ALL';
       }};
       reader.readAsDataURL(file);
     }}

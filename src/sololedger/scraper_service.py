@@ -160,6 +160,16 @@ def _row_dict_to_reconcile_item(
             "usedate",
         ],
     )
+    if raw_dt and ":" not in raw_dt:
+        t_extra = _pick_col(
+            row,
+            ["거래시간", "승인시간", "이용시간", "결제시간", "시간", "aprvtm", "trnstm"],
+        )
+        if t_extra:
+            if len(re.sub(r"\D", "", t_extra)) == 6 and ":" not in t_extra:
+                td = re.sub(r"\D", "", t_extra)
+                t_extra = f"{td[:2]}:{td[2:4]}:{td[4:6]}"
+            raw_dt = f"{raw_dt} {t_extra}".strip()
     if not raw_dt:
         d_part = _pick_col(
             row,
@@ -202,6 +212,7 @@ def _row_dict_to_reconcile_item(
             "가맹점명",
             "가맹점상호",
             "이용가맹점",
+            "이용하신곳",
             "가맹점",
             "상호",
             "merchant_name",
@@ -233,9 +244,9 @@ def _row_dict_to_reconcile_item(
             "합계",
             "결제금액",
             "승인금액",
+            "국내이용금액",
             "이용금액",
             "매입금액",
-            "국내이용금액",
             "total_amount",
             "aprvamt",
             "totamt",
@@ -340,14 +351,18 @@ def parse_scraped_card_statement(raw_content: str) -> List[ReconcileItem]:
     delimiter = "\t" if "\t" in first_line and "," not in first_line else ","
     all_csv_rows = list(csv.reader(io.StringIO(content), delimiter=delimiter))
     header_idx = 0
-    for idx, cells in enumerate(all_csv_rows[:15]):
+    hdr_keys = ("일자", "일시", "이용일", "가맹점", "이용하신곳", "상호", "승인번호", "transacted_at")
+    for idx, cells in enumerate(all_csv_rows[:30]):
         joined = " ".join(str(c) for c in cells)
-        if any(
-            k in joined
-            for k in ("일자", "일시", "이용일", "가맹점", "상호", "승인번호", "transacted_at")
-        ):
+        if sum(1 for k in hdr_keys if k in joined) >= 2:
             header_idx = idx
             break
+    else:
+        for idx, cells in enumerate(all_csv_rows[:30]):
+            joined = " ".join(str(c) for c in cells)
+            if any(k in joined for k in hdr_keys):
+                header_idx = idx
+                break
 
     if header_idx < len(all_csv_rows):
         headers = [re.sub(r"\s+", "", str(h)) for h in all_csv_rows[header_idx]]
@@ -648,7 +663,11 @@ def ingest_scraped_payload(
     portal_key = (target_portal or "HOMETAX").strip().upper()
     portal_info = SUPPORTED_SCRAPER_TARGETS.get(portal_key, SUPPORTED_SCRAPER_TARGETS["HOMETAX"])
 
-    if portal_info["type"] == "ECOMMERCE_ORDER":
+    head_sample = (raw_content or "")[:1500]
+    is_card_statement = any(
+        k in head_sample for k in ("승인번호", "이용카드", "이용하신곳", "전표매입", "국내이용금액")
+    )
+    if portal_info["type"] == "ECOMMERCE_ORDER" and not is_card_statement:
         ecom_res = reconcile_scraped_ecommerce_orders(cursor, raw_content)
         slip_res = (
             generate_electronic_slips_for_ledger(cursor, archive_dir=archive_dir)
@@ -676,6 +695,44 @@ def ingest_scraped_payload(
                 "DELETE FROM receipt_ocr_metadata WHERE tx_id = ? AND source_channel = 'AUTO_SLIP'",
                 (r["tx_id"],),
             )
+
+    cursor.execute(
+        """
+        UPDATE card_transactions
+        SET reconcile_status = 'CANCELED', updated_at = CURRENT_TIMESTAMP
+        WHERE card_last4 = 'KB하이'
+          AND reconcile_status = 'SMS_ONLY'
+          AND raw_merchant_name = '후불하이패스'
+          AND EXISTS (
+              SELECT 1 FROM card_transactions h
+              WHERE h.card_last4 = 'KB하이'
+                AND h.reconcile_status = 'HOMETAX_VERIFIED'
+                AND ABS(
+                    julianday(SUBSTR(card_transactions.transacted_at, 1, 10))
+                    - julianday(SUBSTR(h.transacted_at, 1, 10))
+                ) <= 5.0
+          )
+        """
+    )
+    cursor.execute(
+        """
+        UPDATE card_transactions
+        SET reconcile_status = 'CANCELED', updated_at = CURRENT_TIMESTAMP
+        WHERE total_amount < 0
+          AND reconcile_status = 'SMS_ONLY'
+          AND EXISTS (
+              SELECT 1 FROM card_transactions c
+              WHERE c.card_last4 = card_transactions.card_last4
+                AND c.total_amount = card_transactions.total_amount
+                AND c.reconcile_status = 'CANCELED'
+                AND c.tx_id != card_transactions.tx_id
+                AND ABS(
+                    julianday(SUBSTR(card_transactions.transacted_at, 1, 10))
+                    - julianday(SUBSTR(c.transacted_at, 1, 10))
+                ) <= 5.0
+          )
+        """
+    )
 
     slip_res = (
         generate_electronic_slips_for_ledger(cursor, archive_dir=archive_dir)
