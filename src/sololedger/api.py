@@ -6,7 +6,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import BackgroundTasks, Body, FastAPI, Header, HTTPException, Query
+from fastapi import BackgroundTasks, Body, FastAPI, Header, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
 
 from sololedger import __version__
@@ -44,6 +45,7 @@ from sololedger.phone_adb import import_phone_sms_to_ledger
 from sololedger.reconciler import reconcile_single_item
 from sololedger.scraper_service import (
     SUPPORTED_SCRAPER_TARGETS,
+    build_coupang_browser_extractor_script,
     generate_electronic_slips_for_ledger,
     ingest_scraped_payload,
 )
@@ -69,6 +71,28 @@ app = FastAPI(
     version=__version__,
     lifespan=lifespan,
 )
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.middleware("http")
+async def add_private_network_access_header(request: Request, call_next):
+    """Allow HTTPS pages (e.g., mc.coupang.com) to call localhost SoloLedger API."""
+    if request.method == "OPTIONS":
+        resp = Response(status_code=204)
+    else:
+        resp = await call_next(request)
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PATCH, OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "*"
+    resp.headers["Access-Control-Allow-Private-Network"] = "true"
+    return resp
 
 
 def _verify_api_key(x_api_key: Optional[str], sololedger_api_key: Optional[str]) -> None:
@@ -710,6 +734,20 @@ async def reapply_rules_endpoint(
 async def list_scraper_targets_endpoint():
     """List supported card issuer, Hometax, Credit Finance Assoc., and e-commerce scraper targets."""
     return {"count": len(SUPPORTED_SCRAPER_TARGETS), "targets": SUPPORTED_SCRAPER_TARGETS}
+
+
+@app.get("/api/v1/scraper/coupang-script")
+async def get_coupang_extractor_script_endpoint():
+    """Return 1-click browser console script for extracting Coupang order list & receipts."""
+    script = build_coupang_browser_extractor_script(
+        api_url="http://127.0.0.1:8000",
+        api_key=settings.api_key,
+    )
+    return {
+        "portal": "COUPANG",
+        "target_url": SUPPORTED_SCRAPER_TARGETS["COUPANG"]["url"],
+        "script": script,
+    }
 
 
 @app.post("/api/v1/scraper/ingest")

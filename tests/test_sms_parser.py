@@ -323,4 +323,34 @@ def test_import_phone_sms_api_endpoint(client):
     c_labels = [c["card_label"] for c in all_sum["card_breakdown"]]
     assert c_labels == sorted(c_labels)
 
+    # Verify Coupang 1-click browser extractor script endpoint
+    cp_script_res = client.get("/api/v1/scraper/coupang-script")
+    assert cp_script_res.status_code == 200
+    assert "/ssr/api/myorders/model/page" in cp_script_res.json()["script"]
+
+    # Verify Coupang Order List screen copy/DOM text matching against KB Coupang card row (12,170 KRW)
+    coupang_screen_text = (
+        "주문목록\n"
+        "2026. 11. 1 주문\n"
+        "주문상세보기\n"
+        "배송완료 11/2(월) 도착\n"
+        "코멧 홈 베이직 미용티슈 250매 6팩\n"
+        "12,170원 · 1개\n"
+        "장바구니 담기\n"
+    )
+    cp_match_res = client.post(
+        "/api/v1/scraper/ingest",
+        headers={"X-API-Key": "test-secret-key"},
+        json={
+            "portal": "COUPANG",
+            "raw_content": coupang_screen_text,
+            "auto_generate_slips": True,
+        },
+    )
+    assert cp_match_res.status_code == 200
+    cp_match_body = cp_match_res.json()
+    assert cp_match_body["mode"] == "ECOMMERCE_ORDER"
+    assert cp_match_body["matched_orders"] >= 1
+
+
 

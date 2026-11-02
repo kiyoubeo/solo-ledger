@@ -950,6 +950,7 @@ def render_dashboard_html(
       <button onclick="generateElectronicSlips()">전자 매출전표 일괄 생성</button>
       <button onclick="document.getElementById('receipt-file-input').click()">영수증 업로드(OCR)</button>
       <button onclick="document.getElementById('csv-file-input').click()">카드사/홈택스 전표 업로드</button>
+      <button onclick="openCoupangModal()">🛒 쿠팡 주문·영수증 자동매칭</button>
       <button onclick="importPhoneSms()">USB 휴대폰 문자 가져오기</button>
       <button class="secondary" onclick="seedDemoData()">샘플 데이터 생성</button>
       <button class="danger" onclick="resetTestLedger()">테스트 DB 초기화</button>
@@ -1063,6 +1064,53 @@ def render_dashboard_html(
         </button>
         <button class="secondary" onclick="printReceiptSlip()">🖨️ 전표 인쇄</button>
         <button class="secondary" onclick="closeReceiptModal()">닫기</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="coupang-modal-backdrop" class="modal-backdrop no-print" onclick="onCoupangBackdropClick(event)">
+    <div class="receipt-modal" style="max-width:600px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+        <h3 style="margin:0;">🛒 쿠팡 주문내역 · 영수증 원클릭 추출 및 자동매칭</h3>
+        <button class="secondary" onclick="closeCoupangModal()">✕ 닫기</button>
+      </div>
+      <div class="slip-box" style="margin-bottom:12px; font-size:13px; line-height:1.55;">
+        <div style="font-weight:700; color:#1e40af; margin-bottom:6px;">
+          [방법 1-A] 브라우저 원클릭 스크립트로 2025~2026년 전 페이지 자동 수집 (추천)
+        </div>
+        <ol style="margin:4px 0 10px 18px; padding:0;">
+          <li>아래 <b>[1. 쿠팡 주문목록 열기]</b> 버튼을 눌러 쿠팡에 로그인된 주문목록 탭을 엽니다.</li>
+          <li><b>[2. 원클릭 수집 스크립트 복사]</b> 버튼을 누릅니다.</li>
+          <li>쿠팡 주문목록 탭에서 <code>F12</code> 키 → <b>Console(콘솔)</b> 탭 클릭 →
+              <code>Ctrl + V</code> 붙여넣기 후 <code>Enter</code>를 누르면
+              전 페이지 주문내역을 자동 수집·매칭합니다.</li>
+        </ol>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <button onclick="window.open('https://mc.coupang.com/ssr/desktop/order/list', '_blank')">
+            🔗 1. 쿠팡 주문목록 열기
+          </button>
+          <button onclick="copyCoupangExtractorScript()">
+            📋 2. 원클릭 수집 스크립트 복사
+          </button>
+          <button class="secondary" onclick="document.getElementById('csv-file-input').click()">
+            📂 다운로드된 coupang_orders.json 업로드
+          </button>
+        </div>
+        <div id="coupang-copy-status" style="margin-top:6px; font-size:12px; color:#15803d;"></div>
+      </div>
+      <div class="slip-box" style="font-size:13px; line-height:1.55;">
+        <div style="font-weight:700; color:#0f172a; margin-bottom:6px;">
+          [방법 1-B] 콘솔 없이 쿠팡 주문목록 화면 복사(<code>Ctrl+A</code> → <code>Ctrl+C</code>) 바로 붙여넣기
+        </div>
+        <textarea id="coupang-paste-input" rows="5"
+          style="width:100%; box-sizing:border-box; padding:8px;
+                 border:1px solid #cbd5e1; border-radius:6px; font-size:12px;"
+          placeholder="쿠팡 주문목록에서 Ctrl+A, Ctrl+C로 복사한 텍스트나 JSON을 붙여넣으세요..."
+        ></textarea>
+        <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:8px;">
+          <button onclick="submitCoupangPaste()">⚡ 붙여넣은 주문내역 즉시 매칭 실행</button>
+          <button class="secondary" onclick="closeCoupangModal()">닫기</button>
+        </div>
       </div>
     </div>
   </div>
@@ -1370,6 +1418,39 @@ def render_dashboard_html(
         body: JSON.stringify({{}})
       }});
       window.location.reload();
+    }}
+    function openCoupangModal() {{
+      document.getElementById('coupang-modal-backdrop').classList.add('open');
+    }}
+    function closeCoupangModal() {{
+      document.getElementById('coupang-modal-backdrop').classList.remove('open');
+    }}
+    function onCoupangBackdropClick(ev) {{
+      if (ev.target && ev.target.id === 'coupang-modal-backdrop') {{
+        closeCoupangModal();
+      }}
+    }}
+    async function copyCoupangExtractorScript() {{
+      const res = await fetch('/api/v1/scraper/coupang-script');
+      const data = await res.json();
+      await navigator.clipboard.writeText(data.script);
+      const st = document.getElementById('coupang-copy-status');
+      st.textContent =
+        '✅ 수집 스크립트 복사 완료! 쿠팡 주문목록 탭에서 F12 -> Console에 붙여넣고 Enter를 누르세요.';
+    }}
+    async function submitCoupangPaste() {{
+      const txt = (document.getElementById('coupang-paste-input').value || '').trim();
+      if (!txt) return;
+      await fetch('/api/v1/scraper/ingest', {{
+        method: 'POST',
+        headers: API_HEADERS,
+        body: JSON.stringify({{
+          portal: 'COUPANG',
+          raw_content: txt,
+          auto_generate_slips: true
+        }})
+      }});
+      window.location.href = '/dashboard?year_month=ALL';
     }}
   </script>
 </body>

@@ -395,6 +395,282 @@ def parse_scraped_card_statement(raw_content: str) -> List[ReconcileItem]:
     return parse_hometax_csv(content)
 
 
+_COUPANG_NOISE_RE = re.compile(
+    r"^(주문상세보기|배송조회|교환,\s*반품\s*신청|반품\s*신청|교환\s*신청|장바구니\s*담기|"
+    r"리뷰\s*작성하기|구매후기\s*쓰기|배송완료|결제완료|주문취소|취소완료|상품준비중|배송중|"
+    r"배송시작|새벽배송|로켓배송|로켓와우|로켓프레시|판매자\s*문의|영수증\s*조회|거래명세서|"
+    r"카드가맹점전표|신용카드\s*전표|주문목록|주문내역|취소/반품/교환\s*목록|정기배송|"
+    r"할인금액|배송비|결제정보|총\s*결제금액|카드결제|쿠페이|\d{1,2}/\d{1,2}\([월화수목금토일]\).*)$",
+    re.IGNORECASE,
+)
+
+
+def _walk_coupang_ssr_json(node: Any, collected: List[Dict[str, str]]) -> None:
+    """Recursively extract orders from Coupang SSR API JSON or __NEXT_DATA__ state."""
+    if isinstance(node, list):
+        for child in node:
+            _walk_coupang_ssr_json(child, collected)
+        return
+    if not isinstance(node, dict):
+        return
+
+    raw_dt = node.get("orderedAt") or node.get("orderDate") or node.get("paidAt")
+    if raw_dt and any(k in node for k in ("deliveryGroupList", "productList", "bundleReceiptList", "items")):
+        if isinstance(raw_dt, (int, float)) and raw_dt > 1_000_000_000_000:
+            from datetime import datetime as _dt
+
+            dt_str = _dt.fromtimestamp(raw_dt / 1000.0).strftime("%Y-%m-%d")
+        else:
+            dt_str = str(raw_dt)[:10]
+
+        prod_items: List[tuple[str, int]] = []
+
+        def _collect_prods(sub: Any) -> None:
+            if isinstance(sub, list):
+                for el in sub:
+                    _collect_prods(el)
+            elif isinstance(sub, dict):
+                p_name = (
+                    sub.get("productName")
+                    or sub.get("itemName")
+                    or sub.get("title")
+                    or sub.get("name")
+                )
+                p_price = (
+                    sub.get("combinedPrice")
+                    or sub.get("totalPrice")
+                    or sub.get("unitPrice")
+                    or sub.get("price")
+                    or sub.get("amount")
+                )
+                if p_name and p_price is not None:
+                    amt_val = _parse_int_amount(str(p_price))
+                    if amt_val > 0:
+                        prod_items.append((str(p_name).strip(), amt_val))
+                for v in sub.values():
+                    if isinstance(v, (list, dict)):
+                        _collect_prods(v)
+
+        for k in ("deliveryGroupList", "productList", "bundleReceiptList", "items"):
+            if k in node:
+                _collect_prods(node[k])
+
+        for p_name, p_amt in prod_items:
+            collected.append({"주문일자": dt_str, "상품명": p_name, "결제금액": str(p_amt)})
+
+        tot_pay = (
+            node.get("totalPayedPrice")
+            or node.get("totalProductPrice")
+            or node.get("paymentAmount")
+            or (sum(x[1] for x in prod_items) if len(prod_items) >= 2 else 0)
+        )
+        tot_int = _parse_int_amount(str(tot_pay or 0))
+        if prod_items and tot_int > 0 and len(prod_items) >= 2:
+            summary_title = f"{prod_items[0][0]} 외 {len(prod_items) - 1}건"
+            collected.append({"주문일자": dt_str, "상품명": summary_title, "결제금액": str(tot_int)})
+
+    for val in node.values():
+        if isinstance(val, (dict, list)):
+            _walk_coupang_ssr_json(val, collected)
+
+
+def extract_coupang_orders_from_content(raw_content: str) -> List[Dict[str, Any]]:
+    """Extract order rows from JSON, Coupang SSR API JSON, HTML table, DOM HTML, or copied screen text."""
+    content = (raw_content or "").strip()
+    if not content:
+        return []
+
+    if content.startswith("{") or content.startswith("["):
+        try:
+            data = json.loads(content)
+            direct_rows: List[Dict[str, Any]] = []
+            if isinstance(data, list):
+                direct_rows = [r for r in data if isinstance(r, dict)]
+            elif isinstance(data, dict):
+                for k in ("orders", "items", "data", "list"):
+                    if isinstance(data.get(k), list):
+                        direct_rows = [r for r in data[k] if isinstance(r, dict)]
+                        break
+            if direct_rows and any(
+                _pick_col(r, ["상품명", "품목명", "주문상품", "item_name", "product_name", "title"])
+                for r in direct_rows
+            ):
+                return direct_rows
+            ssr_rows: List[Dict[str, str]] = []
+            _walk_coupang_ssr_json(data, ssr_rows)
+            if ssr_rows:
+                return ssr_rows
+        except Exception:
+            pass
+
+    if "<tr" in content.lower():
+        tbl_rows = extract_rows_from_html_table(content)
+        if tbl_rows and any(
+            _pick_col(r, ["상품명", "품목명", "주문상품", "상품", "내역", "item_name", "product_name"])
+            for r in tbl_rows
+        ):
+            return tbl_rows
+
+    # Parse Coupang Order List DOM HTML (Ctrl+S) or copied screen text (Ctrl+A, Ctrl+C)
+    plain = re.sub(r"<script[^>]*>.*?</script\s*>", "\n", content, flags=re.I | re.S)
+    plain = re.sub(r"<style[^>]*>.*?</style\s*>", "\n", plain, flags=re.I | re.S)
+    plain = re.sub(r"<(?:br|div|p|li|tr|h[1-6]|section|article)[^>]*>", "\n", plain, flags=re.I)
+    plain = html.unescape(_HTML_TAG_RE.sub(" ", plain))
+
+    date_hdr_re = re.compile(
+        r"(20\d{2})\s*[.\-/년]\s*(\d{1,2})\s*[.\-/월]\s*(\d{1,2})\s*일?\s*주문"
+    )
+    matches = list(date_hdr_re.finditer(plain))
+    if matches:
+        extracted: List[Dict[str, str]] = []
+        for idx, m in enumerate(matches):
+            y, mo, d = m.groups()
+            dt_str = f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
+            start_pos = m.end()
+            end_pos = matches[idx + 1].start() if idx + 1 < len(matches) else len(plain)
+            block = plain[start_pos:end_pos]
+            lines = [re.sub(r"\s+", " ", ln).strip() for ln in block.splitlines()]
+            lines = [ln for ln in lines if ln and not _COUPANG_NOISE_RE.match(ln)]
+
+            block_items: List[tuple[str, int]] = []
+            last_candidate_title = ""
+            for ln in lines:
+                price_m = re.search(r"([\d,]{3,})\s*원", ln)
+                if price_m:
+                    amt = _parse_int_amount(price_m.group(1))
+                    before_price = ln[: price_m.start()].strip(" ·-:|")
+                    title = before_price if len(before_price) >= 2 else last_candidate_title
+                    if title and amt > 0:
+                        block_items.append((title, amt))
+                        last_candidate_title = ""
+                elif len(ln) >= 2 and not ln.isdigit():
+                    last_candidate_title = ln
+
+            for p_name, p_amt in block_items:
+                extracted.append({"주문일자": dt_str, "상품명": p_name, "결제금액": str(p_amt)})
+            if len(block_items) >= 2:
+                total_sum = sum(x[1] for x in block_items)
+                summary_title = f"{block_items[0][0]} 외 {len(block_items) - 1}건"
+                extracted.append(
+                    {"주문일자": dt_str, "상품명": summary_title, "결제금액": str(total_sum)}
+                )
+        if extracted:
+            return extracted
+
+    reader = csv.DictReader(io.StringIO(content))
+    return list(reader)
+
+
+def build_coupang_browser_extractor_script(
+    api_url: str = "http://127.0.0.1:8000",
+    api_key: str = "",
+) -> str:
+    """Build a 1-click browser console / bookmarklet JS collector for mc.coupang.com."""
+    safe_url = api_url.rstrip("/")
+    safe_key = api_key or settings.api_key
+    return f"""(async () => {{
+  const API_URL = {json.dumps(safe_url)};
+  const API_KEY = {json.dumps(safe_key)};
+  const banner = document.createElement('div');
+  banner.style.cssText = 'position:fixed;top:16px;right:16px;z-index:999999;background:#1e40af;color:#fff;'
+    + 'padding:14px 20px;border-radius:10px;font-size:14px;font-weight:700;box-shadow:0 8px 24px rgba(0,0,0,0.25);';
+  banner.textContent = '🛒 SoloLedger 쿠팡 주문내역·영수증 수집 중...';
+  document.body.appendChild(banner);
+
+  const orders = [];
+  const seen = new Set();
+  const addOrder = (dt, name, amt) => {{
+    if (!dt || !name || !amt || amt <= 0) return;
+    const key = dt + '|' + name + '|' + amt;
+    if (seen.has(key)) return;
+    seen.add(key);
+    orders.push({{ 주문일자: dt, 상품명: String(name).trim(), 결제금액: Number(amt) }});
+  }};
+
+  // 1. Try Coupang SSR internal JSON API across 2026 & 2025 pages
+  for (const yr of [2026, 2025, 0]) {{
+    for (let page = 0; page < 20; page++) {{
+      try {{
+        banner.textContent = `🛒 쿠팡 주문목록 수집 중 (${{yr || '최근6개월'}} - 페이지 ${{page + 1}})...`;
+        const u = `/ssr/api/myorders/model/page?requestYear=${{yr}}&pageIndex=${{page}}&size=10`;
+        const resp = await fetch(u, {{ credentials: 'include' }});
+        if (!resp.ok) break;
+        const data = await resp.json();
+        const str = JSON.stringify(data);
+        if (!str || str.length < 50) break;
+        const list = data.orderList || data.orders || (data.data && data.data.orderList) || [];
+        if (Array.isArray(list) && list.length === 0) break;
+        const walk = (node) => {{
+          if (!node || typeof node !== 'object') return;
+          if (Array.isArray(node)) {{ node.forEach(walk); return; }}
+          const rawDt = node.orderedAt || node.orderDate || node.paidAt;
+          if (rawDt) {{
+            const dt = typeof rawDt === 'number'
+              ? new Date(rawDt).toISOString().slice(0, 10)
+              : String(rawDt).slice(0, 10).replace(/\\./g, '-');
+            const items = [];
+            const findProds = (s) => {{
+              if (!s || typeof s !== 'object') return;
+              if (Array.isArray(s)) {{ s.forEach(findProds); return; }}
+              const pName = s.productName || s.itemName || s.title;
+              const pAmt = s.combinedPrice || s.totalPrice || s.unitPrice || s.price;
+              if (pName && pAmt) {{
+                const nAmt = parseInt(String(pAmt).replace(/[^0-9]/g, ''), 10);
+                if (nAmt > 0) items.push([String(pName).trim(), nAmt]);
+              }}
+              Object.values(s).forEach(findProds);
+            }};
+            findProds(node.deliveryGroupList || node.productList || node.bundleReceiptList || node.items);
+            items.forEach(([n, a]) => addOrder(dt, n, a));
+            const tot = parseInt(String(node.totalPayedPrice || node.totalProductPrice || 0).replace(/[^0-9]/g, ''), 10)
+              || items.reduce((acc, x) => acc + x[1], 0);
+            if (items.length >= 2 && tot > 0) {{
+              addOrder(dt, `${{items[0][0]}} 외 ${{items.length - 1}}건`, tot);
+            }}
+          }}
+          Object.values(node).forEach(walk);
+        }};
+        walk(data);
+      }} catch (e) {{ break; }}
+    }}
+  }}
+
+  // 2. Also parse currently visible DOM text on the page
+  const pageText = document.body.innerText || '';
+  const payload = orders.length > 0 ? JSON.stringify(orders, null, 2) : pageText;
+
+  // 3. Always download backup file coupang_orders.json
+  const blob = new Blob([payload], {{ type: 'application/json;charset=utf-8' }});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'coupang_orders_' + new Date().toISOString().slice(0, 10).replace(/-/g, '') + '.json';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+
+  // 4. Send directly to local SoloLedger server
+  try {{
+    const res = await fetch(API_URL + '/api/v1/scraper/ingest', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json', 'X-API-Key': API_KEY }},
+      body: JSON.stringify({{ portal: 'COUPANG', raw_content: payload, auto_generate_slips: true }})
+    }});
+    const resJson = await res.json();
+    banner.style.background = '#15803d';
+    banner.textContent = `✅ SoloLedger 쿠팡 매칭 완료! (${{resJson.matched_orders || 0}}건 업데이트)`;
+    alert(`✅ 쿠팡 주문내역 수집 및 SoloLedger 자동 매칭 완료!\\n`
+      + `- 추출 주문 항목: ${{orders.length}}건\\n`
+      + `- 원장 전표 매칭: ${{resJson.matched_orders || 0}}건\\n`
+      + `(다운로드 폴더에 백업 파일도 함께 저장되었습니다.)`);
+  }} catch (err) {{
+    banner.style.background = '#0284c7';
+    banner.textContent = '📥 coupang_orders.json 다운로드 완료! 대시보드에서 업로드해 주세요.';
+    alert('📥 쿠팡 주문내역 파일(coupang_orders.json)이 다운로드 폴더에 저장되었습니다!\\n\\n'
+      + 'SoloLedger 대시보드의 [🛒 쿠팡 주문·영수증 자동매칭] 창에서 해당 파일을 올려주세요.');
+  }}
+}})();"""
+
+
 def reconcile_scraped_ecommerce_orders(
     cursor: sqlite3.Cursor,
     raw_content: str,
@@ -404,26 +680,10 @@ def reconcile_scraped_ecommerce_orders(
     if not content:
         return {"status": "empty", "matched_count": 0, "updated_tx_ids": []}
 
-    order_rows: List[Dict[str, Any]] = []
-    if content.startswith("{") or content.startswith("["):
-        try:
-            data = json.loads(content)
-            if isinstance(data, list):
-                order_rows = [r for r in data if isinstance(r, dict)]
-            elif isinstance(data, dict):
-                for k in ("orders", "items", "data", "list"):
-                    if isinstance(data.get(k), list):
-                        order_rows = [r for r in data[k] if isinstance(r, dict)]
-                        break
-        except Exception:
-            pass
-    elif "<tr" in content.lower():
-        order_rows = extract_rows_from_html_table(content)
-    else:
-        reader = csv.DictReader(io.StringIO(content))
-        order_rows = list(reader)
+    order_rows = extract_coupang_orders_from_content(content)
 
     updated_tx_ids: List[int] = []
+    used_tx_ids: set[int] = set()
     for row in order_rows:
         raw_dt = _pick_col(
             row, ["주문일시", "주문일자", "결제일시", "결제일자", "일자", "order_date", "date"]
@@ -449,16 +709,30 @@ def reconcile_scraped_ecommerce_orders(
             WHERE total_amount = ?
               AND ABS(julianday(SUBSTR(transacted_at, 1, 10)) - julianday(?)) <= 2.5
               AND reconcile_status != 'CANCELED'
-            ORDER BY ABS(julianday(SUBSTR(transacted_at, 1, 10)) - julianday(?)) ASC, tx_id DESC
-            LIMIT 1
+            ORDER BY
+              CASE
+                WHEN raw_merchant_name LIKE '%쿠팡%'
+                  OR raw_merchant_name LIKE '%네이버%'
+                  OR raw_merchant_name LIKE '%카카오%'
+                  OR raw_merchant_name LIKE '%이니시스%' THEN 0
+                ELSE 1
+              END ASC,
+              CASE
+                WHEN counterparty_info IS NULL OR TRIM(counterparty_info) = '' THEN 0
+                ELSE 1
+              END ASC,
+              ABS(julianday(SUBSTR(transacted_at, 1, 10)) - julianday(?)) ASC,
+              tx_id DESC
             """,
             (amount, date_prefix, date_prefix),
         )
-        tx_row = cursor.fetchone()
+        candidates = cursor.fetchall()
+        tx_row = next((c for c in candidates if int(c["tx_id"]) not in used_tx_ids), None)
         if tx_row is None:
             continue
 
         tx_id = int(tx_row["tx_id"])
+        used_tx_ids.add(tx_id)
         acc_code = str(tx_row["account_code"])
         acc_name = str(tx_row["account_name"])
         vat_type = str(tx_row["vat_deduction_type"])
@@ -496,6 +770,10 @@ def reconcile_scraped_ecommerce_orders(
             WHERE tx_id = ?
             """,
             (acc_code, acc_name, vat_type, reason, sup, vat, item_name, tx_id),
+        )
+        cursor.execute(
+            "DELETE FROM receipt_ocr_metadata WHERE tx_id = ? AND source_channel = 'AUTO_SLIP'",
+            (tx_id,),
         )
         _refresh_receipt_archived_filename(cursor, tx_id)
         updated_tx_ids.append(tx_id)
