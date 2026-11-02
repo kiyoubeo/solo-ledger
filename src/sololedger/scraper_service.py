@@ -10,12 +10,21 @@ Replaces paid third-party scraping relays (Barobill, Popbill, CODEF) with:
 4. Optional Playwright / Chrome CDP Browser Session Collector.
 """
 
+import base64
 import csv
 import html
 import io
 import json
+import os
 import re
+import shutil
+import socket
 import sqlite3
+import struct
+import subprocess
+import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -606,7 +615,7 @@ def build_coupang_browser_extractor_script(
           const rawDt = node.orderedAt || node.orderDate || node.paidAt;
           if (rawDt) {{
             const dt = typeof rawDt === 'number'
-              ? new Date(rawDt).toISOString().slice(0, 10)
+              ? new Date(rawDt + 9 * 3600 * 1000).toISOString().slice(0, 10)
               : String(rawDt).slice(0, 10).replace(/\\./g, '-');
             const items = [];
             const findProds = (s) => {{
@@ -669,6 +678,373 @@ def build_coupang_browser_extractor_script(
       + 'SoloLedger 대시보드의 [🛒 쿠팡 주문·영수증 자동매칭] 창에서 해당 파일을 올려주세요.');
   }}
 }})();"""
+
+
+def _find_local_chromium_executable() -> Optional[str]:
+    """Locate an installed Chromium-based browser (Chrome, Brave, Edge) on the host."""
+    candidates = [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    for cmd in ("chrome", "google-chrome", "brave", "msedge", "chromium"):
+        found = shutil.which(cmd)
+        if found:
+            return found
+    return None
+
+
+class _CdpWebSocket:
+    """Minimal RFC 6455 WebSocket client for local Chrome DevTools Protocol (CDP)."""
+
+    def __init__(self, ws_url: str, timeout: float = 45.0) -> None:
+        parsed = urllib.parse.urlparse(ws_url)
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or 9333
+        path = parsed.path or "/"
+        if parsed.query:
+            path += "?" + parsed.query
+        self.sock = socket.create_connection((host, port), timeout=timeout)
+        self.buf = bytearray()
+        ws_key = base64.b64encode(os.urandom(16)).decode("ascii")
+        handshake = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {host}:{port}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {ws_key}\r\n"
+            "Sec-WebSocket-Version: 13\r\n\r\n"
+        )
+        self.sock.sendall(handshake.encode("ascii"))
+        header = self._read_until(b"\r\n\r\n")
+        if b"101" not in header.split(b"\r\n", 1)[0]:
+            self.sock.close()
+            raise RuntimeError("CDP WebSocket handshake rejected")
+
+    def _read_until(self, delimiter: bytes) -> bytes:
+        while delimiter not in self.buf:
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                raise EOFError("Socket closed during CDP handshake")
+            self.buf.extend(chunk)
+        idx = self.buf.index(delimiter) + len(delimiter)
+        out = bytes(self.buf[:idx])
+        del self.buf[:idx]
+        return out
+
+    def _read_exact(self, n: int) -> bytes:
+        while len(self.buf) < n:
+            chunk = self.sock.recv(max(4096, n - len(self.buf)))
+            if not chunk:
+                raise EOFError("Socket closed while reading CDP frame")
+            self.buf.extend(chunk)
+        out = bytes(self.buf[:n])
+        del self.buf[:n]
+        return out
+
+    def send_json(self, payload: Dict[str, Any]) -> None:
+        raw = json.dumps(payload).encode("utf-8")
+        mask = b"\x37\xfa\x21\x3d"
+        length = len(raw)
+        if length < 126:
+            header = struct.pack("!BB", 0x81, 0x80 | length)
+        elif length < 65536:
+            header = struct.pack("!BBH", 0x81, 0x80 | 126, length)
+        else:
+            header = struct.pack("!BBQ", 0x81, 0x80 | 127, length)
+        masked = bytes(b ^ mask[i & 3] for i, b in enumerate(raw))
+        self.sock.sendall(header + mask + masked)
+
+    def recv_json(self) -> Dict[str, Any]:
+        msg_bytes = bytearray()
+        while True:
+            b0, b1 = self._read_exact(2)
+            fin = (b0 & 0x80) != 0
+            opcode = b0 & 0x0F
+            masked = (b1 & 0x80) != 0
+            length = b1 & 0x7F
+            if length == 126:
+                length = struct.unpack("!H", self._read_exact(2))[0]
+            elif length == 127:
+                length = struct.unpack("!Q", self._read_exact(8))[0]
+            mask_key = self._read_exact(4) if masked else b""
+            data = self._read_exact(length)
+            if masked:
+                data = bytes(b ^ mask_key[i & 3] for i, b in enumerate(data))
+            if opcode == 0x8:
+                raise EOFError("CDP WebSocket closed by browser")
+            if opcode == 0x9:
+                # Reply Pong
+                self.sock.sendall(b"\x8a\x80\x00\x00\x00\x00")
+                continue
+            if opcode in (0x0, 0x1, 0x2):
+                msg_bytes.extend(data)
+                if fin:
+                    return json.loads(msg_bytes.decode("utf-8", errors="replace"))
+
+    def call(self, method: str, params: Optional[Dict[str, Any]] = None, msg_id: int = 1) -> Dict[str, Any]:
+        self.send_json({"id": msg_id, "method": method, "params": params or {}})
+        while True:
+            msg = self.recv_json()
+            if msg.get("id") == msg_id:
+                return msg
+
+    def close(self) -> None:
+        try:
+            self.sock.close()
+        except Exception:
+            pass
+
+
+_CDP_STATUS_JS = """(() => {
+  const href = location.href || '';
+  const host = location.hostname || '';
+  const hasPw = !!document.querySelector('input[type="password"]');
+  if (host.includes('login.coupang.com') || hasPw) {
+    if (!document.getElementById('sl-login-guide')) {
+      const b = document.createElement('div');
+      b.id = 'sl-login-guide';
+      b.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:999999;background:#1e40af;color:#fff;'
+        + 'padding:12px 18px;font-size:14px;font-weight:700;text-align:center;box-shadow:0 4px 12px rgba(0,0,0,0.25);';
+      b.textContent = '🔐 [SoloLedger 자동 수집] 최초 1회 쿠팡 로그인을 진행해 주세요 (자동 로그인 체크 권장). '
+        + '로그인 즉시 2025~2026년 주문내역을 자동 수집하고 창이 닫힙니다.';
+      if (document.body) document.body.appendChild(b);
+    }
+    return { state: 'LOGIN_REQUIRED', url: href };
+  }
+  const bodyTxt = (document.body && document.body.innerText) || '';
+  if (host.includes('coupang.com') && document.readyState === 'complete'
+      && (href.includes('/order/list') || bodyTxt.includes('주문목록'))) {
+    return { state: 'READY', url: href };
+  }
+  return { state: 'LOADING', url: href };
+})()"""
+
+_CDP_COLLECT_JS = """(async () => {
+  const banner = document.createElement('div');
+  banner.style.cssText = 'position:fixed;top:16px;right:16px;z-index:999999;background:#1e40af;color:#fff;'
+    + 'padding:14px 20px;border-radius:10px;font-size:14px;font-weight:700;box-shadow:0 8px 24px rgba(0,0,0,0.25);';
+  banner.textContent = '🛒 SoloLedger 쿠팡 주문내역 자동 수집 중...';
+  if (document.body) document.body.appendChild(banner);
+
+  const orders = [];
+  const seen = new Set();
+  const addOrder = (dt, name, amt) => {
+    if (!dt || !name || !amt || amt <= 0) return;
+    const key = dt + '|' + name + '|' + amt;
+    if (seen.has(key)) return;
+    seen.add(key);
+    orders.push({ 주문일자: dt, 상품명: String(name).trim(), 결제금액: Number(amt) });
+  };
+
+  const domTexts = [document.body ? document.body.innerText : ''];
+  for (const yr of [2026, 2025, 0]) {
+    for (let page = 0; page < 25; page++) {
+      try {
+        banner.textContent = `🛒 쿠팡 주문내역 자동 수집 중 (${yr || '최근6개월'} - 페이지 ${page + 1})...`;
+        const u = `/ssr/api/myorders/model/page?requestYear=${yr}&pageIndex=${page}&size=10`;
+        const resp = await fetch(u, { credentials: 'include' });
+        if (!resp.ok) break;
+        const data = await resp.json();
+        const str = JSON.stringify(data);
+        if (!str || str.length < 50) break;
+        const list = data.orderList || data.orders || (data.data && data.data.orderList) || [];
+        if (Array.isArray(list) && list.length === 0) break;
+        const walk = (node) => {
+          if (!node || typeof node !== 'object') return;
+          if (Array.isArray(node)) { node.forEach(walk); return; }
+          const rawDt = node.orderedAt || node.orderDate || node.paidAt;
+          if (rawDt) {
+            const dt = typeof rawDt === 'number'
+              ? new Date(rawDt + 9 * 3600 * 1000).toISOString().slice(0, 10)
+              : String(rawDt).slice(0, 10).replace(/\\./g, '-');
+            const items = [];
+            const findProds = (s) => {
+              if (!s || typeof s !== 'object') return;
+              if (Array.isArray(s)) { s.forEach(findProds); return; }
+              const pName = s.productName || s.itemName || s.title;
+              const pAmt = s.combinedPrice || s.totalPrice || s.unitPrice || s.price;
+              if (pName && pAmt) {
+                const nAmt = parseInt(String(pAmt).replace(/[^0-9]/g, ''), 10);
+                if (nAmt > 0) items.push([String(pName).trim(), nAmt]);
+              }
+              Object.values(s).forEach(findProds);
+            };
+            findProds(node.deliveryGroupList || node.productList || node.bundleReceiptList || node.items);
+            items.forEach(([n, a]) => addOrder(dt, n, a));
+            const tot = parseInt(String(node.totalPayedPrice || node.totalProductPrice || 0).replace(/[^0-9]/g, ''), 10)
+              || items.reduce((acc, x) => acc + x[1], 0);
+            if (items.length >= 2 && tot > 0) {
+              addOrder(dt, `${items[0][0]} 외 ${items.length - 1}건`, tot);
+            }
+          }
+          Object.values(node).forEach(walk);
+        };
+        walk(data);
+      } catch (e) { break; }
+    }
+  }
+
+  banner.style.background = '#15803d';
+  banner.textContent = `✅ 수집 완료 (${orders.length}건)! SoloLedger에 반영 중...`;
+  return {
+    ordersCount: orders.length,
+    jsonPayload: JSON.stringify(orders),
+    domText: domTexts.join('\\n')
+  };
+})()"""
+
+
+def _fetch_cdp_page_ws_url(debug_port: int) -> Optional[str]:
+    """Return the active Coupang page WebSocket debugger URL from local CDP port."""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{debug_port}/json/list", timeout=2.5) as resp:
+            targets = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except Exception:
+        return None
+    pages = [t for t in targets if isinstance(t, dict) and t.get("type") == "page" and t.get("webSocketDebuggerUrl")]
+    for p in pages:
+        if "coupang.com" in str(p.get("url", "")):
+            return str(p["webSocketDebuggerUrl"])
+    return str(pages[0]["webSocketDebuggerUrl"]) if pages else None
+
+
+def auto_crawl_coupang_orders(
+    cursor: sqlite3.Cursor,
+    archive_dir: Optional[Path] = None,
+    max_wait_sec: int = 180,
+    debug_port: int = 9333,
+) -> Dict[str, Any]:
+    """Launch a persistent local browser session via CDP, collect Coupang orders, and reconcile."""
+    base_archive = archive_dir or settings.archive_dir
+    profile_dir = base_archive / "browser_profile" / "coupang"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
+    browser_exe = _find_local_chromium_executable()
+    if not browser_exe:
+        return {
+            "status": "error",
+            "message": "로컬 PC에서 Chrome/Brave/Edge 브라우저를 찾을 수 없습니다.",
+            "matched_orders": 0,
+        }
+
+    proc: Optional[subprocess.Popen[bytes]] = None
+    ws_url = _fetch_cdp_page_ws_url(debug_port)
+    if not ws_url:
+        cmd = [
+            browser_exe,
+            f"--user-data-dir={profile_dir}",
+            f"--remote-debugging-port={debug_port}",
+            "--remote-allow-origins=*",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--window-size=1180,860",
+            "https://mc.coupang.com/ssr/desktop/order/list",
+        ]
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    deadline = time.time() + max(10, max_wait_sec)
+    collected_result: Optional[Dict[str, Any]] = None
+    last_state = "STARTING"
+
+    try:
+        while time.time() < deadline:
+            if proc is not None and proc.poll() is not None:
+                return {
+                    "status": "closed_by_user",
+                    "message": "수집 완료 전 브라우저 창이 닫혔습니다.",
+                    "matched_orders": 0,
+                }
+            ws_url = _fetch_cdp_page_ws_url(debug_port)
+            if not ws_url:
+                time.sleep(1.0)
+                continue
+            try:
+                ws = _CdpWebSocket(ws_url, timeout=30.0)
+                try:
+                    st_msg = ws.call(
+                        "Runtime.evaluate",
+                        {"expression": _CDP_STATUS_JS, "returnByValue": True},
+                        msg_id=1,
+                    )
+                    st_val = st_msg.get("result", {}).get("result", {}).get("value") or {}
+                    last_state = str(st_val.get("state") or "LOADING")
+                    if last_state == "READY":
+                        col_msg = ws.call(
+                            "Runtime.evaluate",
+                            {
+                                "expression": _CDP_COLLECT_JS,
+                                "awaitPromise": True,
+                                "returnByValue": True,
+                            },
+                            msg_id=2,
+                        )
+                        collected_result = col_msg.get("result", {}).get("result", {}).get("value")
+                        try:
+                            ws.call("Browser.close", {}, msg_id=3)
+                        except Exception:
+                            pass
+                        break
+                finally:
+                    ws.close()
+            except Exception:
+                pass
+            time.sleep(1.5)
+    finally:
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+
+    if not collected_result:
+        return {
+            "status": "timeout",
+            "last_state": last_state,
+            "message": "브라우저 로그인 또는 페이지 로딩 대기 시간이 초과되었습니다.",
+            "matched_orders": 0,
+        }
+
+    json_payload = str(collected_result.get("jsonPayload") or "[]")
+    dom_text = str(collected_result.get("domText") or "")
+    orders_count = int(collected_result.get("ordersCount") or 0)
+    raw_to_ingest = json_payload if orders_count > 0 else dom_text
+
+    backup_path = base_archive / "coupang_orders_auto.json"
+    try:
+        backup_path.write_text(raw_to_ingest, encoding="utf-8")
+    except Exception:
+        pass
+
+    outcome = ingest_scraped_payload(
+        cursor,
+        target_portal="COUPANG",
+        raw_content=raw_to_ingest,
+        auto_generate_slips=True,
+        archive_dir=base_archive,
+    )
+    if orders_count > 0 and dom_text.strip():
+        dom_outcome = reconcile_scraped_ecommerce_orders(cursor, dom_text)
+        if dom_outcome.get("matched_count", 0) > 0:
+            outcome["matched_orders"] = int(outcome.get("matched_orders", 0)) + int(
+                dom_outcome["matched_count"]
+            )
+            generate_electronic_slips_for_ledger(cursor, archive_dir=base_archive)
+
+    outcome["status"] = "crawled"
+    outcome["browser_used"] = Path(browser_exe).name
+    outcome["collected_orders_count"] = orders_count
+    outcome["saved_backup_path"] = str(backup_path)
+    return outcome
 
 
 def reconcile_scraped_ecommerce_orders(

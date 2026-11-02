@@ -352,5 +352,56 @@ def test_import_phone_sms_api_endpoint(client):
     assert cp_match_body["mode"] == "ECOMMERCE_ORDER"
     assert cp_match_body["matched_orders"] >= 1
 
+    # Verify Method B: POST /api/v1/scraper/coupang-auto-crawl via mocked CDP session
+    from unittest.mock import patch
+
+    from sololedger import scraper_service
+
+    class _DummyCdpWs:
+        def __init__(self, ws_url: str, timeout: float = 30.0) -> None:
+            self.ws_url = ws_url
+
+        def call(self, method: str, params=None, msg_id: int = 1):
+            if msg_id == 1:
+                return {"id": 1, "result": {"result": {"value": {"state": "READY"}}}}
+            if msg_id == 2:
+                payload = '[{"주문일자":"2026-11-01","상품명":"탐사수 무라벨 2L 12병","결제금액":12170}]'
+                return {
+                    "id": 2,
+                    "result": {
+                        "result": {
+                            "value": {
+                                "ordersCount": 1,
+                                "jsonPayload": payload,
+                                "domText": "",
+                            }
+                        }
+                    },
+                }
+            return {"id": msg_id, "result": {}}
+
+        def close(self) -> None:
+            pass
+
+    with (
+        patch.object(scraper_service, "_find_local_chromium_executable", lambda: "chrome.exe"),
+        patch.object(
+            scraper_service,
+            "_fetch_cdp_page_ws_url",
+            lambda port: "ws://127.0.0.1:9333/devtools/page/1",
+        ),
+        patch.object(scraper_service, "_CdpWebSocket", _DummyCdpWs),
+    ):
+        crawl_res = client.post(
+            "/api/v1/scraper/coupang-auto-crawl",
+            headers={"X-API-Key": "test-secret-key"},
+            json={"max_wait_sec": 10},
+        )
+    assert crawl_res.status_code == 200
+    crawl_body = crawl_res.json()
+    assert crawl_body["status"] == "crawled"
+    assert crawl_body["collected_orders_count"] == 1
+    assert crawl_body["matched_orders"] >= 1
+
 
 

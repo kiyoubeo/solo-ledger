@@ -1,5 +1,6 @@
 """FastAPI application for SoloLedger SMS Webhook, NTS Cache, Vision OCR, Telegram Bot, and Tax Export."""
 
+import asyncio
 import base64
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -45,6 +46,7 @@ from sololedger.phone_adb import import_phone_sms_to_ledger
 from sololedger.reconciler import reconcile_single_item
 from sololedger.scraper_service import (
     SUPPORTED_SCRAPER_TARGETS,
+    auto_crawl_coupang_orders,
     build_coupang_browser_extractor_script,
     generate_electronic_slips_for_ledger,
     ingest_scraped_payload,
@@ -748,6 +750,30 @@ async def get_coupang_extractor_script_endpoint():
         "target_url": SUPPORTED_SCRAPER_TARGETS["COUPANG"]["url"],
         "script": script,
     }
+
+
+@app.post("/api/v1/scraper/coupang-auto-crawl")
+async def coupang_auto_crawl_endpoint(
+    payload: Dict[str, Any] = Body(default_factory=dict),
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Launch persistent local browser session via CDP, auto-collect Coupang orders, and match."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    max_wait = int(payload.get("max_wait_sec", 180)) if isinstance(payload, dict) else 180
+
+    def _run_sync() -> Dict[str, Any]:
+        init_db()
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            res = auto_crawl_coupang_orders(cursor, max_wait_sec=max_wait)
+            conn.commit()
+            return res
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_run_sync)
 
 
 @app.post("/api/v1/scraper/ingest")

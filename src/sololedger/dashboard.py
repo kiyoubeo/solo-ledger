@@ -1071,25 +1071,40 @@ def render_dashboard_html(
   <div id="coupang-modal-backdrop" class="modal-backdrop no-print" onclick="onCoupangBackdropClick(event)">
     <div class="receipt-modal" style="max-width:600px;">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-        <h3 style="margin:0;">🛒 쿠팡 주문내역 · 영수증 원클릭 추출 및 자동매칭</h3>
+        <h3 style="margin:0;">🛒 쿠팡 주문내역 · 영수증 자동 크롤링 및 매칭</h3>
         <button class="secondary" onclick="closeCoupangModal()">✕ 닫기</button>
+      </div>
+      <div class="slip-box" style="margin-bottom:12px; font-size:13px; line-height:1.55; border:2px solid #2563eb;">
+        <div style="font-weight:700; color:#1d4ed8; margin-bottom:6px; font-size:14px;">
+          🔄 [자동 수집 (방법 B)] 전용 브라우저 세션으로 2025~2026년 주문내역 자동 크롤링
+        </div>
+        <div style="color:#334155; margin-bottom:10px;">
+          아래 버튼만 누르면 서버가 전용 브라우저(<code>archive/browser_profile/coupang</code>)를 열어
+          2025~2026년 쿠팡 주문내역을 자동으로 긁어와 매칭한 뒤 창을 닫습니다.<br/>
+          <span style="color:#64748b; font-size:12px;">
+            * 최초 1회 실행 시에만 로그인 창이 뜨며, <b>[자동 로그인]</b>을 체크해 두면
+            다음부터는 무인으로 즉시 수집됩니다.
+          </span>
+        </div>
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+          <button id="btn-coupang-auto-crawl" onclick="runCoupangAutoCrawl()"
+            style="background:#15803d; font-weight:700; padding:8px 16px;">
+            🚀 쿠팡 주문내역 자동 크롤링 시작
+          </button>
+        </div>
+        <div id="coupang-crawl-status"
+          style="margin-top:8px; font-size:12px; font-weight:600; color:#1e40af;"></div>
       </div>
       <div class="slip-box" style="margin-bottom:12px; font-size:13px; line-height:1.55;">
         <div style="font-weight:700; color:#1e40af; margin-bottom:6px;">
-          [방법 1-A] 브라우저 원클릭 스크립트로 2025~2026년 전 페이지 자동 수집 (추천)
+          [수동 보조 1] 현재 열려있는 브라우저 탭에서 스크립트로 수집
         </div>
-        <ol style="margin:4px 0 10px 18px; padding:0;">
-          <li>아래 <b>[1. 쿠팡 주문목록 열기]</b> 버튼을 눌러 쿠팡에 로그인된 주문목록 탭을 엽니다.</li>
-          <li><b>[2. 원클릭 수집 스크립트 복사]</b> 버튼을 누릅니다.</li>
-          <li>쿠팡 주문목록 탭에서 <code>F12</code> 키 → <b>Console(콘솔)</b> 탭 클릭 →
-              <code>Ctrl + V</code> 붙여넣기 후 <code>Enter</code>를 누르면
-              전 페이지 주문내역을 자동 수집·매칭합니다.</li>
-        </ol>
         <div style="display:flex; gap:8px; flex-wrap:wrap;">
-          <button onclick="window.open('https://mc.coupang.com/ssr/desktop/order/list', '_blank')">
+          <button class="secondary"
+            onclick="window.open('https://mc.coupang.com/ssr/desktop/order/list', '_blank')">
             🔗 1. 쿠팡 주문목록 열기
           </button>
-          <button onclick="copyCoupangExtractorScript()">
+          <button class="secondary" onclick="copyCoupangExtractorScript()">
             📋 2. 원클릭 수집 스크립트 복사
           </button>
           <button class="secondary" onclick="document.getElementById('csv-file-input').click()">
@@ -1100,9 +1115,9 @@ def render_dashboard_html(
       </div>
       <div class="slip-box" style="font-size:13px; line-height:1.55;">
         <div style="font-weight:700; color:#0f172a; margin-bottom:6px;">
-          [방법 1-B] 콘솔 없이 쿠팡 주문목록 화면 복사(<code>Ctrl+A</code> → <code>Ctrl+C</code>) 바로 붙여넣기
+          [수동 보조 2] 쿠팡 주문목록 화면 복사(<code>Ctrl+A</code> → <code>Ctrl+C</code>) 바로 붙여넣기
         </div>
-        <textarea id="coupang-paste-input" rows="5"
+        <textarea id="coupang-paste-input" rows="4"
           style="width:100%; box-sizing:border-box; padding:8px;
                  border:1px solid #cbd5e1; border-radius:6px; font-size:12px;"
           placeholder="쿠팡 주문목록에서 Ctrl+A, Ctrl+C로 복사한 텍스트나 JSON을 붙여넣으세요..."
@@ -1428,6 +1443,37 @@ def render_dashboard_html(
     function onCoupangBackdropClick(ev) {{
       if (ev.target && ev.target.id === 'coupang-modal-backdrop') {{
         closeCoupangModal();
+      }}
+    }}
+    async function runCoupangAutoCrawl() {{
+      const btn = document.getElementById('btn-coupang-auto-crawl');
+      const st = document.getElementById('coupang-crawl-status');
+      btn.disabled = true;
+      st.style.color = '#1e40af';
+      st.textContent =
+        '⏳ 전용 브라우저가 실행되었습니다. (로그인 창이 뜨면 1회 로그인해 주세요. 이후 자동 수집 후 창이 닫힙니다...)';
+      try {{
+        const res = await fetch('/api/v1/scraper/coupang-auto-crawl', {{
+          method: 'POST',
+          headers: API_HEADERS,
+          body: JSON.stringify({{ max_wait_sec: 180 }})
+        }});
+        const data = await res.json();
+        if (data.status === 'crawled') {{
+          st.style.color = '#15803d';
+          st.textContent =
+            `✅ 쿠팡 주문내역 ${{data.collected_orders_count || 0}}건 수집 · `
+            + `카드전표 ${{data.matched_orders || 0}}건 자동매칭 완료!`;
+          setTimeout(() => {{ window.location.href = '/dashboard?year_month=ALL'; }}, 1200);
+        }} else {{
+          st.style.color = '#b91c1c';
+          st.textContent = `⚠️ ${{data.message || '수집이 중단되었습니다.'}}`;
+          btn.disabled = false;
+        }}
+      }} catch (err) {{
+        st.style.color = '#b91c1c';
+        st.textContent = '⚠️ 자동 수집 요청 중 오류가 발생했습니다.';
+        btn.disabled = false;
       }}
     }}
     async function copyCoupangExtractorScript() {{
