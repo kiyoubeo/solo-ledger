@@ -332,14 +332,16 @@ def test_import_phone_sms_api_endpoint(client):
     assert cp_script_res.status_code == 200
     assert "/ssr/api/myorders/model/page" in cp_script_res.json()["script"]
 
-    # Verify Coupang Order List screen copy/DOM text matching against KB Coupang card row (12,170 KRW)
+    # Verify Coupang Order List screen copy/DOM text matching (multi-item order -> 12,170 KRW)
     coupang_screen_text = (
         "주문목록\n"
         "2026. 11. 1 주문\n"
         "주문상세보기\n"
         "배송완료 11/2(월) 도착\n"
         "코멧 홈 베이직 미용티슈 250매 6팩\n"
-        "12,170원 · 1개\n"
+        "7,000원 · 2개\n"
+        "탐사수 무라벨 2L 6병\n"
+        "5,170원 · 1개\n"
         "장바구니 담기\n"
     )
     cp_match_res = client.post(
@@ -355,6 +357,12 @@ def test_import_phone_sms_api_endpoint(client):
     cp_match_body = cp_match_res.json()
     assert cp_match_body["mode"] == "ECOMMERCE_ORDER"
     assert cp_match_body["matched_orders"] >= 1
+    assert cp_match_body["generated_statements_count"] >= 1
+    cp_tx_id = cp_match_body["updated_tx_ids"][0]
+    cp_rec = client.get(f"/api/v1/transactions/{cp_tx_id}/receipt").json()
+    assert cp_rec["archived_file_name"].startswith("거래명세서_")
+    assert len(cp_rec["line_items"]) == 2
+    assert cp_rec["line_items"][0]["qty"] == 2
 
     # Verify Method B: POST /api/v1/scraper/coupang-auto-crawl via mocked CDP session
     from unittest.mock import patch

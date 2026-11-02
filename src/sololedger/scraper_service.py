@@ -48,10 +48,7 @@ from sololedger.models import ReconcileItem
 from sololedger.reconciler import reconcile_single_item
 from sololedger.sms_parser import format_card_label, sanitize_card_folder_name
 from sololedger.tax_engine import calculate_supply_and_vat
-from sololedger.telegram_bot import (
-    _detect_memo_account_override,
-    _refresh_receipt_archived_filename,
-)
+from sololedger.telegram_bot import _detect_memo_account_override
 
 SUPPORTED_SCRAPER_TARGETS: Dict[str, Dict[str, str]] = {
     "HOMETAX": {
@@ -414,7 +411,7 @@ _COUPANG_NOISE_RE = re.compile(
 )
 
 
-def _walk_coupang_ssr_json(node: Any, collected: List[Dict[str, str]]) -> None:
+def _walk_coupang_ssr_json(node: Any, collected: List[Dict[str, Any]]) -> None:
     """Recursively extract orders from Coupang SSR API JSON or __NEXT_DATA__ state."""
     if isinstance(node, list):
         for child in node:
@@ -432,7 +429,7 @@ def _walk_coupang_ssr_json(node: Any, collected: List[Dict[str, str]]) -> None:
         else:
             dt_str = str(raw_dt)[:10]
 
-        prod_items: List[tuple[str, int]] = []
+        prod_items: List[tuple[str, int, int]] = []
 
         def _collect_prods(sub: Any) -> None:
             if isinstance(sub, list):
@@ -452,10 +449,12 @@ def _walk_coupang_ssr_json(node: Any, collected: List[Dict[str, str]]) -> None:
                     or sub.get("price")
                     or sub.get("amount")
                 )
+                p_qty_raw = sub.get("quantity") or sub.get("qty") or sub.get("count") or 1
                 if p_name and p_price is not None:
                     amt_val = _parse_int_amount(str(p_price))
+                    qty_val = max(1, _parse_int_amount(str(p_qty_raw)) or 1)
                     if amt_val > 0:
-                        prod_items.append((str(p_name).strip(), amt_val))
+                        prod_items.append((str(p_name).strip(), qty_val, amt_val))
                 for v in sub.values():
                     if isinstance(v, (list, dict)):
                         _collect_prods(v)
@@ -464,19 +463,35 @@ def _walk_coupang_ssr_json(node: Any, collected: List[Dict[str, str]]) -> None:
             if k in node:
                 _collect_prods(node[k])
 
-        for p_name, p_amt in prod_items:
-            collected.append({"주문일자": dt_str, "상품명": p_name, "결제금액": str(p_amt)})
+        for p_name, p_qty, p_amt in prod_items:
+            collected.append(
+                {
+                    "주문일자": dt_str,
+                    "상품명": p_name,
+                    "결제금액": str(p_amt),
+                    "품목내역": [{"item": p_name, "qty": p_qty, "price": p_amt}],
+                }
+            )
 
         tot_pay = (
             node.get("totalPayedPrice")
             or node.get("totalProductPrice")
             or node.get("paymentAmount")
-            or (sum(x[1] for x in prod_items) if len(prod_items) >= 2 else 0)
+            or (sum(x[2] for x in prod_items) if len(prod_items) >= 2 else 0)
         )
         tot_int = _parse_int_amount(str(tot_pay or 0))
         if prod_items and tot_int > 0 and len(prod_items) >= 2:
             summary_title = f"{prod_items[0][0]} 외 {len(prod_items) - 1}건"
-            collected.append({"주문일자": dt_str, "상품명": summary_title, "결제금액": str(tot_int)})
+            collected.append(
+                {
+                    "주문일자": dt_str,
+                    "상품명": summary_title,
+                    "결제금액": str(tot_int),
+                    "품목내역": [
+                        {"item": n, "qty": q, "price": a} for n, q, a in prod_items
+                    ],
+                }
+            )
 
     for val in node.values():
         if isinstance(val, (dict, list)):
@@ -505,7 +520,7 @@ def extract_coupang_orders_from_content(raw_content: str) -> List[Dict[str, Any]
                 for r in direct_rows
             ):
                 return direct_rows
-            ssr_rows: List[Dict[str, str]] = []
+            ssr_rows: List[Dict[str, Any]] = []
             _walk_coupang_ssr_json(data, ssr_rows)
             if ssr_rows:
                 return ssr_rows
@@ -531,7 +546,7 @@ def extract_coupang_orders_from_content(raw_content: str) -> List[Dict[str, Any]
     )
     matches = list(date_hdr_re.finditer(plain))
     if matches:
-        extracted: List[Dict[str, str]] = []
+        extracted: List[Dict[str, Any]] = []
         for idx, m in enumerate(matches):
             y, mo, d = m.groups()
             dt_str = f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
@@ -541,27 +556,44 @@ def extract_coupang_orders_from_content(raw_content: str) -> List[Dict[str, Any]
             lines = [re.sub(r"\s+", " ", ln).strip() for ln in block.splitlines()]
             lines = [ln for ln in lines if ln and not _COUPANG_NOISE_RE.match(ln)]
 
-            block_items: List[tuple[str, int]] = []
+            block_items: List[tuple[str, int, int]] = []
             last_candidate_title = ""
             for ln in lines:
                 price_m = re.search(r"([\d,]{3,})\s*원", ln)
                 if price_m:
                     amt = _parse_int_amount(price_m.group(1))
+                    after_price = ln[price_m.end() :]
+                    qty_m = re.search(r"(\d+)\s*개", after_price)
+                    qty_val = int(qty_m.group(1)) if qty_m else 1
                     before_price = ln[: price_m.start()].strip(" ·-:|")
                     title = before_price if len(before_price) >= 2 else last_candidate_title
                     if title and amt > 0:
-                        block_items.append((title, amt))
+                        block_items.append((title, qty_val, amt))
                         last_candidate_title = ""
                 elif len(ln) >= 2 and not ln.isdigit():
                     last_candidate_title = ln
 
-            for p_name, p_amt in block_items:
-                extracted.append({"주문일자": dt_str, "상품명": p_name, "결제금액": str(p_amt)})
+            for p_name, p_qty, p_amt in block_items:
+                extracted.append(
+                    {
+                        "주문일자": dt_str,
+                        "상품명": p_name,
+                        "결제금액": str(p_amt),
+                        "품목내역": [{"item": p_name, "qty": p_qty, "price": p_amt}],
+                    }
+                )
             if len(block_items) >= 2:
-                total_sum = sum(x[1] for x in block_items)
+                total_sum = sum(x[2] for x in block_items)
                 summary_title = f"{block_items[0][0]} 외 {len(block_items) - 1}건"
                 extracted.append(
-                    {"주문일자": dt_str, "상품명": summary_title, "결제금액": str(total_sum)}
+                    {
+                        "주문일자": dt_str,
+                        "상품명": summary_title,
+                        "결제금액": str(total_sum),
+                        "품목내역": [
+                            {"item": n, "qty": q, "price": a} for n, q, a in block_items
+                        ],
+                    }
                 )
         if extracted:
             return extracted
@@ -588,12 +620,19 @@ def build_coupang_browser_extractor_script(
 
   const orders = [];
   const seen = new Set();
-  const addOrder = (dt, name, amt) => {{
+  const addOrder = (dt, name, amt, lineItems) => {{
     if (!dt || !name || !amt || amt <= 0) return;
     const key = dt + '|' + name + '|' + amt;
     if (seen.has(key)) return;
     seen.add(key);
-    orders.push({{ 주문일자: dt, 상품명: String(name).trim(), 결제금액: Number(amt) }});
+    orders.push({{
+      주문일자: dt,
+      상품명: String(name).trim(),
+      결제금액: Number(amt),
+      품목내역: Array.isArray(lineItems) && lineItems.length > 0
+        ? lineItems
+        : [{{ item: String(name).trim(), qty: 1, price: Number(amt) }}]
+    }});
   }};
 
   // 1. Try Coupang SSR internal JSON API across 2026 & 2025 pages
@@ -623,18 +662,20 @@ def build_coupang_browser_extractor_script(
               if (Array.isArray(s)) {{ s.forEach(findProds); return; }}
               const pName = s.productName || s.itemName || s.title;
               const pAmt = s.combinedPrice || s.totalPrice || s.unitPrice || s.price;
+              const pQty = parseInt(String(s.quantity || s.qty || s.count || 1), 10) || 1;
               if (pName && pAmt) {{
                 const nAmt = parseInt(String(pAmt).replace(/[^0-9]/g, ''), 10);
-                if (nAmt > 0) items.push([String(pName).trim(), nAmt]);
+                if (nAmt > 0) items.push([String(pName).trim(), pQty, nAmt]);
               }}
               Object.values(s).forEach(findProds);
             }};
             findProds(node.deliveryGroupList || node.productList || node.bundleReceiptList || node.items);
-            items.forEach(([n, a]) => addOrder(dt, n, a));
+            items.forEach(([n, q, a]) => addOrder(dt, n, a, [{{ item: n, qty: q, price: a }}]));
             const tot = parseInt(String(node.totalPayedPrice || node.totalProductPrice || 0).replace(/[^0-9]/g, ''), 10)
-              || items.reduce((acc, x) => acc + x[1], 0);
+              || items.reduce((acc, x) => acc + x[2], 0);
             if (items.length >= 2 && tot > 0) {{
-              addOrder(dt, `${{items[0][0]}} 외 ${{items.length - 1}}건`, tot);
+              const lines = items.map(([n, q, a]) => ({{ item: n, qty: q, price: a }}));
+              addOrder(dt, `${{items[0][0]}} 외 ${{items.length - 1}}건`, tot, lines);
             }}
           }}
           Object.values(node).forEach(walk);
@@ -834,19 +875,30 @@ _CDP_COLLECT_JS = """(async () => {
 
   const orders = [];
   const seen = new Set();
-  const addOrder = (dt, name, amt) => {
+  const addOrder = (dt, name, amt, lineItems) => {
     if (!dt || !name || !amt || amt <= 0) return;
     const key = dt + '|' + name + '|' + amt;
     if (seen.has(key)) return;
     seen.add(key);
-    orders.push({ 주문일자: dt, 상품명: String(name).trim(), 결제금액: Number(amt) });
+    orders.push({
+      주문일자: dt,
+      상품명: String(name).trim(),
+      결제금액: Number(amt),
+      품목내역: Array.isArray(lineItems) && lineItems.length > 0
+        ? lineItems
+        : [{ item: String(name).trim(), qty: 1, price: Number(amt) }]
+    });
   };
 
+  for (let sIdx = 0; sIdx < 4; sIdx++) {
+    window.scrollTo(0, document.body ? document.body.scrollHeight : 0);
+    await new Promise((r) => setTimeout(r, 350));
+  }
   const domTexts = [document.body ? document.body.innerText : ''];
   for (const yr of [2026, 2025, 0]) {
     for (let page = 0; page < 25; page++) {
       try {
-        banner.textContent = `🛒 쿠팡 주문내역 자동 수집 중 (${yr || '최근6개월'} - 페이지 ${page + 1})...`;
+        banner.textContent = `🛒 쿠팡 주문내역·거래명세서 수집 중 (${yr || '최근6개월'} - 페이지 ${page + 1})...`;
         const u = `/ssr/api/myorders/model/page?requestYear=${yr}&pageIndex=${page}&size=10`;
         const resp = await fetch(u, { credentials: 'include' });
         if (!resp.ok) break;
@@ -869,18 +921,20 @@ _CDP_COLLECT_JS = """(async () => {
               if (Array.isArray(s)) { s.forEach(findProds); return; }
               const pName = s.productName || s.itemName || s.title;
               const pAmt = s.combinedPrice || s.totalPrice || s.unitPrice || s.price;
+              const pQty = parseInt(String(s.quantity || s.qty || s.count || 1), 10) || 1;
               if (pName && pAmt) {
                 const nAmt = parseInt(String(pAmt).replace(/[^0-9]/g, ''), 10);
-                if (nAmt > 0) items.push([String(pName).trim(), nAmt]);
+                if (nAmt > 0) items.push([String(pName).trim(), pQty, nAmt]);
               }
               Object.values(s).forEach(findProds);
             };
             findProds(node.deliveryGroupList || node.productList || node.bundleReceiptList || node.items);
-            items.forEach(([n, a]) => addOrder(dt, n, a));
+            items.forEach(([n, q, a]) => addOrder(dt, n, a, [{ item: n, qty: q, price: a }]));
             const tot = parseInt(String(node.totalPayedPrice || node.totalProductPrice || 0).replace(/[^0-9]/g, ''), 10)
-              || items.reduce((acc, x) => acc + x[1], 0);
+              || items.reduce((acc, x) => acc + x[2], 0);
             if (items.length >= 2 && tot > 0) {
-              addOrder(dt, `${items[0][0]} 외 ${items.length - 1}건`, tot);
+              const lines = items.map(([n, q, a]) => ({ item: n, qty: q, price: a }));
+              addOrder(dt, `${items[0][0]} 외 ${items.length - 1}건`, tot, lines);
             }
           }
           Object.values(node).forEach(walk);
@@ -1033,7 +1087,9 @@ def auto_crawl_coupang_orders(
         archive_dir=base_archive,
     )
     if orders_count > 0 and dom_text.strip():
-        dom_outcome = reconcile_scraped_ecommerce_orders(cursor, dom_text)
+        dom_outcome = reconcile_scraped_ecommerce_orders(
+            cursor, dom_text, archive_dir=base_archive
+        )
         if dom_outcome.get("matched_count", 0) > 0:
             outcome["matched_orders"] = int(outcome.get("matched_orders", 0)) + int(
                 dom_outcome["matched_count"]
@@ -1050,6 +1106,7 @@ def auto_crawl_coupang_orders(
 def reconcile_scraped_ecommerce_orders(
     cursor: sqlite3.Cursor,
     raw_content: str,
+    archive_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Match scraped Coupang / NaverPay / KakaoPay order items against PG card transactions."""
     content = (raw_content or "").strip()
@@ -1109,49 +1166,16 @@ def reconcile_scraped_ecommerce_orders(
 
         tx_id = int(tx_row["tx_id"])
         used_tx_ids.add(tx_id)
-        acc_code = str(tx_row["account_code"])
-        acc_name = str(tx_row["account_name"])
-        vat_type = str(tx_row["vat_deduction_type"])
-        reason = tx_row["non_deduct_reason"]
+        raw_lines = row.get("품목내역") or row.get("line_items")
+        row_line_items = raw_lines if isinstance(raw_lines, list) else None
 
-        inferred = _detect_memo_account_override(item_name)
-        if inferred:
-            inf_code, inf_name, force_non_ded, inf_reason = inferred
-            if not (acc_code == "830" and inf_code == "212" and amount < 300_000):
-                acc_code = inf_code
-                acc_name = inf_name
-                vat_type = "NON_DEDUCTIBLE" if force_non_ded else "DEDUCTIBLE"
-                reason = inf_reason
-        elif acc_code == "999":
-            acc_code = "830"
-            acc_name = "소모품비"
-            vat_type = "DEDUCTIBLE"
-
-        sup, vat = calculate_supply_and_vat(amount, vat_type)
-        cursor.execute(
-            """
-            UPDATE card_transactions
-            SET account_code = ?,
-                account_name = ?,
-                vat_deduction_type = ?,
-                non_deduct_reason = ?,
-                supply_value = ?,
-                vat_amount = ?,
-                counterparty_info = ?,
-                reconcile_status = CASE
-                    WHEN reconcile_status = 'SMS_ONLY' THEN 'OCR_MATCHED'
-                    ELSE reconcile_status
-                END,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE tx_id = ?
-            """,
-            (acc_code, acc_name, vat_type, reason, sup, vat, item_name, tx_id),
+        generate_electronic_statement_for_tx(
+            cursor,
+            tx_id=tx_id,
+            item_name=item_name,
+            line_items=row_line_items,
+            archive_dir=archive_dir,
         )
-        cursor.execute(
-            "DELETE FROM receipt_ocr_metadata WHERE tx_id = ? AND source_channel = 'AUTO_SLIP'",
-            (tx_id,),
-        )
-        _refresh_receipt_archived_filename(cursor, tx_id)
         updated_tx_ids.append(tx_id)
 
     return {
@@ -1231,7 +1255,10 @@ def render_electronic_slip_html(tx_row: Dict[str, Any]) -> str:
 </html>"""
 
 
-def render_electronic_statement_html(tx_row: Dict[str, Any]) -> str:
+def render_electronic_statement_html(
+    tx_row: Dict[str, Any],
+    line_items: Optional[List[Dict[str, Any]]] = None,
+) -> str:
     """Render a standalone printable Korean Transaction Statement (거래명세서)."""
     c_code = str(tx_row.get("card_last4") or "0000")
     c_label = html.escape(format_card_label(c_code))
@@ -1244,6 +1271,7 @@ def render_electronic_statement_html(tx_row: Dict[str, Any]) -> str:
     total_amt = int(tx_row["total_amount"])
     supply_val = int(tx_row["supply_value"])
     vat_amt = int(tx_row["vat_amount"])
+    vat_type = str(tx_row.get("vat_deduction_type") or "DEDUCTIBLE")
     acc_str = html.escape(f"{tx_row['account_code']} {tx_row['account_name']}")
     raw_memo = str(tx_row.get("counterparty_info") or "").strip()
     item_title = html.escape(raw_memo if raw_memo else f"{tx_row['raw_merchant_name']} 구매 품목")
@@ -1256,6 +1284,37 @@ def render_electronic_statement_html(tx_row: Dict[str, Any]) -> str:
         total_amount=total_amt,
     )
     stmt_title = html.escape(slip_title.replace("매출전표_", "거래명세서_", 1))
+
+    tbody_rows: List[str] = []
+    tot_qty = 0
+    if line_items and len(line_items) > 0:
+        for li in line_items:
+            li_name = html.escape(str(li.get("item") or li.get("상품명") or item_title))
+            li_qty = max(1, int(li.get("qty") or 1))
+            li_price = int(li.get("price") or total_amt)
+            li_sup, li_vat = calculate_supply_and_vat(li_price, vat_type)
+            tot_qty += li_qty
+            tbody_rows.append(
+                f"<tr>"
+                f"<td>{md_str}</td>"
+                f"<td><strong>{li_name}</strong></td>"
+                f"<td class='num'>{li_qty}</td>"
+                f"<td class='num'>{li_sup:,}원</td>"
+                f"<td class='num'>{li_vat:,}원</td>"
+                f"</tr>"
+            )
+    else:
+        tot_qty = 1
+        tbody_rows.append(
+            f"<tr>"
+            f"<td>{md_str}</td>"
+            f"<td><strong>{item_title}</strong></td>"
+            f"<td class='num'>1</td>"
+            f"<td class='num'>{supply_val:,}원</td>"
+            f"<td class='num'>{vat_amt:,}원</td>"
+            f"</tr>"
+        )
+    tbody_html = "\n        ".join(tbody_rows)
 
     return f"""<!DOCTYPE html>
 <html lang="ko">
@@ -1313,18 +1372,12 @@ def render_electronic_statement_html(tx_row: Dict[str, Any]) -> str:
         </tr>
       </thead>
       <tbody>
-        <tr>
-          <td>{md_str}</td>
-          <td><strong>{item_title}</strong></td>
-          <td class="num">1</td>
-          <td class="num">{supply_val:,}원</td>
-          <td class="num">{vat_amt:,}원</td>
-        </tr>
+        {tbody_html}
       </tbody>
       <tfoot>
         <tr>
           <th colspan="2">합 계</th>
-          <td class="num"><strong>1</strong></td>
+          <td class="num"><strong>{tot_qty}</strong></td>
           <td class="num"><strong>{supply_val:,}원</strong></td>
           <td class="num"><strong>{vat_amt:,}원</strong></td>
         </tr>
@@ -1343,6 +1396,7 @@ def generate_electronic_statement_for_tx(
     account_code: Optional[str] = None,
     file_bytes: Optional[bytes] = None,
     file_name: Optional[str] = None,
+    line_items: Optional[List[Dict[str, Any]]] = None,
     archive_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Generate or attach a Transaction Statement (거래명세서) for a specific transaction."""
@@ -1353,6 +1407,7 @@ def generate_electronic_statement_for_tx(
     tx = dict(row)
 
     resolved_item = (item_name or "").strip()
+    resolved_lines: Optional[List[Dict[str, Any]]] = line_items
     if not resolved_item and file_bytes:
         try:
             decoded_txt = file_bytes.decode("utf-8", errors="ignore")
@@ -1365,6 +1420,8 @@ def generate_electronic_statement_for_tx(
                     or first_row.get("item_name")
                     or ""
                 ).strip()
+                if not resolved_lines and isinstance(first_row.get("품목내역"), list):
+                    resolved_lines = first_row["품목내역"]
         except Exception:
             pass
     if not resolved_item and file_name:
@@ -1422,11 +1479,17 @@ def generate_electronic_statement_for_tx(
     updated_tx = dict(cursor.fetchone())
     c_code = str(updated_tx.get("card_last4") or "0000")
 
+    final_lines = (
+        resolved_lines
+        if resolved_lines
+        else [{"item": resolved_item, "qty": 1, "price": int(updated_tx["total_amount"])}]
+    )
+
     if file_bytes:
         payload_bytes = file_bytes
         orig_name = file_name or f"statement_tx_{tx_id}.pdf"
     else:
-        stmt_html = render_electronic_statement_html(updated_tx)
+        stmt_html = render_electronic_statement_html(updated_tx, line_items=final_lines)
         payload_bytes = stmt_html.encode("utf-8")
         orig_name = f"statement_tx_{tx_id}.html"
 
@@ -1472,10 +1535,7 @@ def generate_electronic_statement_for_tx(
             file_hash,
             updated_tx.get("biz_reg_no"),
             int(updated_tx["total_amount"]),
-            json.dumps(
-                [{"item": resolved_item, "qty": 1, "price": int(updated_tx["total_amount"])}],
-                ensure_ascii=False,
-            ),
+            json.dumps(final_lines, ensure_ascii=False),
         ),
     )
 
@@ -1483,6 +1543,7 @@ def generate_electronic_statement_for_tx(
         "status": "statement_saved",
         "tx_id": tx_id,
         "item_name": resolved_item,
+        "line_items": final_lines,
         "account_code": new_code,
         "account_name": new_name,
         "archived_file_name": arch_name,
@@ -1595,7 +1656,9 @@ def ingest_scraped_payload(
         k in head_sample for k in ("승인번호", "이용카드", "이용하신곳", "전표매입", "국내이용금액")
     )
     if portal_info["type"] == "ECOMMERCE_ORDER" and not is_card_statement:
-        ecom_res = reconcile_scraped_ecommerce_orders(cursor, raw_content)
+        ecom_res = reconcile_scraped_ecommerce_orders(
+            cursor, raw_content, archive_dir=archive_dir
+        )
         slip_res = (
             generate_electronic_slips_for_ledger(cursor, archive_dir=archive_dir)
             if auto_generate_slips
@@ -1608,6 +1671,7 @@ def ingest_scraped_payload(
             "mode": "ECOMMERCE_ORDER",
             "matched_orders": ecom_res["matched_count"],
             "updated_tx_ids": ecom_res["updated_tx_ids"],
+            "generated_statements_count": ecom_res["matched_count"],
             "generated_slips_count": slip_res["generated_slips_count"],
         }
 

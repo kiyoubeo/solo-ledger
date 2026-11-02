@@ -1316,6 +1316,37 @@ def render_dashboard_html(
         const mdStr = String(d.transacted_at || '').slice(5, 10).replace('-', '/');
         const itemVal = (d.counterparty_info || typedMemo || (d.raw_merchant_name + ' 구매 품목'))
           .replace(/"/g, '&quot;');
+        let tbodyHtml = '';
+        if (Array.isArray(d.line_items) && d.line_items.length > 0) {{
+          d.line_items.forEach((li) => {{
+            const liName = String(li.item || li.name || itemVal).replace(/</g, '&lt;');
+            const liQty = Math.max(1, parseInt(li.qty || 1, 10) || 1);
+            const liTot = parseInt(li.price || li.amount || d.total_amount || 0, 10);
+            const liSup = d.vat_deduction_type === 'DEDUCTIBLE'
+              ? Math.round(liTot / 1.1)
+              : liTot;
+            const liVat = liTot - liSup;
+            tbodyHtml += '<tr>' +
+              '<td style="border:1px solid #cbd5e1; padding:6px;">' + mdStr + '</td>' +
+              '<td style="border:1px solid #cbd5e1; padding:6px;"><strong>' + liName + '</strong></td>' +
+              '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right;">' + liQty + '</td>' +
+              '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right;">' +
+              fmt(liSup) + '</td>' +
+              '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right;">' +
+              fmt(liVat) + '</td>' +
+              '</tr>';
+          }});
+        }} else {{
+          tbodyHtml = '<tr>' +
+            '<td style="border:1px solid #cbd5e1; padding:6px;">' + mdStr + '</td>' +
+            '<td style="border:1px solid #cbd5e1; padding:6px;"><strong>' + itemVal + '</strong></td>' +
+            '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right;">1</td>' +
+            '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right;">' +
+            fmt(d.supply_value) + '</td>' +
+            '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right;">' +
+            fmt(d.vat_amount) + '</td>' +
+            '</tr>';
+        }}
         slipEl.innerHTML =
           '<div class="slip-title" style="color:#1e3a8a;">[ 거 래 명 세 서 ] (공급받는자 보관용)</div>' +
           '<div class="slip-row"><span>거래일시</span><strong>' + d.transacted_at + '</strong></div>' +
@@ -1334,15 +1365,7 @@ def render_dashboard_html(
           '<th style="border:1px solid #cbd5e1; padding:5px; text-align:right;">수량</th>' +
           '<th style="border:1px solid #cbd5e1; padding:5px; text-align:right;">공급가액</th>' +
           '<th style="border:1px solid #cbd5e1; padding:5px; text-align:right;">세액</th>' +
-          '</tr></thead><tbody><tr>' +
-          '<td style="border:1px solid #cbd5e1; padding:6px;">' + mdStr + '</td>' +
-          '<td style="border:1px solid #cbd5e1; padding:6px;"><strong>' + itemVal + '</strong></td>' +
-          '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right;">1</td>' +
-          '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right;">' +
-          fmt(d.supply_value) + '</td>' +
-          '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right;">' +
-          fmt(d.vat_amount) + '</td>' +
-          '</tr></tbody></table>' +
+          '</tr></thead><tbody>' + tbodyHtml + '</tbody></table>' +
           '<div class="slip-row slip-total"><span>합계금액 (VAT 포함)</span><span>' +
           fmt(d.total_amount) + '</span></div>' +
           '<div class="slip-divider"></div>' +
@@ -1419,6 +1442,9 @@ def render_dashboard_html(
       }}
       const d = await res.json();
       activeModalData = d;
+      if (!initialMode && String(d.archived_file_name || '').startsWith('거래명세서_')) {{
+        activeModalMode = 'STATEMENT';
+      }}
       renderModalDocView();
 
       if (d.has_receipt_file && d.is_renderable_image) {{
@@ -1762,7 +1788,7 @@ def render_dashboard_html(
           st.style.color = '#15803d';
           st.textContent =
             `✅ 쿠팡 주문내역 ${{data.collected_orders_count || 0}}건 수집 · `
-            + `카드전표 ${{data.matched_orders || 0}}건 자동매칭 완료!`;
+            + `카드전표 ${{data.matched_orders || 0}}건 매칭 및 전자 거래명세서 자동 작성 완료!`;
           setTimeout(() => {{ window.location.href = '/dashboard?year_month=ALL'; }}, 1200);
         }} else {{
           st.style.color = '#b91c1c';

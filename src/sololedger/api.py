@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import json
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -506,7 +507,16 @@ async def get_transaction_receipt_detail(tx_id: int):
         has_file = False
         is_renderable_image = False
         archived_name = rec_dict["archived_file_name"] if rec_dict else None
+        line_items_list = []
         if rec_dict:
+            raw_li = rec_dict.get("line_items_json")
+            if raw_li:
+                try:
+                    parsed_li = json.loads(str(raw_li))
+                    if isinstance(parsed_li, list):
+                        line_items_list = [r for r in parsed_li if isinstance(r, dict)]
+                except Exception:
+                    pass
             candidates = [
                 Path(rec_dict["original_file_path"]),
                 settings.archive_dir / "normalized" / str(archived_name or ""),
@@ -557,6 +567,7 @@ async def get_transaction_receipt_detail(tx_id: int):
             "has_receipt_file": has_file,
             "is_renderable_image": is_renderable_image,
             "archived_file_name": archived_name,
+            "line_items": line_items_list,
             "receipt_file_url": f"/api/v1/transactions/{tx_id}/receipt-file" if has_file else None,
         }
     finally:
