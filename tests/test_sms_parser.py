@@ -522,7 +522,7 @@ def test_import_phone_sms_api_endpoint(client):
                 "label": "법인 Gmail",
                 "provider": "GMAIL",
                 "email_address": "corp@gmail.com",
-                "app_password": "gmail-app-password",
+                "app_password": "abcd efgh ijkl mnop",
                 "sync_now": True,
                 "force_rescan": True,
             },

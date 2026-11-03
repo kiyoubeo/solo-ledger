@@ -171,6 +171,10 @@ def _normalize_account_entry(
     raw_pw = raw.get("app_password")
     if raw_pw is not None and str(raw_pw).strip() and str(raw_pw).strip() != "********":
         password = str(raw_pw).strip()
+        if "gmail.com" in host.lower() or provider == "GMAIL":
+            no_space = re.sub(r"\s+", "", password)
+            if len(no_space) == 16 and no_space.isalpha():
+                password = no_space
     else:
         password = str(base.get("app_password") or "")
 
@@ -896,11 +900,23 @@ def sync_imap_order_emails(
                 }
             )
         except Exception as exc:
-            err_txt = f"{user} ({host}:{port}) 실패: {exc}"
+            raw_err = str(exc)
+            if "Application-specific password required" in raw_err:
+                friendly_err = (
+                    "일반 비밀번호 대신 Google 16자리 '앱 비밀번호'"
+                    "(myaccount.google.com/apppasswords)를 발급받아 입력해 주세요."
+                )
+            elif "Invalid credentials" in raw_err or "AUTHENTICATIONFAILED" in raw_err.upper():
+                friendly_err = (
+                    "아이디/앱 비밀번호가 일치하지 않거나 메일함 설정에서 'IMAP 사용함'이 꺼져 있습니다."
+                )
+            else:
+                friendly_err = raw_err
+            err_txt = f"{user} ({host}:{port}) 실패: {friendly_err}"
             error_messages.append(err_txt)
             acc["last_sync_at"] = acc_now
             acc["last_status"] = "error"
-            acc["last_message"] = str(exc)
+            acc["last_message"] = friendly_err
             account_results.append(
                 {
                     "account_id": aid,
