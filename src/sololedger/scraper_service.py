@@ -1969,26 +1969,41 @@ def generate_electronic_statement_for_tx(
     tx = dict(row)
 
     resolved_mp_seller = (marketplace_seller or "").strip()
-    if not resolved_mp_seller:
-        cursor.execute(
-            """
-            SELECT raw_ocr_response FROM receipt_ocr_metadata
-            WHERE tx_id = ? AND source_channel = 'STATEMENT'
-            ORDER BY receipt_id DESC LIMIT 1
-            """,
-            (tx_id,),
-        )
-        old_stmt_meta = cursor.fetchone()
-        if old_stmt_meta and old_stmt_meta["raw_ocr_response"]:
+    resolved_lines: Optional[List[Dict[str, Any]]] = line_items
+    cursor.execute(
+        """
+        SELECT line_items_json, raw_ocr_response FROM receipt_ocr_metadata
+        WHERE tx_id = ? AND source_channel = 'STATEMENT'
+        ORDER BY receipt_id DESC LIMIT 1
+        """,
+        (tx_id,),
+    )
+    old_stmt_meta = cursor.fetchone()
+    if old_stmt_meta:
+        if not resolved_mp_seller and old_stmt_meta["raw_ocr_response"]:
             try:
                 old_obj = json.loads(str(old_stmt_meta["raw_ocr_response"]))
                 if isinstance(old_obj, dict):
                     resolved_mp_seller = str(old_obj.get("marketplace_seller") or "").strip()
             except Exception:
                 pass
+        if (
+            resolved_lines is None
+            and not file_bytes
+            and old_stmt_meta["line_items_json"]
+            and (
+                not item_name
+                or item_name.strip() == str(tx.get("counterparty_info") or "").strip()
+            )
+        ):
+            try:
+                old_li = json.loads(str(old_stmt_meta["line_items_json"]))
+                if isinstance(old_li, list) and len(old_li) > 0:
+                    resolved_lines = old_li
+            except Exception:
+                pass
 
     resolved_item = (item_name or "").strip()
-    resolved_lines: Optional[List[Dict[str, Any]]] = line_items
     if not resolved_item and file_bytes:
         try:
             decoded_txt = file_bytes.decode("utf-8", errors="ignore")

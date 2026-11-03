@@ -47,3 +47,4 @@
 | 2026-11-03 | `fix` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/dashboard.py (+3 files)` | 이메일 주문 파서 중복 품목 제거 및 연동 결과 확인 UI 추가 | `PASSED` |
 | 2026-11-03 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/dashboard.py (+5 files)` | 신규 이메일 주문 실시간 전표 자동생성 및 수동 스캔 최신구간 재탐색 적용 | `PASSED` |
 | 2026-11-03 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/dashboard.py (+3 files)` | 쿠팡 직매입·직영몰 사업자번호 자동추출 및 오픈마켓 입점판매자 분리 적용 | `PASSED` |
+| 2026-11-03 | `fix` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/scraper_service.py` | 거래명세서 갱신 시 기존 다품목 상세내역 보존 보강 | `PASSED` |
