@@ -8,6 +8,7 @@ against card transactions, and generates itemized Electronic Transaction Stateme
 import email
 import email.message
 import email.utils
+import hashlib
 import html
 import imaplib
 import json
@@ -140,8 +141,66 @@ def _config_file_path(archive_dir: Optional[Path] = None) -> Path:
     return base / "email_watcher_config.json"
 
 
+def _make_account_id(email_address: str) -> str:
+    digest = hashlib.sha1(email_address.strip().lower().encode("utf-8")).hexdigest()[:10]
+    return f"acc_{digest}"
+
+
+def _normalize_account_entry(
+    raw: Dict[str, Any],
+    existing: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    base = dict(existing or {})
+    email_addr = str(raw.get("email_address") or base.get("email_address") or "").strip()
+    if not email_addr:
+        return None
+
+    provider = str(raw.get("provider") or base.get("provider") or "NAVER").upper()
+    if provider not in IMAP_PROVIDER_PRESETS:
+        provider = "CUSTOM"
+    preset = IMAP_PROVIDER_PRESETS[provider]
+
+    host = str(raw.get("imap_host") or "").strip()
+    if not host:
+        if preset["host"] and (not base.get("imap_host") or raw.get("provider")):
+            host = str(preset["host"])
+        else:
+            host = str(base.get("imap_host") or preset["host"] or "")
+
+    port = int(raw.get("imap_port") or base.get("imap_port") or preset["port"] or 993)
+    raw_pw = raw.get("app_password")
+    if raw_pw is not None and str(raw_pw).strip() and str(raw_pw).strip() != "********":
+        password = str(raw_pw).strip()
+    else:
+        password = str(base.get("app_password") or "")
+
+    default_label = preset["name"].split("(")[0].strip()
+    label = str(raw.get("label") or base.get("label") or default_label).strip()
+    enabled = (
+        bool(raw["enabled"])
+        if "enabled" in raw and raw["enabled"] is not None
+        else bool(base.get("enabled", True))
+    )
+    acc_id = str(raw.get("account_id") or base.get("account_id") or _make_account_id(email_addr))
+
+    return {
+        "account_id": acc_id,
+        "label": label,
+        "provider": provider,
+        "imap_host": host,
+        "imap_port": port,
+        "email_address": email_addr,
+        "app_password": password,
+        "mailbox": str(raw.get("mailbox") or base.get("mailbox") or "INBOX").strip() or "INBOX",
+        "enabled": enabled,
+        "last_sync_at": raw.get("last_sync_at", base.get("last_sync_at")),
+        "last_status": raw.get("last_status", base.get("last_status", "idle")),
+        "last_message": raw.get("last_message", base.get("last_message", "")),
+    }
+
+
 def load_email_watcher_config(archive_dir: Optional[Path] = None) -> Dict[str, Any]:
-    """Load persisted IMAP email watcher settings from archive_dir."""
+    """Load persisted multi-account IMAP email watcher settings from archive_dir."""
     cfg_path = _config_file_path(archive_dir)
     default_cfg: Dict[str, Any] = {
         "provider": os.getenv("SOLOLEDGER_IMAP_PROVIDER", "NAVER"),
@@ -150,6 +209,7 @@ def load_email_watcher_config(archive_dir: Optional[Path] = None) -> Dict[str, A
         "email_address": os.getenv("SOLOLEDGER_IMAP_USER", ""),
         "app_password": os.getenv("SOLOLEDGER_IMAP_PASSWORD", ""),
         "mailbox": "INBOX",
+        "accounts": [],
         "auto_poll_enabled": False,
         "poll_interval_sec": 120,
         "lookback_days": 60,
@@ -166,28 +226,56 @@ def load_email_watcher_config(archive_dir: Optional[Path] = None) -> Dict[str, A
                 default_cfg.update(loaded)
         except Exception:
             pass
+
+    raw_accounts = default_cfg.get("accounts")
+    norm_accounts: List[Dict[str, Any]] = []
+    if isinstance(raw_accounts, list):
+        for item in raw_accounts:
+            if isinstance(item, dict):
+                norm = _normalize_account_entry(item)
+                if norm:
+                    norm_accounts.append(norm)
+
+    if not norm_accounts and str(default_cfg.get("email_address") or "").strip():
+        migrated = _normalize_account_entry(default_cfg)
+        if migrated:
+            norm_accounts.append(migrated)
+
+    default_cfg["accounts"] = norm_accounts
     return default_cfg
+
+
+def _write_config(cfg: Dict[str, Any], archive_dir: Optional[Path] = None) -> Dict[str, Any]:
+    cfg["poll_interval_sec"] = max(30, int(cfg.get("poll_interval_sec") or 120))
+    cfg["lookback_days"] = max(1, min(365, int(cfg.get("lookback_days") or 60)))
+    if isinstance(cfg.get("processed_ids"), list) and len(cfg["processed_ids"]) > 1500:
+        cfg["processed_ids"] = cfg["processed_ids"][-1500:]
+
+    accounts = cfg.get("accounts") or []
+    if accounts:
+        first = accounts[0]
+        cfg["provider"] = first["provider"]
+        cfg["imap_host"] = first["imap_host"]
+        cfg["imap_port"] = first["imap_port"]
+        cfg["email_address"] = first["email_address"]
+        cfg["app_password"] = first["app_password"]
+    else:
+        cfg["email_address"] = ""
+        cfg["app_password"] = ""
+
+    cfg_path = _config_file_path(archive_dir)
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    return cfg
 
 
 def save_email_watcher_config(
     updates: Dict[str, Any],
     archive_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """Update and persist IMAP email watcher configuration."""
+    """Update global watcher settings and optionally upsert an email account."""
     cfg = load_email_watcher_config(archive_dir)
-    provider = str(updates.get("provider") or cfg.get("provider") or "NAVER").upper()
-    if provider in IMAP_PROVIDER_PRESETS:
-        cfg["provider"] = provider
-        preset_host = IMAP_PROVIDER_PRESETS[provider]["host"]
-        if preset_host and not updates.get("imap_host"):
-            cfg["imap_host"] = preset_host
-            cfg["imap_port"] = int(IMAP_PROVIDER_PRESETS[provider]["port"])
 
     for key in (
-        "imap_host",
-        "imap_port",
-        "email_address",
-        "mailbox",
         "auto_poll_enabled",
         "poll_interval_sec",
         "lookback_days",
@@ -200,28 +288,98 @@ def save_email_watcher_config(
         if key in updates and updates[key] is not None:
             cfg[key] = updates[key]
 
-    raw_pw = updates.get("app_password")
-    if raw_pw is not None and str(raw_pw).strip() and str(raw_pw).strip() != "********":
-        cfg["app_password"] = str(raw_pw).strip()
+    if isinstance(updates.get("accounts"), list):
+        existing_by_id = {a["account_id"]: a for a in cfg.get("accounts") or []}
+        new_list: List[Dict[str, Any]] = []
+        for item in updates["accounts"]:
+            if isinstance(item, dict):
+                aid = str(item.get("account_id") or "")
+                norm = _normalize_account_entry(item, existing=existing_by_id.get(aid))
+                if norm:
+                    new_list.append(norm)
+        cfg["accounts"] = new_list
 
-    cfg["imap_port"] = int(cfg.get("imap_port") or 993)
-    cfg["poll_interval_sec"] = max(30, int(cfg.get("poll_interval_sec") or 120))
-    cfg["lookback_days"] = max(1, min(365, int(cfg.get("lookback_days") or 60)))
-    if isinstance(cfg.get("processed_ids"), list) and len(cfg["processed_ids"]) > 1000:
-        cfg["processed_ids"] = cfg["processed_ids"][-1000:]
+    if str(updates.get("email_address") or "").strip():
+        accounts: List[Dict[str, Any]] = list(cfg.get("accounts") or [])
+        target_id = str(updates.get("account_id") or "")
+        target_email = str(updates["email_address"]).strip().lower()
+        matched_idx = -1
+        for idx, acc in enumerate(accounts):
+            if (target_id and acc["account_id"] == target_id) or (
+                acc["email_address"].strip().lower() == target_email
+            ):
+                matched_idx = idx
+                break
+        if matched_idx >= 0:
+            updated_acc = _normalize_account_entry(updates, existing=accounts[matched_idx])
+            if updated_acc:
+                accounts[matched_idx] = updated_acc
+        else:
+            created_acc = _normalize_account_entry(updates)
+            if created_acc:
+                accounts.append(created_acc)
+        cfg["accounts"] = accounts
 
-    cfg_path = _config_file_path(archive_dir)
-    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
-    return cfg
+    return _write_config(cfg, archive_dir)
+
+
+def update_email_account_entry(
+    account_id: str,
+    updates: Dict[str, Any],
+    archive_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Modify fields (enabled, label, password, host, etc.) on a specific email account."""
+    cfg = load_email_watcher_config(archive_dir)
+    accounts: List[Dict[str, Any]] = list(cfg.get("accounts") or [])
+    found = False
+    for idx, acc in enumerate(accounts):
+        if acc["account_id"] == account_id:
+            merged = _normalize_account_entry(updates, existing=acc)
+            if merged:
+                merged["account_id"] = account_id
+                accounts[idx] = merged
+                found = True
+            break
+    if not found:
+        raise KeyError(f"Email account '{account_id}' not found.")
+    cfg["accounts"] = accounts
+    return _write_config(cfg, archive_dir)
+
+
+def delete_email_account_entry(
+    account_id: str,
+    archive_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Remove an email account by account_id."""
+    cfg = load_email_watcher_config(archive_dir)
+    accounts = [a for a in (cfg.get("accounts") or []) if a.get("account_id") != account_id]
+    cfg["accounts"] = accounts
+    return _write_config(cfg, archive_dir)
 
 
 def get_public_email_watcher_config(archive_dir: Optional[Path] = None) -> Dict[str, Any]:
-    """Return email watcher config with password masked for API/Dashboard display."""
+    """Return multi-account email watcher config with passwords masked for API/Dashboard."""
     cfg = load_email_watcher_config(archive_dir)
-    has_pw = bool(str(cfg.get("app_password") or "").strip())
     pub = dict(cfg)
-    pub["has_password"] = has_pw
-    pub["app_password"] = "********" if has_pw else ""
+    masked_accounts: List[Dict[str, Any]] = []
+    any_pw = False
+    enabled_cnt = 0
+    for acc in cfg.get("accounts") or []:
+        c_acc = dict(acc)
+        has_pw = bool(str(c_acc.get("app_password") or "").strip())
+        if has_pw:
+            any_pw = True
+        if c_acc.get("enabled", True):
+            enabled_cnt += 1
+        c_acc["has_password"] = has_pw
+        c_acc["app_password"] = "********" if has_pw else ""
+        masked_accounts.append(c_acc)
+
+    pub["accounts"] = masked_accounts
+    pub["total_accounts_count"] = len(masked_accounts)
+    pub["enabled_accounts_count"] = enabled_cnt
+    pub["has_password"] = any_pw
+    pub["app_password"] = "********" if any_pw else ""
     pub["presets"] = IMAP_PROVIDER_PRESETS
     pub.pop("processed_ids", None)
     return pub
@@ -610,107 +768,171 @@ def sync_imap_order_emails(
     archive_dir: Optional[Path] = None,
     max_messages: int = 80,
     force_rescan: bool = False,
+    account_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Connect to configured IMAP server, fetch order/payment emails, and reconcile."""
+    """Connect to all enabled IMAP accounts (or a single account_id), fetch orders, and reconcile."""
     cfg = load_email_watcher_config(archive_dir)
-    host = str(cfg.get("imap_host") or "").strip()
-    port = int(cfg.get("imap_port") or 993)
-    user = str(cfg.get("email_address") or "").strip()
-    password = str(cfg.get("app_password") or "").strip()
-    mailbox = str(cfg.get("mailbox") or "INBOX").strip() or "INBOX"
+    accounts: List[Dict[str, Any]] = list(cfg.get("accounts") or [])
     lookback_days = int(cfg.get("lookback_days") or 60)
     processed_ids: set[str] = set() if force_rescan else set(cfg.get("processed_ids") or [])
 
-    if not host or not user or not password:
+    if account_id:
+        targets = [a for a in accounts if a.get("account_id") == account_id]
+    else:
+        targets = [a for a in accounts if a.get("enabled", True)]
+
+    valid_targets = [
+        a
+        for a in targets
+        if str(a.get("imap_host") or "").strip()
+        and str(a.get("email_address") or "").strip()
+        and str(a.get("app_password") or "").strip()
+    ]
+    if not valid_targets:
         return {
             "status": "not_configured",
-            "message": "이메일 주소와 IMAP 앱 비밀번호를 먼저 설정해 주세요.",
+            "message": "활성화된 이메일 계정(주소 및 IMAP 앱 비밀번호)을 먼저 등록해 주세요.",
+            "scanned_accounts": 0,
             "scanned_emails": 0,
             "parsed_orders_count": 0,
             "matched_count": 0,
             "updated_tx_ids": [],
+            "account_results": [],
         }
 
     since_dt = (datetime.now() - timedelta(days=lookback_days)).strftime("%d-%b-%Y")
-    scanned_count = 0
+    total_scanned_emails = 0
     all_orders: List[Dict[str, Any]] = []
     new_processed: List[str] = list(processed_ids)
+    account_results: List[Dict[str, Any]] = []
+    success_accounts = 0
+    error_messages: List[str] = []
 
-    try:
-        imap = imaplib.IMAP4_SSL(host, port, timeout=20.0)
+    for acc in valid_targets:
+        aid = str(acc["account_id"])
+        host = str(acc["imap_host"]).strip()
+        port = int(acc.get("imap_port") or 993)
+        user = str(acc["email_address"]).strip()
+        password = str(acc["app_password"]).strip()
+        mailbox = str(acc.get("mailbox") or "INBOX").strip() or "INBOX"
+        acc_scanned = 0
+        acc_orders: List[Dict[str, Any]] = []
+        acc_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
         try:
-            imap.login(user, password)
-            imap.select(mailbox, readonly=True)
-            typ, data = imap.search(None, f"(SINCE {since_dt})")
-            if typ != "OK" or not data or not data[0]:
-                msg_nums: List[bytes] = []
-            else:
-                msg_nums = data[0].split()
+            imap = imaplib.IMAP4_SSL(host, port, timeout=20.0)
+            try:
+                imap.login(user, password)
+                imap.select(mailbox, readonly=True)
+                typ, data = imap.search(None, f"(SINCE {since_dt})")
+                if typ != "OK" or not data or not data[0]:
+                    msg_nums: List[bytes] = []
+                else:
+                    msg_nums = data[0].split()
 
-            recent_nums = list(reversed(msg_nums[-max_messages:]))
-            for num in recent_nums:
-                uid_key = f"{user}:{mailbox}:{num.decode('ascii', errors='ignore')}"
-                if not force_rescan and uid_key in processed_ids:
-                    continue
+                recent_nums = list(reversed(msg_nums[-max_messages:]))
+                for num in recent_nums:
+                    uid_key = f"{user}:{mailbox}:{num.decode('ascii', errors='ignore')}"
+                    if not force_rescan and uid_key in processed_ids:
+                        continue
 
-                typ_h, hdr_data = imap.fetch(
-                    num, "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE MESSAGE-ID)])"
-                )
-                if typ_h != "OK" or not hdr_data:
-                    continue
-                raw_hdr = b""
-                for item in hdr_data:
-                    if isinstance(item, tuple) and len(item) >= 2:
-                        raw_hdr += item[1]
-                hdr_msg = email.message_from_bytes(raw_hdr)
-                subj = _decode_mime_header(hdr_msg.get("Subject"))
-                sender = _decode_mime_header(hdr_msg.get("From"))
-                msg_id = str(hdr_msg.get("Message-ID") or uid_key).strip()
-                if not force_rescan and msg_id in processed_ids:
-                    continue
+                    typ_h, hdr_data = imap.fetch(
+                        num, "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE MESSAGE-ID)])"
+                    )
+                    if typ_h != "OK" or not hdr_data:
+                        continue
+                    raw_hdr = b""
+                    for item in hdr_data:
+                        if isinstance(item, tuple) and len(item) >= 2:
+                            raw_hdr += item[1]
+                    hdr_msg = email.message_from_bytes(raw_hdr)
+                    subj = _decode_mime_header(hdr_msg.get("Subject"))
+                    sender = _decode_mime_header(hdr_msg.get("From"))
+                    raw_mid = str(hdr_msg.get("Message-ID") or "").strip()
+                    msg_id = f"{user}:{raw_mid}" if raw_mid else uid_key
+                    if not force_rescan and msg_id in processed_ids:
+                        continue
 
-                if not _ORDER_EMAIL_SUBJECT_RE.search(f"{subj} {sender}"):
+                    if not _ORDER_EMAIL_SUBJECT_RE.search(f"{subj} {sender}"):
+                        new_processed.append(msg_id)
+                        new_processed.append(uid_key)
+                        continue
+
+                    typ_b, body_data = imap.fetch(num, "(BODY.PEEK[])")
+                    if typ_b != "OK" or not body_data:
+                        continue
+                    raw_eml = b""
+                    for item in body_data:
+                        if isinstance(item, tuple) and len(item) >= 2:
+                            raw_eml += item[1]
+                    if not raw_eml:
+                        continue
+
+                    acc_scanned += 1
+                    extracted = parse_raw_email_bytes_or_text(raw_eml)
+                    acc_orders.extend(extracted)
                     new_processed.append(msg_id)
                     new_processed.append(uid_key)
-                    continue
+            finally:
+                try:
+                    imap.logout()
+                except Exception:
+                    pass
 
-                typ_b, body_data = imap.fetch(num, "(BODY.PEEK[])")
-                if typ_b != "OK" or not body_data:
-                    continue
-                raw_eml = b""
-                for item in body_data:
-                    if isinstance(item, tuple) and len(item) >= 2:
-                        raw_eml += item[1]
-                if not raw_eml:
-                    continue
+            success_accounts += 1
+            total_scanned_emails += acc_scanned
+            all_orders.extend(acc_orders)
+            acc["last_sync_at"] = acc_now
+            acc["last_status"] = "synced"
+            acc["last_message"] = f"스캔 {acc_scanned}통 · 주문 {len(acc_orders)}건 추출"
+            account_results.append(
+                {
+                    "account_id": aid,
+                    "email_address": user,
+                    "status": "synced",
+                    "scanned_emails": acc_scanned,
+                    "parsed_orders_count": len(acc_orders),
+                    "message": acc["last_message"],
+                }
+            )
+        except Exception as exc:
+            err_txt = f"{user} ({host}:{port}) 실패: {exc}"
+            error_messages.append(err_txt)
+            acc["last_sync_at"] = acc_now
+            acc["last_status"] = "error"
+            acc["last_message"] = str(exc)
+            account_results.append(
+                {
+                    "account_id": aid,
+                    "email_address": user,
+                    "status": "error",
+                    "scanned_emails": acc_scanned,
+                    "parsed_orders_count": 0,
+                    "message": err_txt,
+                }
+            )
 
-                scanned_count += 1
-                extracted = parse_raw_email_bytes_or_text(raw_eml)
-                all_orders.extend(extracted)
-                new_processed.append(msg_id)
-                new_processed.append(uid_key)
-        finally:
-            try:
-                imap.logout()
-            except Exception:
-                pass
-    except Exception as exc:
-        err_msg = f"IMAP 연결 또는 메일 수신 실패 ({host}:{port}): {exc}"
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if success_accounts == 0 and error_messages:
+        err_summary = " / ".join(error_messages)
         save_email_watcher_config(
             {
-                "last_sync_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "accounts": accounts,
+                "last_sync_at": now_str,
                 "last_sync_status": "error",
-                "last_sync_message": err_msg,
+                "last_sync_message": f"IMAP 연결 실패: {err_summary}",
             },
             archive_dir=archive_dir,
         )
         return {
             "status": "error",
-            "message": err_msg,
-            "scanned_emails": scanned_count,
+            "message": f"IMAP 연결 실패: {err_summary}",
+            "scanned_accounts": len(valid_targets),
+            "scanned_emails": total_scanned_emails,
             "parsed_orders_count": 0,
             "matched_count": 0,
             "updated_tx_ids": [],
+            "account_results": account_results,
         }
 
     rec_res = reconcile_scraped_ecommerce_orders(
@@ -720,13 +942,16 @@ def sync_imap_order_emails(
         orders_list=all_orders,
     )
     matched = int(rec_res.get("matched_count") or 0)
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     summary_msg = (
-        f"메일 {scanned_count}통 스캔 · 주문내역 {len(all_orders)}건 추출 · "
-        f"전표 {matched}건 매칭 및 거래명세서 자동 작성 완료"
+        f"계정 {success_accounts}/{len(valid_targets)}개 · 메일 {total_scanned_emails}통 스캔 · "
+        f"주문 {len(all_orders)}건 추출 · 전표 {matched}건 매칭 및 거래명세서 작성 완료"
     )
+    if error_messages:
+        summary_msg += f" (일부 계정 오류 {len(error_messages)}건)"
+
     save_email_watcher_config(
         {
+            "accounts": accounts,
             "last_sync_at": now_str,
             "last_sync_status": "synced",
             "last_sync_message": summary_msg,
@@ -739,9 +964,11 @@ def sync_imap_order_emails(
         "status": "synced",
         "message": summary_msg,
         "last_sync_at": now_str,
-        "scanned_emails": scanned_count,
+        "scanned_accounts": success_accounts,
+        "scanned_emails": total_scanned_emails,
         "parsed_orders_count": len(all_orders),
         "matched_count": matched,
         "updated_tx_ids": rec_res.get("updated_tx_ids") or [],
         "generated_statements_count": matched,
+        "account_results": account_results,
     }

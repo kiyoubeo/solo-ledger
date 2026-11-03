@@ -25,11 +25,13 @@ from sololedger.dashboard import (
 )
 from sololedger.db import get_connection, init_db
 from sololedger.email_watcher import (
+    delete_email_account_entry,
     get_public_email_watcher_config,
     ingest_email_order_payload,
     load_email_watcher_config,
     save_email_watcher_config,
     sync_imap_order_emails,
+    update_email_account_entry,
 )
 from sololedger.exporters import generate_tax_accountant_pack
 from sololedger.importers import decode_csv_bytes, import_and_reconcile_hometax_csv
@@ -136,7 +138,7 @@ async def add_private_network_access_header(request: Request, call_next):
     else:
         resp = await call_next(request)
     resp.headers["Access-Control-Allow-Origin"] = "*"
-    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PATCH, OPTIONS"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PATCH, DELETE, OPTIONS"
     resp.headers["Access-Control-Allow-Headers"] = "*"
     resp.headers["Access-Control-Allow-Private-Network"] = "true"
     return resp
@@ -913,23 +915,57 @@ async def update_email_watcher_config_endpoint(
     return out
 
 
+@app.patch("/api/v1/scraper/email-accounts/{account_id}")
+async def patch_email_account_endpoint(
+    account_id: str,
+    payload: Dict[str, Any] = Body(default_factory=dict),
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Toggle enabled state or update settings for a specific registered email account."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    try:
+        update_email_account_entry(account_id, payload if isinstance(payload, dict) else {})
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return get_public_email_watcher_config()
+
+
+@app.delete("/api/v1/scraper/email-accounts/{account_id}")
+async def delete_email_account_endpoint(
+    account_id: str,
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Delete a registered IMAP email account by account_id."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    delete_email_account_entry(account_id)
+    return get_public_email_watcher_config()
+
+
 @app.post("/api/v1/scraper/email-sync")
 async def sync_email_orders_endpoint(
     payload: Dict[str, Any] = Body(default_factory=dict),
     x_api_key: Optional[str] = Header(default=None),
     sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
 ):
-    """Immediately scan the configured IMAP mailbox for order/payment emails and reconcile."""
+    """Immediately scan all enabled IMAP mailboxes (or one account_id) and reconcile."""
     _verify_api_key(x_api_key, sololedger_api_key)
     force = bool(payload.get("force_rescan", False)) if isinstance(payload, dict) else False
     max_msgs = int(payload.get("max_messages", 80)) if isinstance(payload, dict) else 80
+    acc_id = str(payload.get("account_id") or "").strip() if isinstance(payload, dict) else ""
 
     def _run_sync() -> Dict[str, Any]:
         init_db()
         conn = get_connection()
         cur = conn.cursor()
         try:
-            res = sync_imap_order_emails(cur, max_messages=max_msgs, force_rescan=force)
+            res = sync_imap_order_emails(
+                cur,
+                max_messages=max_msgs,
+                force_rescan=force,
+                account_id=acc_id or None,
+            )
             conn.commit()
             return res
         finally:

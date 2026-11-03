@@ -1256,26 +1256,77 @@ def render_dashboard_html(
     </div>
   </div>
 
-  <!-- 이메일 주문내역 실시간 연동 모달 -->
+  <!-- 이메일 주문내역 실시간 연동 모달 (다중 계정 지원) -->
   <div id="email-modal-backdrop" class="modal-backdrop no-print"
        onclick="onEmailBackdropClick(event)">
-    <div class="modal-card" style="max-width:700px;">
+    <div class="modal-card" style="max-width:760px;">
       <div class="modal-header">
-        <strong>📧 이메일 주문·결제내역 실시간 연동 및 거래명세서 자동 작성</strong>
+        <strong>📧 다중 이메일 주문·결제내역 실시간 연동 및 거래명세서 자동 작성</strong>
         <button class="secondary" onclick="closeEmailOrderModal()">닫기 (ESC)</button>
       </div>
+
       <div class="slip-box"
-           style="margin-bottom:12px; font-size:13px; line-height:1.6;
+           style="margin-bottom:10px; font-size:13px; line-height:1.55;
                   border:2px solid #2563eb; background:#eff6ff;">
-        <div style="font-weight:800; color:#1e3a8a; font-size:14px; margin-bottom:6px;">
-          ⚡ [실시간 자동 연동] IMAP 메일함 연결 (쿠팡 · 네이버페이 · 이니시스 · KCP · 토스 등)
+        <div style="display:flex; justify-content:space-between; align-items:center;
+                    flex-wrap:wrap; gap:8px; margin-bottom:8px;">
+          <div style="font-weight:800; color:#1e3a8a; font-size:14px;">
+            📬 연결된 이메일 계정 목록 (네이버 · Gmail · 카카오 · 회사메일 동시 감시)
+          </div>
+          <div style="display:flex; gap:6px; flex-wrap:wrap;">
+            <button onclick="triggerEmailSyncNow(false, '')">
+              🚀 연결된 전체 메일함 즉시 통합 스캔
+            </button>
+            <button class="secondary" onclick="triggerEmailSyncNow(true, '')">
+              🔄 전체 강제 재매칭
+            </button>
+          </div>
         </div>
-        <div style="color:#1e293b; margin-bottom:10px; font-size:12px;">
-          메일함으로 수신되는 <strong>주문확인 / 결제완료 / 구매영수증 / 거래명세서</strong> 메일을
-          실시간으로 감지하여 카드전표의 품목명과 회계계정을 채우고
-          <strong>다품목 전자 거래명세서(VAT 제외·VAT·합계 포함)</strong>를 자동 발급합니다.
+
+        <div id="email-accounts-list"
+             style="background:#ffffff; border:1px solid #cbd5e1; border-radius:6px;
+                    padding:8px; margin-bottom:10px; max-height:190px; overflow-y:auto;">
+          <div style="color:#64748b; font-size:12px;">등록된 이메일 계정을 불러오는 중...</div>
         </div>
+
+        <div style="display:flex; align-items:center; justify-content:space-between;
+                    flex-wrap:wrap; gap:8px; background:#dbeafe; padding:8px 10px;
+                    border-radius:6px; font-size:12px;">
+          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+            <span>스캔 기간(일):</span>
+            <input type="text" id="email-lookback-days" value="60" style="width:54px;" />
+            <span>감지 주기(초):</span>
+            <input type="text" id="email-poll-interval" value="120" style="width:60px;" />
+            <label style="font-weight:700; color:#1e40af; cursor:pointer;">
+              <input type="checkbox" id="email-auto-poll" /> 실시간 자동 감지 ON
+            </label>
+          </div>
+          <button class="secondary" onclick="saveGlobalEmailPollSettings()">
+            💾 실시간 주기 설정 저장
+          </button>
+        </div>
+
+        <div id="email-sync-status"
+             style="margin-top:8px; font-size:12px; font-weight:700; color:#1e40af;"></div>
+      </div>
+
+      <div class="slip-box" style="margin-bottom:10px; font-size:13px; line-height:1.55;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+          <div id="email-form-title" style="font-weight:800; color:#0f172a;">
+            ➕ 새 이메일 계정 추가 (개수 제한 없음)
+          </div>
+          <button class="secondary" style="padding:3px 8px; font-size:11px;"
+                  onclick="resetEmailAccountForm()">입력 초기화</button>
+        </div>
+        <input type="hidden" id="email-editing-id" value="" />
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:8px;">
+          <div>
+            <label style="font-size:11px; font-weight:700; display:block; margin-bottom:3px;">
+              계정 별칭 (구분용 이름)
+            </label>
+            <input type="text" id="email-label"
+                   placeholder="예: 대표 네이버메일 / 법인 Gmail" style="width:100%;" />
+          </div>
           <div>
             <label style="font-size:11px; font-weight:700; display:block; margin-bottom:3px;">
               메일 서비스 선택
@@ -1288,20 +1339,6 @@ def render_dashboard_html(
               <option value="OUTLOOK">Outlook / M365 (outlook.office365.com)</option>
               <option value="CUSTOM">직접 입력 (사내 웹메일 / 기타 IMAP)</option>
             </select>
-          </div>
-          <div style="display:flex; gap:6px;">
-            <div style="flex:2;">
-              <label style="font-size:11px; font-weight:700; display:block; margin-bottom:3px;">
-                IMAP 호스트
-              </label>
-              <input type="text" id="email-imap-host" value="imap.naver.com" style="width:100%;" />
-            </div>
-            <div style="flex:1;">
-              <label style="font-size:11px; font-weight:700; display:block; margin-bottom:3px;">
-                포트(SSL)
-              </label>
-              <input type="text" id="email-imap-port" value="993" style="width:100%;" />
-            </div>
           </div>
           <div>
             <label style="font-size:11px; font-weight:700; display:block; margin-bottom:3px;">
@@ -1319,38 +1356,29 @@ def render_dashboard_html(
           </div>
           <div>
             <label style="font-size:11px; font-weight:700; display:block; margin-bottom:3px;">
-              스캔 기간 (최근 일수)
+              IMAP 호스트
             </label>
-            <input type="text" id="email-lookback-days" value="60" style="width:100%;" />
+            <input type="text" id="email-imap-host" value="imap.naver.com" style="width:100%;" />
           </div>
           <div>
             <label style="font-size:11px; font-weight:700; display:block; margin-bottom:3px;">
-              백그라운드 실시간 감지 주기(초)
+              포트(SSL)
             </label>
-            <div style="display:flex; align-items:center; gap:8px;">
-              <input type="text" id="email-poll-interval" value="120" style="width:80px;" />
-              <label style="font-size:12px; font-weight:700; color:#1e40af; cursor:pointer;">
-                <input type="checkbox" id="email-auto-poll" /> 실시간 자동 감지 ON
-              </label>
-            </div>
+            <input type="text" id="email-imap-port" value="993" style="width:100%;" />
           </div>
         </div>
-        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:10px;">
-          <button id="btn-email-save-sync" onclick="saveAndSyncEmailWatcher(true)">
-            💾 설정 저장 및 지금 즉시 메일함 스캔
-          </button>
-          <button class="secondary" onclick="triggerEmailSyncNow(true)">
-            🔄 전체 기간 다시 스캔 (강제 재매칭)
-          </button>
-          <button class="secondary" onclick="saveAndSyncEmailWatcher(false)">
-            설정만 저장
-          </button>
-        </div>
-        <div id="email-sync-status"
-             style="margin-top:8px; font-size:12px; font-weight:700; color:#1e40af;"></div>
-        <div style="margin-top:6px; font-size:11px; color:#475569;">
-          💡 <strong>IMAP 설정 팁</strong>: 네이버 메일(환경설정 → POP3/IMAP 설정 → IMAP 사용함) /
-          Gmail(Google 계정 → 보안 → 2단계 인증 → 앱 비밀번호 발급)
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+          <span style="font-size:11px; color:#475569;">
+            💡 네이버(환경설정 → POP3/IMAP → IMAP 사용함) · Gmail(Google 계정 → 보안 → 앱 비밀번호)
+          </span>
+          <div style="display:flex; gap:6px;">
+            <button id="btn-email-save-sync" onclick="saveAndSyncEmailWatcher(true)">
+              ➕ 계정 저장 후 즉시 스캔
+            </button>
+            <button class="secondary" onclick="saveAndSyncEmailWatcher(false)">
+              계정만 추가·저장
+            </button>
+          </div>
         </div>
       </div>
 
@@ -1358,7 +1386,7 @@ def render_dashboard_html(
         <div style="font-weight:700; color:#0f172a; margin-bottom:6px;">
           [수동 즉시 매칭] 수신된 주문/결제 메일 본문 붙여넣기 또는 <code>.eml</code> 메일 파일 업로드
         </div>
-        <textarea id="email-paste-input" rows="4"
+        <textarea id="email-paste-input" rows="3"
           style="width:100%; box-sizing:border-box; padding:8px;
                  border:1px solid #cbd5e1; border-radius:6px; font-size:12px;"
           placeholder="이니시스·쿠팡·네이버페이·KCP·토스 결제완료 메일 본문을 복사해 붙여넣으세요..."
@@ -1984,6 +2012,7 @@ def render_dashboard_html(
       OUTLOOK: {{ host: 'outlook.office365.com', port: 993 }},
       CUSTOM: {{ host: '', port: 993 }}
     }};
+    let cachedEmailAccounts = [];
     function onEmailProviderChange() {{
       const prov = document.getElementById('email-provider').value;
       const preset = EMAIL_HOST_MAP[prov];
@@ -1992,26 +2021,98 @@ def render_dashboard_html(
         document.getElementById('email-imap-port').value = preset.port;
       }}
     }}
+    function resetEmailAccountForm() {{
+      document.getElementById('email-editing-id').value = '';
+      document.getElementById('email-form-title').textContent =
+        '➕ 새 이메일 계정 추가 (개수 제한 없음)';
+      document.getElementById('email-label').value = '';
+      document.getElementById('email-provider').value = 'NAVER';
+      document.getElementById('email-imap-host').value = 'imap.naver.com';
+      document.getElementById('email-imap-port').value = 993;
+      document.getElementById('email-address').value = '';
+      document.getElementById('email-app-password').value = '';
+    }}
+    function editEmailAccountByIdx(idx) {{
+      const acc = cachedEmailAccounts[idx];
+      if (!acc) return;
+      document.getElementById('email-editing-id').value = acc.account_id || '';
+      document.getElementById('email-form-title').textContent =
+        '✏️ 이메일 계정 수정 (' + (acc.email_address || '') + ')';
+      document.getElementById('email-label').value = acc.label || '';
+      document.getElementById('email-provider').value = acc.provider || 'CUSTOM';
+      document.getElementById('email-imap-host').value = acc.imap_host || '';
+      document.getElementById('email-imap-port').value = acc.imap_port || 993;
+      document.getElementById('email-address').value = acc.email_address || '';
+      document.getElementById('email-app-password').value = acc.app_password || '';
+    }}
+    function renderEmailAccountsList(cfg) {{
+      const box = document.getElementById('email-accounts-list');
+      cachedEmailAccounts = Array.isArray(cfg.accounts) ? cfg.accounts : [];
+      if (cachedEmailAccounts.length === 0) {{
+        box.innerHTML =
+          '<div style="color:#64748b; font-size:12px; padding:6px;">' +
+          '아직 등록된 이메일 계정이 없습니다. 아래 폼에서 네이버·Gmail·회사메일 등을 추가해 주세요.' +
+          '</div>';
+        return;
+      }}
+      let htmlRows = '';
+      cachedEmailAccounts.forEach((acc, idx) => {{
+        const isOn = acc.enabled !== false;
+        const badgeColor = isOn ? '#dcfce7' : '#f1f5f9';
+        const badgeTxtColor = isOn ? '#166534' : '#64748b';
+        const badgeLabel = isOn ? '감시중 ON' : '일시정지 OFF';
+        const stInfo = acc.last_sync_at
+          ? (acc.last_status === 'error'
+              ? '⚠️ ' + (acc.last_message || '오류')
+              : '✅ ' + acc.last_sync_at + ' · ' + (acc.last_message || '완료'))
+          : '대기중';
+        htmlRows +=
+          '<div style="display:flex; justify-content:space-between; align-items:center; ' +
+          'gap:8px; flex-wrap:wrap; padding:6px 4px; border-bottom:1px solid #f1f5f9;">' +
+          '<div style="font-size:12px;">' +
+          '<span style="background:' + badgeColor + '; color:' + badgeTxtColor + '; ' +
+          'padding:2px 6px; border-radius:4px; font-weight:700; font-size:11px; margin-right:6px;">' +
+          badgeLabel + '</span>' +
+          '<strong>' + (acc.label || acc.provider) + '</strong> · ' +
+          '<code>' + acc.email_address + '</code> ' +
+          '<span style="color:#64748b; font-size:11px;">(' + acc.imap_host + ':' + acc.imap_port + ')</span>' +
+          '<div style="font-size:11px; color:#475569; margin-top:2px;">' + stInfo + '</div>' +
+          '</div>' +
+          '<div style="display:flex; gap:4px; flex-wrap:wrap;">' +
+          '<button class="secondary" style="padding:3px 7px; font-size:11px;" ' +
+          'onclick="triggerEmailSyncNow(false, \'' + acc.account_id + '\')">스캔</button>' +
+          '<button class="secondary" style="padding:3px 7px; font-size:11px;" ' +
+          'onclick="toggleEmailAccount(\'' + acc.account_id + '\', ' + (!isOn) + ')">' +
+          (isOn ? '일시정지' : '켜기') + '</button>' +
+          '<button class="secondary" style="padding:3px 7px; font-size:11px;" ' +
+          'onclick="editEmailAccountByIdx(' + idx + ')">수정</button>' +
+          '<button class="danger" style="padding:3px 7px; font-size:11px;" ' +
+          'onclick="deleteEmailAccount(\'' + acc.account_id + '\')">삭제</button>' +
+          '</div></div>';
+      }});
+      box.innerHTML = htmlRows;
+    }}
+    async function refreshEmailWatcherState() {{
+      const res = await fetch('/api/v1/scraper/email-config');
+      if (!res.ok) return null;
+      const cfg = await res.json();
+      renderEmailAccountsList(cfg);
+      document.getElementById('email-lookback-days').value = cfg.lookback_days || 60;
+      document.getElementById('email-poll-interval').value = cfg.poll_interval_sec || 120;
+      document.getElementById('email-auto-poll').checked = !!cfg.auto_poll_enabled;
+      const st = document.getElementById('email-sync-status');
+      if (cfg.last_sync_at) {{
+        st.textContent = `최근 통합 동기화 (${{cfg.last_sync_at}}): ${{cfg.last_sync_message || ''}}`;
+      }} else {{
+        st.textContent = cfg.last_sync_message || '';
+      }}
+      return cfg;
+    }}
     async function openEmailOrderModal() {{
       document.getElementById('email-modal-backdrop').classList.add('open');
+      resetEmailAccountForm();
       try {{
-        const res = await fetch('/api/v1/scraper/email-config');
-        if (!res.ok) return;
-        const cfg = await res.json();
-        document.getElementById('email-provider').value = cfg.provider || 'NAVER';
-        document.getElementById('email-imap-host').value = cfg.imap_host || 'imap.naver.com';
-        document.getElementById('email-imap-port').value = cfg.imap_port || 993;
-        document.getElementById('email-address').value = cfg.email_address || '';
-        document.getElementById('email-app-password').value = cfg.app_password || '';
-        document.getElementById('email-lookback-days').value = cfg.lookback_days || 60;
-        document.getElementById('email-poll-interval').value = cfg.poll_interval_sec || 120;
-        document.getElementById('email-auto-poll').checked = !!cfg.auto_poll_enabled;
-        const st = document.getElementById('email-sync-status');
-        if (cfg.last_sync_at) {{
-          st.textContent = `최근 동기화 (${{cfg.last_sync_at}}): ${{cfg.last_sync_message || ''}}`;
-        }} else {{
-          st.textContent = cfg.last_sync_message || '';
-        }}
+        await refreshEmailWatcherState();
       }} catch (e) {{}}
     }}
     function closeEmailOrderModal() {{
@@ -2022,20 +2123,66 @@ def render_dashboard_html(
         closeEmailOrderModal();
       }}
     }}
+    async function toggleEmailAccount(accountId, nextEnabled) {{
+      const res = await fetch('/api/v1/scraper/email-accounts/' + encodeURIComponent(accountId), {{
+        method: 'PATCH',
+        headers: API_HEADERS,
+        body: JSON.stringify({{ enabled: !!nextEnabled }})
+      }});
+      if (res.ok) {{
+        const cfg = await res.json();
+        renderEmailAccountsList(cfg);
+      }}
+    }}
+    async function deleteEmailAccount(accountId) {{
+      const res = await fetch('/api/v1/scraper/email-accounts/' + encodeURIComponent(accountId), {{
+        method: 'DELETE',
+        headers: API_HEADERS
+      }});
+      if (res.ok) {{
+        const cfg = await res.json();
+        renderEmailAccountsList(cfg);
+      }}
+    }}
+    async function saveGlobalEmailPollSettings() {{
+      const st = document.getElementById('email-sync-status');
+      const bodyObj = {{
+        lookback_days: parseInt(document.getElementById('email-lookback-days').value || '60', 10),
+        poll_interval_sec: parseInt(document.getElementById('email-poll-interval').value || '120', 10),
+        auto_poll_enabled: document.getElementById('email-auto-poll').checked
+      }};
+      const res = await fetch('/api/v1/scraper/email-config', {{
+        method: 'POST',
+        headers: API_HEADERS,
+        body: JSON.stringify(bodyObj)
+      }});
+      if (res.ok) {{
+        st.style.color = '#15803d';
+        st.textContent = '✅ 실시간 자동 감지 주기 및 스캔 기간 설정이 저장되었습니다.';
+      }}
+    }}
     async function saveAndSyncEmailWatcher(syncNow) {{
       const st = document.getElementById('email-sync-status');
       const btn = document.getElementById('btn-email-save-sync');
+      const addr = document.getElementById('email-address').value.trim();
+      if (!addr) {{
+        st.style.color = '#b91c1c';
+        st.textContent = '⚠️ 추가할 이메일 주소를 입력해 주세요.';
+        return;
+      }}
       btn.disabled = true;
       st.style.color = '#1e40af';
       st.textContent = syncNow
-        ? '⏳ IMAP 메일함에 연결하여 주문·결제 메일을 스캔하고 거래명세서를 작성 중입니다...'
-        : '⏳ 설정을 저장하는 중...';
+        ? '⏳ 계정을 저장하고 연결된 메일함을 스캔하여 거래명세서를 작성 중입니다...'
+        : '⏳ 이메일 계정을 저장하는 중...';
       try {{
         const bodyObj = {{
+          account_id: document.getElementById('email-editing-id').value.trim() || undefined,
+          label: document.getElementById('email-label').value.trim(),
           provider: document.getElementById('email-provider').value,
           imap_host: document.getElementById('email-imap-host').value.trim(),
           imap_port: parseInt(document.getElementById('email-imap-port').value || '993', 10),
-          email_address: document.getElementById('email-address').value.trim(),
+          email_address: addr,
           app_password: document.getElementById('email-app-password').value,
           lookback_days: parseInt(document.getElementById('email-lookback-days').value || '60', 10),
           poll_interval_sec: parseInt(document.getElementById('email-poll-interval').value || '120', 10),
@@ -2049,6 +2196,8 @@ def render_dashboard_html(
         }});
         const data = await res.json();
         btn.disabled = false;
+        renderEmailAccountsList(data);
+        resetEmailAccountForm();
         if (syncNow && data.sync_result) {{
           const sr = data.sync_result;
           if (sr.status === 'synced') {{
@@ -2063,24 +2212,28 @@ def render_dashboard_html(
           }}
         }} else {{
           st.style.color = '#15803d';
-          st.textContent = '✅ 이메일 실시간 연동 설정이 저장되었습니다.';
+          st.textContent =
+            `✅ 이메일 계정이 저장되었습니다 (현재 총 ${{data.total_accounts_count || 1}}개 연결됨).`;
         }}
       }} catch (err) {{
         btn.disabled = false;
         st.style.color = '#b91c1c';
-        st.textContent = '⚠️ 이메일 설정 저장 또는 동기화 중 오류가 발생했습니다.';
+        st.textContent = '⚠️ 이메일 계정 저장 또는 동기화 중 오류가 발생했습니다.';
       }}
     }}
-    async function triggerEmailSyncNow(forceRescan) {{
+    async function triggerEmailSyncNow(forceRescan, accountId) {{
       const st = document.getElementById('email-sync-status');
       st.style.color = '#1e40af';
-      st.textContent = '⏳ 메일함을 전체 스캔하여 주문내역 및 거래명세서를 매칭 중입니다...';
+      st.textContent = accountId
+        ? '⏳ 선택한 이메일 계정의 주문·결제 메일을 스캔 중입니다...'
+        : '⏳ 연결된 모든 활성 이메일 계정을 통합 스캔 중입니다...';
       const res = await fetch('/api/v1/scraper/email-sync', {{
         method: 'POST',
         headers: API_HEADERS,
-        body: JSON.stringify({{ force_rescan: !!forceRescan }})
+        body: JSON.stringify({{ force_rescan: !!forceRescan, account_id: accountId || '' }})
       }});
       const sr = await res.json();
+      await refreshEmailWatcherState();
       if (sr.status === 'synced') {{
         st.style.color = '#15803d';
         st.textContent = `✅ ${{sr.message}}`;

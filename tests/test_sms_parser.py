@@ -506,6 +506,7 @@ def test_import_phone_sms_api_endpoint(client):
             "/api/v1/scraper/email-config",
             headers={"X-API-Key": "test-secret-key"},
             json={
+                "label": "대표 네이버메일",
                 "provider": "NAVER",
                 "email_address": "ceo@naver.com",
                 "app_password": "test-app-password",
@@ -514,11 +515,41 @@ def test_import_phone_sms_api_endpoint(client):
                 "force_rescan": True,
             },
         )
+        cfg_res2 = client.post(
+            "/api/v1/scraper/email-config",
+            headers={"X-API-Key": "test-secret-key"},
+            json={
+                "label": "법인 Gmail",
+                "provider": "GMAIL",
+                "email_address": "corp@gmail.com",
+                "app_password": "gmail-app-password",
+                "sync_now": True,
+                "force_rescan": True,
+            },
+        )
     assert cfg_res.status_code == 200
-    cfg_body = cfg_res.json()
-    assert cfg_body["has_password"] is True
-    assert cfg_body["sync_result"]["status"] == "synced"
-    assert cfg_body["sync_result"]["matched_count"] == 1
+    assert cfg_res2.status_code == 200
+    cfg_body2 = cfg_res2.json()
+    assert cfg_body2["has_password"] is True
+    assert cfg_body2["total_accounts_count"] == 2
+    assert cfg_body2["sync_result"]["status"] == "synced"
+    assert cfg_body2["sync_result"]["scanned_accounts"] == 2
+
+    sec_acc_id = cfg_body2["accounts"][1]["account_id"]
+    toggle_res = client.patch(
+        f"/api/v1/scraper/email-accounts/{sec_acc_id}",
+        headers={"X-API-Key": "test-secret-key"},
+        json={"enabled": False},
+    )
+    assert toggle_res.status_code == 200
+    assert toggle_res.json()["enabled_accounts_count"] == 1
+
+    del_res = client.delete(
+        f"/api/v1/scraper/email-accounts/{sec_acc_id}",
+        headers={"X-API-Key": "test-secret-key"},
+    )
+    assert del_res.status_code == 200
+    assert del_res.json()["total_accounts_count"] == 1
 
 
 
