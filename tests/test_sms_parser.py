@@ -551,6 +551,12 @@ def test_import_phone_sms_api_endpoint(client):
     assert del_res.status_code == 200
     assert del_res.json()["total_accounts_count"] == 1
 
+    # Regression check: ensure dashboard <script> has no broken f-string quote escapes
+    dash_js = dash_html.split("<script>")[1].split("</script>")[0]
+    assert "async function openEmailOrderModal()" in dash_js
+    assert "scanEmailAccountByIdx(" in dash_js
+    assert "'' +" not in dash_js
+
 
 
 

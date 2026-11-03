@@ -2045,6 +2045,29 @@ def render_dashboard_html(
       document.getElementById('email-address').value = acc.email_address || '';
       document.getElementById('email-app-password').value = acc.app_password || '';
     }}
+    function escHtml(val) {{
+      return String(val || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }}
+    function scanEmailAccountByIdx(idx) {{
+      const acc = cachedEmailAccounts[idx];
+      if (!acc) return;
+      triggerEmailSyncNow(false, acc.account_id);
+    }}
+    async function toggleEmailAccountByIdx(idx) {{
+      const acc = cachedEmailAccounts[idx];
+      if (!acc) return;
+      const nextEnabled = !(acc.enabled !== false);
+      await toggleEmailAccount(acc.account_id, nextEnabled);
+    }}
+    async function deleteEmailAccountByIdx(idx) {{
+      const acc = cachedEmailAccounts[idx];
+      if (!acc) return;
+      await deleteEmailAccount(acc.account_id);
+    }}
     function renderEmailAccountsList(cfg) {{
       const box = document.getElementById('email-accounts-list');
       cachedEmailAccounts = Array.isArray(cfg.accounts) ? cfg.accounts : [];
@@ -2063,8 +2086,8 @@ def render_dashboard_html(
         const badgeLabel = isOn ? '감시중 ON' : '일시정지 OFF';
         const stInfo = acc.last_sync_at
           ? (acc.last_status === 'error'
-              ? '⚠️ ' + (acc.last_message || '오류')
-              : '✅ ' + acc.last_sync_at + ' · ' + (acc.last_message || '완료'))
+              ? '⚠️ ' + escHtml(acc.last_message || '오류')
+              : '✅ ' + escHtml(acc.last_sync_at) + ' · ' + escHtml(acc.last_message || '완료'))
           : '대기중';
         htmlRows +=
           '<div style="display:flex; justify-content:space-between; align-items:center; ' +
@@ -2073,21 +2096,22 @@ def render_dashboard_html(
           '<span style="background:' + badgeColor + '; color:' + badgeTxtColor + '; ' +
           'padding:2px 6px; border-radius:4px; font-weight:700; font-size:11px; margin-right:6px;">' +
           badgeLabel + '</span>' +
-          '<strong>' + (acc.label || acc.provider) + '</strong> · ' +
-          '<code>' + acc.email_address + '</code> ' +
-          '<span style="color:#64748b; font-size:11px;">(' + acc.imap_host + ':' + acc.imap_port + ')</span>' +
+          '<strong>' + escHtml(acc.label || acc.provider) + '</strong> · ' +
+          '<code>' + escHtml(acc.email_address) + '</code> ' +
+          '<span style="color:#64748b; font-size:11px;">(' +
+          escHtml(acc.imap_host) + ':' + escHtml(acc.imap_port) + ')</span>' +
           '<div style="font-size:11px; color:#475569; margin-top:2px;">' + stInfo + '</div>' +
           '</div>' +
           '<div style="display:flex; gap:4px; flex-wrap:wrap;">' +
           '<button class="secondary" style="padding:3px 7px; font-size:11px;" ' +
-          'onclick="triggerEmailSyncNow(false, \'' + acc.account_id + '\')">스캔</button>' +
+          'onclick="scanEmailAccountByIdx(' + idx + ')">스캔</button>' +
           '<button class="secondary" style="padding:3px 7px; font-size:11px;" ' +
-          'onclick="toggleEmailAccount(\'' + acc.account_id + '\', ' + (!isOn) + ')">' +
+          'onclick="toggleEmailAccountByIdx(' + idx + ')">' +
           (isOn ? '일시정지' : '켜기') + '</button>' +
           '<button class="secondary" style="padding:3px 7px; font-size:11px;" ' +
           'onclick="editEmailAccountByIdx(' + idx + ')">수정</button>' +
           '<button class="danger" style="padding:3px 7px; font-size:11px;" ' +
-          'onclick="deleteEmailAccount(\'' + acc.account_id + '\')">삭제</button>' +
+          'onclick="deleteEmailAccountByIdx(' + idx + ')">삭제</button>' +
           '</div></div>';
       }});
       box.innerHTML = htmlRows;
@@ -2292,6 +2316,13 @@ def render_dashboard_html(
       }};
       reader.readAsDataURL(file);
     }}
+    document.addEventListener('keydown', function(ev) {{
+      if (ev.key === 'Escape') {{
+        closeReceiptModal();
+        closeCoupangModal();
+        closeEmailOrderModal();
+      }}
+    }});
   </script>
 </body>
 </html>"""

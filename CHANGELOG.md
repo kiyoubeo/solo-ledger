@@ -42,3 +42,4 @@
 | 2026-11-02 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/dashboard.py, src/sololedger/scraper_service.py (+1 files)` | 거래명세서 합계 영역에 VAT 제외 가격, VAT 가격, 합계 가격 명시적 표시 | `PASSED` |
 | 2026-11-02 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/dashboard.py (+3 files)` | 실시간 이메일 주문·결제내역 IMAP 자동 감지 및 웹훅 연동, 전자 거래명세서 자동 작성 구현 | `PASSED` |
 | 2026-11-03 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/dashboard.py (+2 files)` | 다중 이메일 계정(네이버, Gmail, 회사메일 등 무제한) 등록·관리 및 통합 실시간 스캔 지원 | `PASSED` |
+| 2026-11-03 | `fix` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/dashboard.py, tests/test_sms_parser.py` | 대시보드 다중 이메일 연동 모달 스크립트 따옴표 이스케이프 구문 오류 수정 | `PASSED` |
