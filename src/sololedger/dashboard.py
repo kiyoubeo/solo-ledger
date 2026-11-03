@@ -859,6 +859,7 @@ def render_dashboard_html(
     )
 
     tx_rows_html = []
+    stmt_tx_count = 0
     for tx in summary["transactions"]:
         tx_id = tx["tx_id"]
         c_lbl = html.escape(str(tx.get("card_label") or format_card_label(tx["card_last4"])))
@@ -868,16 +869,28 @@ def render_dashboard_html(
         acc_str = html.escape(f"{tx['account_code']} {tx['account_name']}")
         ded_str = html.escape(str(tx["vat_deduction_type"]))
         memo_str = html.escape(str(tx.get("counterparty_info") or "-"))
-        arch_str = html.escape(str(tx.get("archived_file_name") or "-"))
+        raw_arch = str(tx.get("archived_file_name") or "")
+        has_stmt = raw_arch.startswith("거래명세서_")
+        if has_stmt:
+            stmt_tx_count += 1
+        arch_str = html.escape(raw_arch or "-")
         t_dt = html.escape(str(tx["transacted_at"]))
+        stmt_badge = (
+            "<span style='background:#dcfce7; color:#166534; padding:2px 6px; "
+            "border-radius:4px; font-weight:700; font-size:11px;'>📄명세서 완료</span>"
+            if has_stmt
+            else "[📄명세서]"
+        )
         dt_link = (
             f"<a href='javascript:void(0)' class='tx-date-link' "
             f"onclick='openReceiptModal({tx_id})' title='클릭하여 영수증/매출전표 팝업 보기'>{t_dt} 🧾</a>"
-            f" <a href='javascript:void(0)' class='tx-date-link' style='color:#0f766e; font-size:12px;' "
-            f"onclick='openStatementModal({tx_id})' title='클릭하여 거래명세서 보기/발급'>[📄명세서]</a>"
+            f" <a href='javascript:void(0)' class='tx-date-link' "
+            f"style='color:#0f766e; font-size:12px; text-decoration:none;' "
+            f"onclick='openStatementModal({tx_id})' title='클릭하여 거래명세서 보기/발급'>{stmt_badge}</a>"
         )
+        has_stmt_flag = "1" if has_stmt else "0"
         tx_rows_html.append(
-            f"<tr>"
+            f"<tr data-has-stmt='{has_stmt_flag}'>"
             f"<td>#{tx_id}</td>"
             f"<td>{dt_link}</td>"
             f"<td><span class='badge card'>{c_lbl}</span></td>"
@@ -954,9 +967,13 @@ def render_dashboard_html(
     .modal-backdrop {{ display: none; position: fixed; inset: 0; background: rgba(15, 23, 42, 0.58);
                        z-index: 9999; align-items: center; justify-content: center; padding: 16px; }}
     .modal-backdrop.open {{ display: flex; }}
-    .receipt-modal {{ background: #ffffff; width: 100%; max-width: 480px; max-height: 90vh;
-                      overflow-y: auto; border-radius: 12px; box-shadow: 0 20px 40px rgba(0,0,0,0.28);
-                      border: 1px solid #cbd5e1; padding: 22px; }}
+    .receipt-modal, .modal-card {{
+      background: #ffffff; width: 100%; max-width: 480px; max-height: 90vh;
+      overflow-y: auto; border-radius: 12px; box-shadow: 0 20px 40px rgba(0,0,0,0.28);
+      border: 1px solid #cbd5e1; padding: 22px; box-sizing: border-box;
+    }}
+    .modal-header {{ display: flex; justify-content: space-between; align-items: center;
+                     gap: 10px; margin-bottom: 12px; font-size: 16px; }}
     .slip-box {{ background: #fffef7; border: 1px dashed #94a3b8; border-radius: 8px;
                  padding: 16px; font-size: 13px; line-height: 1.65; margin-bottom: 14px; }}
     .slip-title {{ text-align: center; font-size: 16px; font-weight: 800; margin-bottom: 10px;
@@ -981,7 +998,7 @@ def render_dashboard_html(
         padding: 0 !important;
       }}
       body.modal-open .receipt-modal {{
-        max-width: 420px !important;
+        max-width: 560px !important;
         max-height: none !important;
         overflow: visible !important;
         box-shadow: none !important;
@@ -1148,7 +1165,19 @@ def render_dashboard_html(
   </section>
 
   <section class="section">
-    <h2>조회 기간 법인카드 원장 ({s_date} ~ {e_date}, 총 {summary['total_tx_count']}건)</h2>
+    <div style="display:flex; justify-content:space-between; align-items:center;
+                flex-wrap:wrap; gap:8px; margin-bottom:10px;">
+      <h2 style="margin:0;">조회 기간 법인카드 원장 ({s_date} ~ {e_date}, 총 {summary['total_tx_count']}건)</h2>
+      <div class="no-print" style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+        <button id="btn-filter-stmt-only" class="secondary"
+                onclick="toggleStatementRowsFilter({stmt_tx_count})">
+          📄 거래명세서 발급 전표만 보기 ({stmt_tx_count}건)
+        </button>
+        <button class="secondary" onclick="openEmailOrderModal()">
+          📧 이메일 연동 결과 확인
+        </button>
+      </div>
+    </div>
     <table>
       <thead>
         <tr>
@@ -1156,14 +1185,14 @@ def render_dashboard_html(
           <th>부가세</th><th>계정과목</th><th>공제구분</th><th>적요/참석자</th><th>증빙파일명</th>
         </tr>
       </thead>
-      <tbody>
+      <tbody id="main-ledger-tbody">
         {tx_tbody}
       </tbody>
     </table>
   </section>
 
   <div id="receipt-modal-backdrop" class="modal-backdrop" onclick="onBackdropClick(event)">
-    <div class="receipt-modal" style="max-width:540px;">
+    <div class="receipt-modal" style="max-width:640px;">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
         <h3 id="modal-header-title" style="margin:0;">🧾 신용카드 매출전표 / 거래명세서</h3>
         <button class="secondary no-print" onclick="closeReceiptModal()">✕ 닫기</button>
@@ -1259,7 +1288,7 @@ def render_dashboard_html(
   <!-- 이메일 주문내역 실시간 연동 모달 (다중 계정 지원) -->
   <div id="email-modal-backdrop" class="modal-backdrop no-print"
        onclick="onEmailBackdropClick(event)">
-    <div class="modal-card" style="max-width:760px;">
+    <div class="modal-card" style="max-width:820px;">
       <div class="modal-header">
         <strong>📧 다중 이메일 주문·결제내역 실시간 연동 및 거래명세서 자동 작성</strong>
         <button class="secondary" onclick="closeEmailOrderModal()">닫기 (ESC)</button>
@@ -1285,7 +1314,7 @@ def render_dashboard_html(
 
         <div id="email-accounts-list"
              style="background:#ffffff; border:1px solid #cbd5e1; border-radius:6px;
-                    padding:8px; margin-bottom:10px; max-height:190px; overflow-y:auto;">
+                    padding:8px; margin-bottom:10px; max-height:160px; overflow-y:auto;">
           <div style="color:#64748b; font-size:12px;">등록된 이메일 계정을 불러오는 중...</div>
         </div>
 
@@ -1308,6 +1337,28 @@ def render_dashboard_html(
 
         <div id="email-sync-status"
              style="margin-top:8px; font-size:12px; font-weight:700; color:#1e40af;"></div>
+      </div>
+
+      <div class="slip-box"
+           style="margin-bottom:10px; font-size:13px; line-height:1.55;
+                  border:1px solid #16a34a; background:#f0fdf4;">
+        <div style="display:flex; justify-content:space-between; align-items:center;
+                    flex-wrap:wrap; gap:6px; margin-bottom:6px;">
+          <div style="font-weight:800; color:#166534; font-size:13.5px;">
+            📋 이메일·온라인 주문 연동 결과 확인 (거래명세서 자동 작성:
+            <span id="email-matched-count">0</span>건)
+          </div>
+          <span style="font-size:11px; color:#15803d;">
+            각 전표의 <b>[📄 명세서 보기]</b>를 클릭하면 품목·VAT 내역을 바로 확인할 수 있습니다.
+          </span>
+        </div>
+        <div id="email-matched-list"
+             style="background:#ffffff; border:1px solid #bbf7d0; border-radius:6px;
+                    padding:6px; max-height:220px; overflow-y:auto;">
+          <div style="color:#64748b; font-size:12px; padding:6px;">
+            연동된 거래명세서 내역을 불러오는 중...
+          </div>
+        </div>
       </div>
 
       <div class="slip-box" style="margin-bottom:10px; font-size:13px; line-height:1.55;">
@@ -1488,29 +1539,30 @@ def render_dashboard_html(
             const liVat = liTot - liSup;
             totQty += liQty;
             tbodyHtml += '<tr>' +
-              '<td style="border:1px solid #cbd5e1; padding:6px;">' + mdStr + '</td>' +
+              '<td style="border:1px solid #cbd5e1; padding:6px; white-space:nowrap;">' + mdStr + '</td>' +
               '<td style="border:1px solid #cbd5e1; padding:6px;"><strong>' + liName + '</strong></td>' +
-              '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right;">' + liQty + '</td>' +
-              '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right;">' +
+              '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right; white-space:nowrap;">' +
+              liQty + '</td>' +
+              '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right; white-space:nowrap;">' +
               fmt(liSup) + '</td>' +
-              '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right;">' +
+              '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right; white-space:nowrap;">' +
               fmt(liVat) + '</td>' +
-              '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right;"><strong>' +
-              fmt(liTot) + '</strong></td>' +
+              '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right; white-space:nowrap;">' +
+              '<strong>' + fmt(liTot) + '</strong></td>' +
               '</tr>';
           }});
         }} else {{
           totQty = 1;
           tbodyHtml = '<tr>' +
-            '<td style="border:1px solid #cbd5e1; padding:6px;">' + mdStr + '</td>' +
+            '<td style="border:1px solid #cbd5e1; padding:6px; white-space:nowrap;">' + mdStr + '</td>' +
             '<td style="border:1px solid #cbd5e1; padding:6px;"><strong>' + itemVal + '</strong></td>' +
-            '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right;">1</td>' +
-            '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right;">' +
+            '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right; white-space:nowrap;">1</td>' +
+            '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right; white-space:nowrap;">' +
             fmt(supAmt) + '</td>' +
-            '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right;">' +
+            '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right; white-space:nowrap;">' +
             fmt(vatAmt) + '</td>' +
-            '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right;"><strong>' +
-            fmt(totAmt) + '</strong></td>' +
+            '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right; white-space:nowrap;">' +
+            '<strong>' + fmt(totAmt) + '</strong></td>' +
             '</tr>';
         }}
         slipEl.innerHTML =
@@ -1526,21 +1578,26 @@ def render_dashboard_html(
           '<div class="slip-divider"></div>' +
           '<table style="width:100%; border-collapse:collapse; font-size:12px; margin:8px 0;">' +
           '<thead><tr style="background:#eff6ff;">' +
-          '<th style="border:1px solid #cbd5e1; padding:5px;">월/일</th>' +
-          '<th style="border:1px solid #cbd5e1; padding:5px;">품목 및 규격</th>' +
-          '<th style="border:1px solid #cbd5e1; padding:5px; text-align:right;">수량</th>' +
-          '<th style="border:1px solid #cbd5e1; padding:5px; text-align:right;">VAT 제외 가격</th>' +
-          '<th style="border:1px solid #cbd5e1; padding:5px; text-align:right;">VAT 가격</th>' +
-          '<th style="border:1px solid #cbd5e1; padding:5px; text-align:right;">합계 가격</th>' +
+          '<th style="border:1px solid #cbd5e1; padding:5px 6px; white-space:nowrap;">월/일</th>' +
+          '<th style="border:1px solid #cbd5e1; padding:5px 6px;">품목 및 규격</th>' +
+          '<th style="border:1px solid #cbd5e1; padding:5px 6px; text-align:right; white-space:nowrap;">수량</th>' +
+          '<th style="border:1px solid #cbd5e1; padding:5px 6px; text-align:right; white-space:nowrap;">' +
+          'VAT 제외 가격</th>' +
+          '<th style="border:1px solid #cbd5e1; padding:5px 6px; text-align:right; white-space:nowrap;">' +
+          'VAT 가격</th>' +
+          '<th style="border:1px solid #cbd5e1; padding:5px 6px; text-align:right; white-space:nowrap;">' +
+          '합계 가격</th>' +
           '</tr></thead><tbody>' + tbodyHtml + '</tbody>' +
           '<tfoot><tr style="background:#f8fafc; font-weight:700;">' +
           '<td colspan="2" style="border:1px solid #cbd5e1; padding:6px; text-align:center;">합 계</td>' +
-          '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right;">' + totQty + '</td>' +
-          '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right;">' +
+          '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right; white-space:nowrap;">' +
+          totQty + '</td>' +
+          '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right; white-space:nowrap;">' +
           fmt(supAmt) + '</td>' +
-          '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right;">' +
+          '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right; white-space:nowrap;">' +
           fmt(vatAmt) + '</td>' +
-          '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right; color:#1e3a8a;">' +
+          '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right; ' +
+          'color:#1e3a8a; white-space:nowrap;">' +
           fmt(totAmt) + '</td>' +
           '</tr></tfoot></table>' +
           '<div class="slip-row"><span>VAT 제외 가격 (공급가액)</span><strong>' +
@@ -2116,11 +2173,89 @@ def render_dashboard_html(
       }});
       box.innerHTML = htmlRows;
     }}
+    let stmtFilterOnly = false;
+    function toggleStatementRowsFilter(stmtCnt) {{
+      stmtFilterOnly = !stmtFilterOnly;
+      const tbody = document.getElementById('main-ledger-tbody');
+      const btn = document.getElementById('btn-filter-stmt-only');
+      if (tbody) {{
+        const rows = tbody.querySelectorAll('tr[data-has-stmt]');
+        rows.forEach((tr) => {{
+          const hasStmt = tr.getAttribute('data-has-stmt') === '1';
+          tr.style.display = (!stmtFilterOnly || hasStmt) ? '' : 'none';
+        }});
+      }}
+      if (btn) {{
+        btn.className = stmtFilterOnly ? '' : 'secondary';
+        btn.textContent = stmtFilterOnly
+          ? '📋 전체 전표 다시 보기'
+          : ('📄 거래명세서 발급 전표만 보기 (' + (stmtCnt || 0) + '건)');
+      }}
+    }}
+    let cachedEmailMatchedItems = [];
+    async function openMatchedStatementByIdx(idx) {{
+      const item = cachedEmailMatchedItems[idx];
+      if (!item || !item.tx_id) return;
+      closeEmailOrderModal();
+      await openStatementModal(item.tx_id);
+    }}
+    function renderEmailMatchedList(cfg) {{
+      const box = document.getElementById('email-matched-list');
+      const cntEl = document.getElementById('email-matched-count');
+      cachedEmailMatchedItems = Array.isArray(cfg.recent_matched_items)
+        ? cfg.recent_matched_items
+        : [];
+      if (cntEl) {{
+        cntEl.textContent = String(cachedEmailMatchedItems.length);
+      }}
+      if (!box) return;
+      if (cachedEmailMatchedItems.length === 0) {{
+        box.innerHTML =
+          '<div style="color:#64748b; font-size:12px; padding:8px;">' +
+          '아직 자동 작성된 거래명세서가 없습니다. 위 <b>[🚀 연결된 전체 메일함 즉시 통합 스캔]</b>을 실행해 보세요.' +
+          '</div>';
+        return;
+      }}
+      let rows =
+        '<table style="width:100%; border-collapse:collapse; font-size:12px;">' +
+        '<thead><tr style="background:#f0fdf4;">' +
+        '<th style="padding:5px 6px; white-space:nowrap;">전표</th>' +
+        '<th style="padding:5px 6px; white-space:nowrap;">거래일시</th>' +
+        '<th style="padding:5px 6px; white-space:nowrap;">가맹점</th>' +
+        '<th style="padding:5px 6px;">추출 품목명 (거래명세서 내역)</th>' +
+        '<th style="padding:5px 6px; text-align:right; white-space:nowrap;">결제금액</th>' +
+        '<th style="padding:5px 6px; text-align:center; white-space:nowrap;">확인</th>' +
+        '</tr></thead><tbody>';
+      cachedEmailMatchedItems.forEach((it, idx) => {{
+        const amtFmt = Number(it.total_amount || 0).toLocaleString('ko-KR') + '원';
+        const dtShort = escHtml(String(it.transacted_at || '').slice(0, 16));
+        const liCnt = Number(it.line_items_count || 1);
+        const liBadge = liCnt > 1
+          ? (' <span style="background:#dbeafe; color:#1e40af; padding:1px 5px; ' +
+             'border-radius:4px; font-size:10px; font-weight:700;">상세 ' + liCnt + '품목</span>')
+          : '';
+        rows +=
+          '<tr>' +
+          '<td style="padding:5px 6px; white-space:nowrap;"><strong>#' + it.tx_id + '</strong></td>' +
+          '<td style="padding:5px 6px; white-space:nowrap;">' + dtShort + '</td>' +
+          '<td style="padding:5px 6px; white-space:nowrap;">' + escHtml(it.raw_merchant_name) + '</td>' +
+          '<td style="padding:5px 6px;"><strong>' + escHtml(it.item_name) + '</strong>' + liBadge + '</td>' +
+          '<td style="padding:5px 6px; text-align:right; white-space:nowrap;"><strong>' +
+          amtFmt + '</strong></td>' +
+          '<td style="padding:5px 6px; text-align:center; white-space:nowrap;">' +
+          '<button style="padding:3px 8px; font-size:11px; background:#0f766e;" ' +
+          'onclick="openMatchedStatementByIdx(' + idx + ')">📄 명세서 보기</button></td>' +
+          '</tr>';
+      }});
+      rows += '</tbody></table>';
+      box.innerHTML = rows;
+    }}
     async function refreshEmailWatcherState() {{
       const res = await fetch('/api/v1/scraper/email-config');
       if (!res.ok) return null;
       const cfg = await res.json();
       renderEmailAccountsList(cfg);
+      renderEmailMatchedList(cfg);
       document.getElementById('email-lookback-days').value = cfg.lookback_days || 60;
       document.getElementById('email-poll-interval').value = cfg.poll_interval_sec || 120;
       document.getElementById('email-auto-poll').checked = !!cfg.auto_poll_enabled;
@@ -2221,6 +2356,7 @@ def render_dashboard_html(
         const data = await res.json();
         btn.disabled = false;
         renderEmailAccountsList(data);
+        renderEmailMatchedList(data);
         resetEmailAccountForm();
         if (syncNow && data.sync_result) {{
           const sr = data.sync_result;

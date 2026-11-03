@@ -878,7 +878,13 @@ async def coupang_auto_crawl_endpoint(
 @app.get("/api/v1/scraper/email-config")
 async def get_email_watcher_config_endpoint():
     """Return current IMAP email watcher configuration (with password masked) and sync status."""
-    return get_public_email_watcher_config()
+    init_db()
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        return get_public_email_watcher_config(cursor=cur)
+    finally:
+        conn.close()
 
 
 @app.post("/api/v1/scraper/email-config")
@@ -909,7 +915,13 @@ async def update_email_watcher_config_endpoint(
 
         sync_result = await asyncio.to_thread(_run_sync)
 
-    out = get_public_email_watcher_config()
+    init_db()
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        out = get_public_email_watcher_config(cursor=cur)
+    finally:
+        conn.close()
     if sync_result is not None:
         out["sync_result"] = sync_result
     return out
@@ -928,7 +940,13 @@ async def patch_email_account_endpoint(
         update_email_account_entry(account_id, payload if isinstance(payload, dict) else {})
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return get_public_email_watcher_config()
+    init_db()
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        return get_public_email_watcher_config(cursor=cur)
+    finally:
+        conn.close()
 
 
 @app.delete("/api/v1/scraper/email-accounts/{account_id}")
@@ -940,7 +958,13 @@ async def delete_email_account_endpoint(
     """Delete a registered IMAP email account by account_id."""
     _verify_api_key(x_api_key, sololedger_api_key)
     delete_email_account_entry(account_id)
-    return get_public_email_watcher_config()
+    init_db()
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        return get_public_email_watcher_config(cursor=cur)
+    finally:
+        conn.close()
 
 
 @app.post("/api/v1/scraper/email-sync")
@@ -952,7 +976,7 @@ async def sync_email_orders_endpoint(
     """Immediately scan all enabled IMAP mailboxes (or one account_id) and reconcile."""
     _verify_api_key(x_api_key, sololedger_api_key)
     force = bool(payload.get("force_rescan", False)) if isinstance(payload, dict) else False
-    max_msgs = int(payload.get("max_messages", 80)) if isinstance(payload, dict) else 80
+    max_msgs = int(payload.get("max_messages", 600)) if isinstance(payload, dict) else 600
     acc_id = str(payload.get("account_id") or "").strip() if isinstance(payload, dict) else ""
 
     def _run_sync() -> Dict[str, Any]:

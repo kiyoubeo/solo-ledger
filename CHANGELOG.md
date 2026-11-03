@@ -44,3 +44,4 @@
 | 2026-11-03 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/dashboard.py (+2 files)` | 다중 이메일 계정(네이버, Gmail, 회사메일 등 무제한) 등록·관리 및 통합 실시간 스캔 지원 | `PASSED` |
 | 2026-11-03 | `fix` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/dashboard.py, tests/test_sms_parser.py` | 대시보드 다중 이메일 연동 모달 스크립트 따옴표 이스케이프 구문 오류 수정 | `PASSED` |
 | 2026-11-03 | `fix` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/email_watcher.py, tests/test_sms_parser.py` | Gmail 16자리 앱 비밀번호 공백 자동 제거 및 IMAP 인증 오류 한국어 안내 보강 | `PASSED` |
+| 2026-11-03 | `fix` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/dashboard.py (+3 files)` | 이메일 주문 파서 중복 품목 제거 및 연동 결과 확인 UI 추가 | `PASSED` |

@@ -555,7 +555,101 @@ def test_import_phone_sms_api_endpoint(client):
     dash_js = dash_html.split("<script>")[1].split("</script>")[0]
     assert "async function openEmailOrderModal()" in dash_js
     assert "scanEmailAccountByIdx(" in dash_js
+    assert "renderEmailMatchedList(" in dash_js
+    assert "openMatchedStatementByIdx(" in dash_js
+    assert "toggleStatementRowsFilter(" in dash_js
     assert "'' +" not in dash_js
+
+
+def test_email_parser_no_duplicate_pg_rows_coupang_table_and_offline_filter(client):
+    """Ensure EasyPay 1-item email never emits 3x duplicate rows, Coupang table prorates, and offline skips."""
+    from sololedger.email_watcher import extract_orders_from_email_content
+
+    # 1. EasyPay PG email with '이지페이 결제내역' and '결제하신 내역입니다.' header rows
+    easypay_html = (
+        "<table>"
+        "<tr><th>이지페이 결제내역</th><td>김*범님, 쿠팡(주)에서 2026/11/01 21:38에 결제하신 내역입니다.</td></tr>"
+        "<tr><th>구매상점명</th><td>쿠팡(주)</td></tr>"
+        "<tr><th>상품명</th><td>이롬 황성주 박사의 고단백 두유 플레인 1</td></tr>"
+        "<tr><th>결제금액</th><td>12,170원</td></tr>"
+        "<tr><th>승인번호</th><td>30001964</td></tr>"
+        "</table>"
+    )
+    ep_orders = extract_orders_from_email_content(
+        subject="[한국정보통신] 김*범님의 결제내역입니다.",
+        date_str="Sun, 01 Nov 2026 21:38:10 +0900",
+        body_html=easypay_html,
+    )
+    assert len(ep_orders) == 1
+    assert ep_orders[0]["상품명"] == "이롬 황성주 박사의 고단백 두유 플레인 1"
+    assert len(ep_orders[0]["품목내역"]) == 1
+    assert ep_orders[0]["품목내역"][0]["item"] == "이롬 황성주 박사의 고단백 두유 플레인 1"
+
+    # 2. Coupang multi-item order confirmation email with coupon/card discount prorating
+    coupang_mail_html = (
+        "<table>"
+        "<tr><th>구매 상세내역</th><th>쿠팡가</th><th>수량</th>"
+        "<th>구매금액</th><th>판매자</th></tr>"
+        "<tr><td>나랑드사이다 제로 500ml, 24개</td><td>15,900원</td><td>1</td>"
+        "<td>15,900원</td><td>쿠팡(주)</td></tr>"
+        "<tr><td>부케가르니 나드 샴푸 1000ml, 2개</td><td>19,800원</td><td>1</td>"
+        "<td>19,800원</td><td>쿠팡(주)</td></tr>"
+        "</table>"
+        "<table><tr><th>총 결제금액</th><td>33,700원</td></tr></table>"
+    )
+    cp_orders = extract_orders_from_email_content(
+        subject="[쿠팡] 김*범님 주문하신 내역을 확인해주세요.",
+        date_str="Sun, 01 Nov 2026 03:45:00 +0900",
+        body_html=coupang_mail_html,
+    )
+    assert len(cp_orders) == 1
+    assert cp_orders[0]["결제금액"] == 33700
+    assert len(cp_orders[0]["품목내역"]) == 2
+    assert sum(li["price"] for li in cp_orders[0]["품목내역"]) == 33700
+    assert cp_orders[0]["품목내역"][0]["item"] == "나랑드사이다 제로 500ml, 24개"
+
+    # 3. NaverPay offline point/payment notification without product name must return 0 orders
+    offline_naver_html = (
+        "<div>김*범님, 결제하신 내역을 안내해드립니다.</div>"
+        "<div>결제일시 : 2026-10-30 21:07:00</div>"
+        "<div>결제금액 : 28,400원</div>"
+        "<div>상세 내역은 페이홈 &gt; 결제내역 &gt; 오프라인 에서 확인하실 수 있습니다.</div>"
+    )
+    off_orders = extract_orders_from_email_content(
+        subject="[네이버페이] 결제하신 내역을 안내해드립니다.",
+        date_str="Fri, 30 Oct 2026 21:07:05 +0900",
+        body_html=offline_naver_html,
+    )
+    assert off_orders == []
+
+    # 4. Ingest KB card row + EasyPay webhook and verify email-config exposes recent_matched_items
+    kb_single_csv = (
+        "이용일,이용시간,이용고객명,이용카드명,이용하신곳,국내이용금액(원),결제방법,승인번호\n"
+        "2026-11-01,21:38,김영범,(신) 쿠팡 와우 카드,쿠팡(쿠페이),12170,일시불,30001964\n"
+    )
+    client.post(
+        "/api/v1/scraper/ingest",
+        headers={"X-API-Key": "test-secret-key"},
+        json={"portal": "KB", "raw_content": kb_single_csv, "auto_generate_slips": True},
+    )
+    wh_res = client.post(
+        "/api/v1/scraper/email-webhook",
+        headers={"X-API-Key": "test-secret-key"},
+        json={"raw_content": easypay_html, "subject": "[한국정보통신] 결제내역"},
+    )
+    assert wh_res.status_code == 200
+    wh_body = wh_res.json()
+    assert wh_body["matched_count"] == 1
+    matched_tx_id = wh_body["updated_tx_ids"][0]
+
+    rec_json = client.get(f"/api/v1/transactions/{matched_tx_id}/receipt").json()
+    assert len(rec_json["line_items"]) == 1
+    assert rec_json["counterparty_info"] == "이롬 황성주 박사의 고단백 두유 플레인 1"
+
+    cfg_json = client.get("/api/v1/scraper/email-config").json()
+    assert cfg_json["recent_matched_count"] >= 1
+    assert any(it["tx_id"] == matched_tx_id for it in cfg_json["recent_matched_items"])
+
 
 
 

@@ -1103,6 +1103,56 @@ def auto_crawl_coupang_orders(
     return outcome
 
 
+_ONLINE_OR_PG_MERCHANT_KEYWORDS = (
+    "쿠팡",
+    "쿠페이",
+    "네이버",
+    "카카오",
+    "이니시스",
+    "케이지이니시스",
+    "토스",
+    "케이씨피",
+    "kcp",
+    "나이스",
+    "다날",
+    "페이코",
+    "이지페이",
+    "한국정보통신",
+    "kicc",
+    "모빌리언스",
+    "스마트로",
+    "갤럭시아",
+    "세틀뱅크",
+    "11번가",
+    "지마켓",
+    "옥션",
+    "무신사",
+    "컬리",
+    "ssg",
+    "신세계",
+    "오늘의집",
+    "우아한형제들",
+    "배달의민족",
+    "요기요",
+    "교보문고",
+    "예스24",
+    "알라딘",
+    "배틀넷",
+    "battle",
+    "블리자드",
+    "google",
+    "apple",
+    "steam",
+    "아마존",
+    "알리익스프레스",
+    "테무",
+)
+
+
+def _norm_merchant_token(name: str) -> str:
+    return re.sub(r"\(주\)|㈜|주식회사|\(유\)|유한회사|[\s\-_()\[\]]+", "", str(name or "")).lower()
+
+
 def reconcile_scraped_ecommerce_orders(
     cursor: sqlite3.Cursor,
     raw_content: str,
@@ -1112,11 +1162,17 @@ def reconcile_scraped_ecommerce_orders(
     """Match scraped Coupang / NaverPay / KakaoPay / PG order items against card transactions."""
     content = (raw_content or "").strip()
     if not content and not orders_list:
-        return {"status": "empty", "matched_count": 0, "updated_tx_ids": []}
+        return {
+            "status": "empty",
+            "matched_count": 0,
+            "updated_tx_ids": [],
+            "matched_items": [],
+        }
 
     order_rows = orders_list if orders_list is not None else extract_coupang_orders_from_content(content)
 
     updated_tx_ids: List[int] = []
+    matched_items: List[Dict[str, Any]] = []
     used_tx_ids: set[int] = set()
     for row in order_rows:
         raw_dt = _pick_col(
@@ -1139,6 +1195,7 @@ def reconcile_scraped_ecommerce_orders(
 
         shop_name = str(row.get("상점명") or row.get("가맹점명") or "").strip()
         app_no = str(row.get("승인번호") or "").strip()
+        norm_shop = _norm_merchant_token(shop_name)
 
         cursor.execute(
             """
@@ -1176,7 +1233,28 @@ def reconcile_scraped_ecommerce_orders(
             (amount, date_prefix, app_no, app_no, date_prefix),
         )
         candidates = cursor.fetchall()
-        tx_row = next((c for c in candidates if int(c["tx_id"]) not in used_tx_ids), None)
+        tx_row = None
+        for cand in candidates:
+            cid = int(cand["tx_id"])
+            if cid in used_tx_ids:
+                continue
+            cand_merch = str(cand["raw_merchant_name"] or "")
+            cand_merch_low = cand_merch.lower()
+            norm_cand = _norm_merchant_token(cand_merch)
+            cand_app = str(cand["approval_no"] or "").strip()
+            is_app_match = bool(app_no and cand_app == app_no)
+            is_shop_match = bool(
+                norm_shop
+                and norm_cand
+                and (norm_shop in norm_cand or norm_cand in norm_shop)
+            )
+            is_online_or_unclassified = (
+                str(cand["account_code"] or "") == "999"
+                or any(kw in cand_merch_low for kw in _ONLINE_OR_PG_MERCHANT_KEYWORDS)
+            )
+            if is_app_match or is_shop_match or is_online_or_unclassified:
+                tx_row = cand
+                break
         if tx_row is None:
             continue
 
@@ -1184,12 +1262,35 @@ def reconcile_scraped_ecommerce_orders(
         used_tx_ids.add(tx_id)
         final_item_name = item_name
         if shop_name and shop_name not in final_item_name:
-            final_item_name = f"[{shop_name}] {final_item_name}"
+            norm_tx_merch = _norm_merchant_token(str(tx_row["raw_merchant_name"] or ""))
+            if norm_shop and norm_shop not in norm_tx_merch and norm_tx_merch not in norm_shop:
+                final_item_name = f"[{shop_name}] {final_item_name}"
 
         raw_lines = row.get("품목내역") or row.get("line_items")
         row_line_items = raw_lines if isinstance(raw_lines, list) else None
 
-        generate_electronic_statement_for_tx(
+        # Prevent truncated PG 1-liners ('...포함 총 N') from overwriting an existing multi-item statement
+        if (not row_line_items or len(row_line_items) <= 1) and re.search(
+            r"포함\s*총\s*\d+", final_item_name
+        ):
+            cursor.execute(
+                """
+                SELECT line_items_json FROM receipt_ocr_metadata
+                WHERE tx_id = ? AND source_channel = 'STATEMENT'
+                ORDER BY receipt_id DESC LIMIT 1
+                """,
+                (tx_id,),
+            )
+            prev_stmt = cursor.fetchone()
+            if prev_stmt and prev_stmt["line_items_json"]:
+                try:
+                    prev_lines = json.loads(str(prev_stmt["line_items_json"]))
+                    if isinstance(prev_lines, list) and len(prev_lines) >= 2:
+                        continue
+                except Exception:
+                    pass
+
+        stmt_res = generate_electronic_statement_for_tx(
             cursor,
             tx_id=tx_id,
             item_name=final_item_name,
@@ -1197,12 +1298,27 @@ def reconcile_scraped_ecommerce_orders(
             archive_dir=archive_dir,
         )
         updated_tx_ids.append(tx_id)
+        matched_items.append(
+            {
+                "tx_id": tx_id,
+                "transacted_at": str(tx_row["transacted_at"]),
+                "card_label": format_card_label(str(tx_row["card_last4"] or "0000")),
+                "raw_merchant_name": str(tx_row["raw_merchant_name"]),
+                "item_name": stmt_res["item_name"],
+                "line_items_count": len(stmt_res.get("line_items") or []),
+                "total_amount": int(tx_row["total_amount"]),
+                "account_code": stmt_res["account_code"],
+                "account_name": stmt_res["account_name"],
+                "archived_file_name": stmt_res["archived_file_name"],
+            }
+        )
 
     return {
         "status": "matched",
         "parsed_orders_count": len(order_rows),
         "matched_count": len(updated_tx_ids),
         "updated_tx_ids": updated_tx_ids,
+        "matched_items": matched_items,
     }
 
 
@@ -1356,7 +1472,7 @@ def render_electronic_statement_html(
     table {{ width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 12px; }}
     th, td {{ border: 1px solid #94a3b8; padding: 7px 8px; text-align: left; }}
     th {{ background: #eff6ff; color: #1e3a8a; font-weight: 700; width: 22%; }}
-    td.num, th.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
+    td.num, th.num {{ text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }}
     .tot-bar {{ background: #eff6ff; border: 1px solid #1e3a8a; padding: 10px 14px;
                 display: flex; justify-content: space-between; font-weight: 800;
                 font-size: 15px; color: #1e3a8a; margin-bottom: 12px; }}
