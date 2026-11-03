@@ -651,6 +651,184 @@ def test_email_parser_no_duplicate_pg_rows_coupang_table_and_offline_filter(clie
     assert any(it["tx_id"] == matched_tx_id for it in cfg_json["recent_matched_items"])
 
 
+def test_email_order_auto_creates_future_tx_merges_companion_and_deduplicates_csv(
+    client, monkeypatch
+):
+    """Verify Nov 3 email orders newer than latest CSV auto-create 1 merged tx, rescan works, and CSV merges."""
+    import email.header
+    from email.message import EmailMessage
+
+    import sololedger.email_watcher as ew_mod
+
+    # 1. Seed Nov 1 KB Card CSV so latest_card_statement_date == '2026-11-01' and card '8691' exists
+    kb_nov1_csv = (
+        "이용일,이용시간,이용고객명,이용카드명,이용하신곳,국내이용금액(원),결제방법,승인번호\n"
+        "2026-11-01,21:38,김영범,(신) 쿠팡 와우 카드 8691,쿠팡(쿠페이),12170,일시불,30001964\n"
+    )
+    client.post(
+        "/api/v1/scraper/ingest",
+        headers={"X-API-Key": "test-secret-key"},
+        json={"portal": "KB", "raw_content": kb_nov1_csv, "auto_generate_slips": True},
+    )
+
+    def _make_html_eml(msg_id: str, subj: str, sender: str, dt_hdr: str, html_body: str) -> bytes:
+        m = EmailMessage()
+        m["Message-ID"] = msg_id
+        m["Subject"] = str(email.header.Header(subj, "utf-8"))
+        m["From"] = sender
+        m["Date"] = dt_hdr
+        m.set_content(html_body, subtype="html", charset="utf-8")
+        return m.as_bytes()
+
+    eml_coupang = _make_html_eml(
+        "<cp-nov3@e.coupang.com>",
+        "[쿠팡] 김*범님 주문하신 내역을 확인해주세요.",
+        "쿠팡 <noreply@e.coupang.com>",
+        "Tue, 03 Nov 2026 10:40:51 +0900",
+        (
+            "<table>"
+            "<tr><th>구매 상세내역</th><th>쿠팡가</th><th>수량</th><th>구매금액</th><th>판매자</th></tr>"
+            "<tr><td>엄마의선택 베이킹소다 &amp; 구연산 함유 주방세제 레몬향 리필, 1개, 1.2L</td>"
+            "<td>3,200원</td><td>1</td><td>3,200원</td><td>쿠팡(주)</td></tr>"
+            "</table>"
+            "<table><tr><th>총 결제금액</th><td>3,100원</td></tr></table>"
+        ),
+    )
+    eml_easypay = _make_html_eml(
+        "<ep-nov3@easypay.co.kr>",
+        "김*범님, 쿠팡(주)에서 [신용카드]결제하신 내역입니다.",
+        "한국정보통신 KICC <easypay_noreturn@easypay.co.kr>",
+        "Tue, 03 Nov 2026 10:40:47 +0900",
+        (
+            "<table>"
+            "<tr><th>상호</th><td>쿠팡(주)</td></tr>"
+            "<tr><th>상품명</th><td>엄마의선택 베이킹소다 구연산 함유 주방</td></tr>"
+            "<tr><th>결제일시</th><td>2026/11/03 10:40</td></tr>"
+            "<tr><th>결제수단</th><td>신용카드</td></tr>"
+            "<tr><th>결제기관</th><td>국민</td></tr>"
+            "<tr><th>승인번호</th><td>30001975</td></tr>"
+            "<tr><th>상품금액</th><td>3,100원</td></tr>"
+            "</table>"
+        ),
+    )
+    eml_cancel = _make_html_eml(
+        "<ep-cancel@easypay.co.kr>",
+        "김*범님, 쿠팡(주)에서 [신용카드]취소하신 내역입니다.",
+        "한국정보통신 KICC <easypay_noreturn@easypay.co.kr>",
+        "Tue, 03 Nov 2026 11:00:00 +0900",
+        (
+            "<table>"
+            "<tr><th>상호</th><td>쿠팡(주)</td></tr>"
+            "<tr><th>상품명</th><td>취소테스트상품</td></tr>"
+            "<tr><th>결제일시</th><td>2026/11/03 11:00</td></tr>"
+            "<tr><th>승인번호</th><td>30009999</td></tr>"
+            "<tr><th>상품금액</th><td>9,900원</td></tr>"
+            "</table>"
+        ),
+    )
+    fake_mailbox = {b"1": eml_coupang, b"2": eml_easypay, b"3": eml_cancel}
+
+    class _FakeImap:
+        def __init__(self, host, port, timeout=25.0):
+            self.host = host
+
+        def login(self, user, password):
+            return ("OK", [b"Logged in"])
+
+        def select(self, mailbox, readonly=True):
+            return ("OK", [b"3"])
+
+        def search(self, charset, criteria):
+            return ("OK", [b"1 2 3"])
+
+        def fetch(self, seq_set, query):
+            nums = seq_set.split(b",")
+            out = []
+            for n in nums:
+                raw = fake_mailbox[n]
+                out.append((n + b" (BODY[] {" + str(len(raw)).encode() + b"}", raw))
+                out.append(b")")
+            return ("OK", out)
+
+        def logout(self):
+            return ("BYE", [b""])
+
+    monkeypatch.setattr(ew_mod.imaplib, "IMAP4_SSL", _FakeImap)
+
+    # Register Gmail account
+    client.post(
+        "/api/v1/scraper/email-config",
+        headers={"X-API-Key": "test-secret-key"},
+        json={
+            "provider": "GMAIL",
+            "email_address": "corp@gmail.com",
+            "app_password": "abcd efgh ijkl mnop",
+            "sync_now": False,
+        },
+    )
+
+    # 2. First manual scan: companion Nov 3 emails fuse into 1 auto-created transaction
+    sync1 = client.post(
+        "/api/v1/scraper/email-sync",
+        headers={"X-API-Key": "test-secret-key"},
+        json={"force_rescan": False},
+    ).json()
+    assert sync1["status"] == "synced"
+    assert sync1["created_count"] == 1
+    assert sync1["matched_count"] == 1
+    created_tx_id = sync1["created_tx_ids"][0]
+
+    rec1 = client.get(f"/api/v1/transactions/{created_tx_id}/receipt").json()
+    assert rec1["transacted_at"] == "2026-11-03 10:40:00"
+    assert rec1["total_amount"] == 3100
+    assert rec1["card_last4"] == "8691"
+    assert rec1["approval_no"] == "30001975"
+    assert rec1["raw_merchant_name"] == "쿠팡(쿠페이)"
+    assert (
+        rec1["counterparty_info"]
+        == "엄마의선택 베이킹소다 & 구연산 함유 주방세제 레몬향 리필, 1개, 1.2L"
+    )
+    assert len(rec1["line_items"]) == 1
+
+    # 3. Second manual [스캔] click: recent window is still scanned (not 0), 0 duplicates created
+    sync2 = client.post(
+        "/api/v1/scraper/email-sync",
+        headers={"X-API-Key": "test-secret-key"},
+        json={"force_rescan": False},
+    ).json()
+    assert sync2["status"] == "synced"
+    assert sync2["scanned_emails"] == 2
+    assert sync2["created_count"] == 0
+    assert sync2["newly_stated_count"] == 0
+
+    # 4. Subsequent KB Card CSV upload for Nov 3 merges into created_tx_id via STAGE_1_APPROVAL_NO
+    kb_nov3_csv = (
+        "이용일,이용시간,이용고객명,이용카드명,이용하신곳,국내이용금액(원),결제방법,승인번호\n"
+        "2026-11-03,10:40,김영범,(신) 쿠팡 와우 카드 8691,쿠팡(쿠페이),3100,일시불,30001975\n"
+    )
+    ing_res = client.post(
+        "/api/v1/scraper/ingest",
+        headers={"X-API-Key": "test-secret-key"},
+        json={"portal": "KB", "raw_content": kb_nov3_csv, "auto_generate_slips": True},
+    ).json()
+    assert ing_res["stage_breakdown"].get("STAGE_1_APPROVAL_NO") == 1
+
+    dash_summary = client.get(
+        "/api/v1/dashboard/summary?year_month=ALL",
+        headers={"X-API-Key": "test-secret-key"},
+    ).json()
+    nov3_txs = [
+        t for t in dash_summary["transactions"] if str(t["transacted_at"]).startswith("2026-11-03")
+    ]
+    assert len(nov3_txs) == 1
+    assert nov3_txs[0]["tx_id"] == created_tx_id
+    assert (
+        nov3_txs[0]["counterparty_info"]
+        == "엄마의선택 베이킹소다 & 구연산 함유 주방세제 레몬향 리필, 1개, 1.2L"
+    )
+
+
+
 
 
 

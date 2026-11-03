@@ -69,10 +69,15 @@ _ORDER_EMAIL_SUBJECT_RE = re.compile(
     re.IGNORECASE,
 )
 
+_CANCELED_EMAIL_SUBJECT_RE = re.compile(
+    r"(부분취소|결제취소|주문취소|승인취소|취소하신\s*내역|취소되었|취소\s*내역|취소\s*안내)",
+    re.IGNORECASE,
+)
+
 _IGNORE_EMAIL_SUBJECT_RE = re.compile(
     r"(\(광고\)|\[광고\]|광고성\s*정보|수신동의|로그인\s*되었|새로운\s*기기|새로운\s*환경|"
-    r"약관\s*개정|회원\s*등급|인증서\s*개인정보|부분취소|결제취소|주문취소|"
-    r"혜택이\s*곧\s*종료|비밀번호\s*변경)",
+    r"약관\s*개정|회원\s*등급|인증서\s*개인정보|부분취소|결제취소|주문취소|승인취소|"
+    r"취소하신\s*내역|취소되었|취소\s*내역|취소\s*안내|혜택이\s*곧\s*종료|비밀번호\s*변경)",
     re.IGNORECASE,
 )
 
@@ -89,9 +94,10 @@ _NOISE_PRODUCT_RE = re.compile(
     r"이지페이\s*결제내역|결제\s*내역|주문\s*내역|구매\s*내역|구매\s*상세내역|"
     r"결제\s*정보|상점\s*정보|주문\s*정보|배송\s*정보|영수증\s*출력|english\s*receipt|"
     r"쿠팡가|쿠팡|쿠팡\(주\)|쿠팡㈜|로켓배송.*|판매자배송.*|새벽배송.*|무료배송|"
-    r"수량|구매금액|판매자|상품\s*가격|할인금액|배송비|총\s*결제금액|총결제금액|"
+    r"수량|수량\s*:.*|구매금액|판매자|상품\s*가격|총\s*상품\s*금액|총\s*할인\s*금액|"
+    r"할인\s*금액|할인금액|배송비|총\s*결제금액|총결제금액|"
     r".*결제하신\s*내역.*|.*주문하신\s*(구매)?내역.*|.*안내해\s*드립니다.*|"
-    r".*구매\s*품목$"
+    r".*취소하신\s*내역.*|.*취소되었습니다.*|.*구매\s*품목$"
     r")$",
     re.IGNORECASE,
 )
@@ -169,6 +175,19 @@ _KV_APPROVAL_KEYS = (
     "승인번호",
     "카드승인번호",
     "approval",
+)
+_KV_CARD_KEYS = (
+    "결제기관",
+    "카드사",
+    "발급사",
+    "결제카드",
+    "카드명",
+    "카드종류",
+)
+_KV_PAY_METHOD_KEYS = (
+    "결제수단",
+    "결제방식",
+    "지불수단",
 )
 
 
@@ -431,7 +450,7 @@ def list_statement_matched_transactions(
         """
         SELECT t.tx_id, t.transacted_at, t.card_last4, t.raw_merchant_name,
                t.total_amount, t.account_code, t.account_name, t.counterparty_info,
-               r.archived_file_name, r.line_items_json
+               t.reconcile_status, r.archived_file_name, r.line_items_json
         FROM card_transactions t
         JOIN receipt_ocr_metadata r ON r.tx_id = t.tx_id
         WHERE t.reconcile_status != 'CANCELED'
@@ -464,6 +483,7 @@ def list_statement_matched_transactions(
                 "account_code": str(r["account_code"]),
                 "account_name": str(r["account_name"]),
                 "archived_file_name": str(r["archived_file_name"] or ""),
+                "is_created": str(r["reconcile_status"] or "") == "EMAIL_ORDER",
             }
         )
     return items
@@ -656,23 +676,57 @@ def _extract_coupang_email_orders(
         if len(prorated_items) == 1
         else f"{prorated_items[0]['item']} 외 {len(prorated_items) - 1}건"
     )
+    full_dt = fallback_dt if len(fallback_dt) >= 16 and fallback_dt[:10] == order_dt else order_dt
     return [
         {
             "주문일자": order_dt,
+            "주문일시": full_dt,
             "상품명": summary_title,
             "결제금액": total_paid,
             "상점명": "",
+            "발신처": "쿠팡",
             "승인번호": "",
+            "카드사": "",
+            "결제수단": "",
             "품목내역": prorated_items,
         }
     ]
+
+
+def _infer_sender_portal(sender: str, subject: str) -> str:
+    comb = f"{sender} {subject}".lower()
+    for token, canonical in (
+        ("쿠팡", "쿠팡"),
+        ("coupang", "쿠팡"),
+        ("네이버", "네이버페이"),
+        ("naver", "네이버페이"),
+        ("교보문고", "교보문고"),
+        ("kyobobook", "교보문고"),
+        ("카카오", "카카오페이"),
+        ("kakao", "카카오페이"),
+        ("11번가", "11번가"),
+        ("11st", "11번가"),
+        ("지마켓", "지마켓"),
+        ("gmarket", "지마켓"),
+        ("옥션", "옥션"),
+        ("auction", "옥션"),
+        ("컬리", "컬리"),
+        ("kurly", "컬리"),
+        ("무신사", "무신사"),
+        ("musinsa", "무신사"),
+        ("오늘의집", "오늘의집"),
+        ("ohou", "오늘의집"),
+    ):
+        if token in comb:
+            return canonical
+    return ""
 
 
 def _extract_kv_pairs_from_html_and_text(
     body_html: str,
     body_text: str,
 ) -> Dict[str, List[str]]:
-    """Extract key-value fields (product, amount, date, shop, approval_no) from HTML/text."""
+    """Extract key-value fields (product, amount, date, shop, approval_no, card) from HTML/text."""
     found: Dict[str, List[str]] = {
         "products": [],
         "priority_amounts": [],
@@ -680,8 +734,31 @@ def _extract_kv_pairs_from_html_and_text(
         "dates": [],
         "shops": [],
         "approvals": [],
+        "cards": [],
+        "pay_methods": [],
     }
     priority_amt_keys = ("총결제금액", "총 결제금액", "최종결제금액", "결제금액", "승인금액", "실결제금액")
+
+    def _record_kv(k: str, v: str) -> None:
+        if not v or k == v:
+            return
+        if _match_kv_label(k, _KV_PRODUCT_KEYS) and not _is_noise_product_name(v):
+            found["products"].append(v)
+        elif _match_kv_label(k, priority_amt_keys):
+            found["priority_amounts"].append(v)
+            found["amounts"].append(v)
+        elif _match_kv_label(k, _KV_AMOUNT_KEYS):
+            found["amounts"].append(v)
+        elif _match_kv_label(k, _KV_DATE_KEYS):
+            found["dates"].append(v)
+        elif _match_kv_label(k, _KV_SHOP_KEYS):
+            found["shops"].append(v)
+        elif _match_kv_label(k, _KV_APPROVAL_KEYS):
+            found["approvals"].append(v)
+        elif _match_kv_label(k, _KV_CARD_KEYS):
+            found["cards"].append(v)
+        elif _match_kv_label(k, _KV_PAY_METHOD_KEYS):
+            found["pay_methods"].append(v)
 
     # 1. Scan HTML <tr><th>/<td> key-value pairs directly (2-cell or 4-cell KV rows only)
     if body_html:
@@ -699,23 +776,7 @@ def _extract_kv_pairs_from_html_and_text(
             clean_cells = [c for c in clean_cells if c]
             if len(clean_cells) in (2, 4):
                 for idx in range(0, len(clean_cells) - 1, 2):
-                    k = clean_cells[idx]
-                    v = clean_cells[idx + 1]
-                    if not v or k == v:
-                        continue
-                    if _match_kv_label(k, _KV_PRODUCT_KEYS) and not _is_noise_product_name(v):
-                        found["products"].append(v)
-                    elif _match_kv_label(k, priority_amt_keys):
-                        found["priority_amounts"].append(v)
-                        found["amounts"].append(v)
-                    elif _match_kv_label(k, _KV_AMOUNT_KEYS):
-                        found["amounts"].append(v)
-                    elif _match_kv_label(k, _KV_DATE_KEYS):
-                        found["dates"].append(v)
-                    elif _match_kv_label(k, _KV_SHOP_KEYS):
-                        found["shops"].append(v)
-                    elif _match_kv_label(k, _KV_APPROVAL_KEYS):
-                        found["approvals"].append(v)
+                    _record_kv(clean_cells[idx], clean_cells[idx + 1])
 
     # 2. Scan structured text lines for "Key : Value" or "Key\nValue"
     lines = [ln.strip() for ln in body_text.splitlines() if ln.strip()]
@@ -728,36 +789,9 @@ def _extract_kv_pairs_from_html_and_text(
 
         parts = [p.strip() for p in re.split(r"\s*[:：|]\s*", ln, maxsplit=1)]
         if len(parts) == 2 and parts[0] and parts[1]:
-            k, v = parts[0], parts[1]
-            if _match_kv_label(k, _KV_PRODUCT_KEYS) and not _is_noise_product_name(v):
-                found["products"].append(v)
-            elif _match_kv_label(k, priority_amt_keys):
-                found["priority_amounts"].append(v)
-                found["amounts"].append(v)
-            elif _match_kv_label(k, _KV_AMOUNT_KEYS):
-                found["amounts"].append(v)
-            elif _match_kv_label(k, _KV_DATE_KEYS):
-                found["dates"].append(v)
-            elif _match_kv_label(k, _KV_SHOP_KEYS):
-                found["shops"].append(v)
-            elif _match_kv_label(k, _KV_APPROVAL_KEYS):
-                found["approvals"].append(v)
+            _record_kv(parts[0], parts[1])
         elif idx + 1 < len(lines):
-            k = ln
-            v = lines[idx + 1]
-            if _match_kv_label(k, _KV_PRODUCT_KEYS) and not _is_noise_product_name(v):
-                found["products"].append(v)
-            elif _match_kv_label(k, priority_amt_keys):
-                found["priority_amounts"].append(v)
-                found["amounts"].append(v)
-            elif _match_kv_label(k, _KV_AMOUNT_KEYS):
-                found["amounts"].append(v)
-            elif _match_kv_label(k, _KV_DATE_KEYS):
-                found["dates"].append(v)
-            elif _match_kv_label(k, _KV_SHOP_KEYS):
-                found["shops"].append(v)
-            elif _match_kv_label(k, _KV_APPROVAL_KEYS):
-                found["approvals"].append(v)
+            _record_kv(ln, lines[idx + 1])
 
     return found
 
@@ -793,6 +827,8 @@ def extract_orders_from_email_content(
             if len(norm) >= 10 and norm[:4].isdigit():
                 fallback_dt = norm
 
+    portal_hint = _infer_sender_portal(sender, subject)
+
     # 1. Dedicated Coupang Order Confirmation Email parser (multi-item + discount prorating)
     cp_email_orders = _extract_coupang_email_orders(combined_text, fallback_dt=fallback_dt)
     if cp_email_orders:
@@ -818,6 +854,7 @@ def extract_orders_from_email_content(
                     continue
                 if not any(k in r for k in ("주문일자", "주문일시", "결제일시", "일자")) and fallback_dt:
                     r["주문일자"] = fallback_dt[:10]
+                    r["주문일시"] = fallback_dt
                 orders.append(r)
 
     cp_orders = extract_coupang_orders_from_content(combined_text)
@@ -896,30 +933,66 @@ def extract_orders_from_email_content(
             kv_app = m_ap.group(1)
             break
 
+    kv_card = ""
+    for raw_c in kv["cards"]:
+        clean_c = re.sub(r"\s+", " ", raw_c).strip()
+        if clean_c and len(clean_c) <= 30:
+            kv_card = clean_c
+            break
+
+    kv_pay = ""
+    for raw_pm in kv["pay_methods"]:
+        clean_pm = re.sub(r"\s+", " ", raw_pm).strip()
+        if clean_pm and len(clean_pm) <= 30:
+            kv_pay = clean_pm
+            break
+
     if kv_dt and kv_amt > 0 and kv_prod and not orders:
         orders.append(
             {
                 "주문일자": kv_dt[:10],
+                "주문일시": kv_dt if len(kv_dt) >= 16 else (fallback_dt or kv_dt),
                 "상품명": kv_prod,
                 "결제금액": kv_amt,
                 "상점명": kv_shop,
+                "발신처": portal_hint,
                 "승인번호": kv_app,
+                "카드사": kv_card,
+                "결제수단": kv_pay,
                 "품목내역": [{"item": kv_prod, "qty": 1, "price": kv_amt}],
             }
         )
 
-    # Deduplicate by (date, amount, product)
+    # Deduplicate by (date, amount, product) and enrich metadata
     deduped: List[Dict[str, Any]] = []
     seen: set[str] = set()
     for o in orders:
-        dt_k = str(o.get("주문일자") or o.get("주문일시") or fallback_dt)[:10]
+        raw_full_dt = str(o.get("주문일시") or o.get("결제일시") or o.get("주문일자") or fallback_dt)
+        norm_full = _normalize_datetime_str(raw_full_dt)
+        dt_k = norm_full[:10] if len(norm_full) >= 10 else str(o.get("주문일자") or "")[:10]
         amt_k = _parse_int_amount(str(o.get("결제금액") or o.get("주문금액") or 0))
         prod_k = str(o.get("상품명") or o.get("품목명") or "").strip()
         if not dt_k or amt_k <= 0 or _is_noise_product_name(prod_k):
             continue
         o["주문일자"] = dt_k
+        if len(norm_full) >= 19 and norm_full[11:19] != "00:00:00":
+            o["주문일시"] = norm_full[:19]
+        elif fallback_dt and fallback_dt[:10] == dt_k:
+            o["주문일시"] = fallback_dt
+        else:
+            o["주문일시"] = dt_k
         o["결제금액"] = amt_k
         o["상품명"] = prod_k
+        if portal_hint and not o.get("발신처"):
+            o["발신처"] = portal_hint
+        if kv_shop and not o.get("상점명"):
+            o["상점명"] = kv_shop
+        if kv_app and not o.get("승인번호"):
+            o["승인번호"] = kv_app
+        if kv_card and not o.get("카드사"):
+            o["카드사"] = kv_card
+        if kv_pay and not o.get("결제수단"):
+            o["결제수단"] = kv_pay
         sig = f"{dt_k}|{amt_k}|{prod_k}"
         if sig not in seen:
             seen.add(sig)
@@ -1018,12 +1091,161 @@ def _order_priority_key(o: Dict[str, Any]) -> tuple[int, int, int]:
     return (-li_cnt, is_truncated_pg, -len(title))
 
 
+def _parse_order_ts_seconds(ts_str: str) -> Optional[float]:
+    s = str(ts_str or "").strip().replace("T", " ")
+    if len(s) < 19 or s[11:19] == "00:00:00":
+        return None
+    try:
+        return datetime.strptime(s[:19], "%Y-%m-%d %H:%M:%S").timestamp()
+    except ValueError:
+        return None
+
+
+def _are_companion_orders(primary: Dict[str, Any], other: Dict[str, Any]) -> bool:
+    """Return True if two same-(date, amount) emails represent Mall + PG emails for one purchase."""
+    app_a = str(primary.get("승인번호") or "").strip()
+    app_b = str(other.get("승인번호") or "").strip()
+    if app_a and app_b and app_a != app_b:
+        return False
+
+    norm_a = re.sub(r"[^0-9a-zA-Z가-힣]+", "", str(primary.get("상품명") or "")).lower()
+    norm_b = re.sub(r"[^0-9a-zA-Z가-힣]+", "", str(other.get("상품명") or "")).lower()
+    prefix_len = min(6, len(norm_a), len(norm_b))
+    has_title_overlap = bool(
+        prefix_len >= 4 and (norm_a[:prefix_len] == norm_b[:prefix_len] or norm_b in norm_a or norm_a in norm_b)
+    )
+
+    ts_a = _parse_order_ts_seconds(str(primary.get("주문일시") or ""))
+    ts_b = _parse_order_ts_seconds(str(other.get("주문일시") or ""))
+    if ts_a is not None and ts_b is not None and abs(ts_a - ts_b) > 1800 and not has_title_overlap:
+        return False
+
+    shop_a = re.sub(r"\(주\)|㈜|주식회사|\s+", "", str(primary.get("상점명") or primary.get("발신처") or "")).lower()
+    shop_b = re.sub(r"\(주\)|㈜|주식회사|\s+", "", str(other.get("상점명") or other.get("발신처") or "")).lower()
+    if shop_a and shop_b and shop_a not in shop_b and shop_b not in shop_a and not has_title_overlap:
+        return False
+
+    return True
+
+
+def _merge_companion_email_orders(orders: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Fuse companion Shopping Mall + PG confirmation emails on the same (date, amount) into one."""
+    grouped: Dict[tuple[str, int], List[Dict[str, Any]]] = {}
+    for o in orders:
+        dt_k = str(o.get("주문일자") or "")[:10]
+        amt_k = _parse_int_amount(str(o.get("결제금액") or 0))
+        if not dt_k or amt_k <= 0:
+            continue
+        grouped.setdefault((dt_k, amt_k), []).append(o)
+
+    merged_all: List[Dict[str, Any]] = []
+    for _, bucket in grouped.items():
+        bucket.sort(key=_order_priority_key)
+        clusters: List[Dict[str, Any]] = []
+        for cand in bucket:
+            target_cluster: Optional[Dict[str, Any]] = None
+            for existing in clusters:
+                if _are_companion_orders(existing, cand):
+                    target_cluster = existing
+                    break
+            if target_cluster is None:
+                clusters.append(dict(cand))
+                continue
+
+            for meta_key in ("승인번호", "카드사", "결제수단", "상점명", "발신처"):
+                if not target_cluster.get(meta_key) and cand.get(meta_key):
+                    target_cluster[meta_key] = cand[meta_key]
+
+            # Prefer PG's exact card approval timestamp when available
+            cand_dt = str(cand.get("주문일시") or "")
+            cur_dt = str(target_cluster.get("주문일시") or "")
+            if cand.get("승인번호") and _parse_order_ts_seconds(cand_dt) is not None:
+                target_cluster["주문일시"] = cand_dt
+            elif (
+                _parse_order_ts_seconds(cur_dt) is None
+                and _parse_order_ts_seconds(cand_dt) is not None
+            ):
+                target_cluster["주문일시"] = cand_dt
+
+        merged_all.extend(clusters)
+
+    merged_all.sort(key=_order_priority_key)
+    return merged_all
+
+
+def _extract_cancel_approval_nos_from_eml(raw_eml: bytes) -> List[str]:
+    """Extract card approval numbers from a cancellation notification email."""
+    try:
+        msg = email.message_from_bytes(raw_eml)
+    except Exception:
+        return []
+
+    texts: List[str] = []
+    htmls: List[str] = []
+    if msg.is_multipart():
+        for part in msg.walk():
+            payload = part.get_payload(decode=True)
+            if not payload:
+                continue
+            charset = part.get_content_charset() or "utf-8"
+            try:
+                dec = payload.decode(charset, errors="replace")
+            except LookupError:
+                dec = payload.decode("utf-8", errors="replace")
+            if (part.get_content_type() or "").lower() == "text/html":
+                htmls.append(dec)
+            else:
+                texts.append(dec)
+    else:
+        payload = msg.get_payload(decode=True)
+        if payload:
+            charset = msg.get_content_charset() or "utf-8"
+            try:
+                dec = payload.decode(charset, errors="replace")
+            except LookupError:
+                dec = payload.decode("utf-8", errors="replace")
+            if (msg.get_content_type() or "").lower() == "text/html":
+                htmls.append(dec)
+            else:
+                texts.append(dec)
+
+    body_html = "\n".join(htmls)
+    combined = "\n".join(texts)
+    if body_html:
+        combined = f"{combined}\n{_html_to_structured_text(body_html)}"
+    kv = _extract_kv_pairs_from_html_and_text(body_html, combined)
+    apps: List[str] = []
+    for raw_ap in kv["approvals"]:
+        m_ap = re.search(r"(\d{6,12})", raw_ap)
+        if m_ap and m_ap.group(1) not in apps:
+            apps.append(m_ap.group(1))
+    for m_rx in re.finditer(r"승인번호\s*[:：]?\s*(\d{6,12})", combined):
+        if m_rx.group(1) not in apps:
+            apps.append(m_rx.group(1))
+    return apps
+
+
+def _latest_card_statement_date(cursor: sqlite3.Cursor) -> str:
+    """Return latest YYYY-MM-DD of non-email card transactions (or '0000-00-00' if empty)."""
+    cursor.execute(
+        """
+        SELECT MAX(SUBSTR(transacted_at, 1, 10))
+        FROM card_transactions
+        WHERE LENGTH(transacted_at) >= 10
+          AND reconcile_status NOT IN ('EMAIL_ORDER', 'CANCELED')
+        """
+    )
+    row = cursor.fetchone()
+    return str(row[0]) if row and row[0] else "0000-00-00"
+
+
 def ingest_email_order_payload(
     cursor: sqlite3.Cursor,
     raw_content: bytes | str,
     subject: str = "",
     date_str: str = "",
     archive_dir: Optional[Path] = None,
+    auto_create_tx: bool = False,
 ) -> Dict[str, Any]:
     """Parse an email payload (.eml, HTML, or text) and reconcile matched card transactions."""
     orders = parse_raw_email_bytes_or_text(
@@ -1036,17 +1258,21 @@ def ingest_email_order_payload(
             "status": "no_orders_found",
             "parsed_orders_count": 0,
             "matched_count": 0,
+            "created_count": 0,
             "updated_tx_ids": [],
             "matched_items": [],
             "generated_statements_count": 0,
         }
 
-    orders.sort(key=_order_priority_key)
+    merged_orders = _merge_companion_email_orders(orders)
+    latest_stmt_dt = _latest_card_statement_date(cursor)
     res = reconcile_scraped_ecommerce_orders(
         cursor,
-        raw_content=json.dumps(orders, ensure_ascii=False),
+        raw_content=json.dumps(merged_orders, ensure_ascii=False),
         archive_dir=archive_dir,
-        orders_list=orders,
+        orders_list=merged_orders,
+        auto_create_after_date=latest_stmt_dt,
+        auto_create_all=auto_create_tx,
     )
     matched_items = res.get("matched_items") or []
     if matched_items:
@@ -1056,12 +1282,13 @@ def ingest_email_order_payload(
 
     return {
         "status": "ingested",
-        "parsed_orders_count": len(orders),
+        "parsed_orders_count": len(merged_orders),
         "matched_count": res["matched_count"],
+        "created_count": int(res.get("created_count") or 0),
         "updated_tx_ids": res["updated_tx_ids"],
         "matched_items": matched_items,
         "generated_statements_count": res["matched_count"],
-        "orders_preview": orders[:10],
+        "orders_preview": merged_orders[:10],
     }
 
 
@@ -1071,6 +1298,7 @@ def sync_imap_order_emails(
     max_messages: int = 600,
     force_rescan: bool = False,
     account_id: Optional[str] = None,
+    recent_rescan_days: int = 0,
 ) -> Dict[str, Any]:
     """Connect to all enabled IMAP accounts (or a single account_id), fetch orders, and reconcile."""
     cfg = load_email_watcher_config(archive_dir)
@@ -1098,14 +1326,22 @@ def sync_imap_order_emails(
             "scanned_emails": 0,
             "parsed_orders_count": 0,
             "matched_count": 0,
+            "created_count": 0,
+            "newly_stated_count": 0,
             "updated_tx_ids": [],
             "matched_items": [],
             "account_results": [],
         }
 
     since_dt = (datetime.now() - timedelta(days=lookback_days)).strftime("%d-%b-%Y")
+    recent_since_dt = (
+        (datetime.now() - timedelta(days=recent_rescan_days)).strftime("%d-%b-%Y")
+        if recent_rescan_days > 0 and not force_rescan
+        else ""
+    )
     total_scanned_emails = 0
     all_orders: List[Dict[str, Any]] = []
+    canceled_apps: set[str] = set()
     new_processed: List[str] = list(processed_ids)
     account_results: List[Dict[str, Any]] = []
     success_accounts = 0
@@ -1119,6 +1355,7 @@ def sync_imap_order_emails(
         password = str(acc["app_password"]).strip()
         mailbox = str(acc.get("mailbox") or "INBOX").strip() or "INBOX"
         acc_scanned = 0
+        acc_checked_count = 0
         acc_orders: List[Dict[str, Any]] = []
         acc_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -1133,16 +1370,27 @@ def sync_imap_order_emails(
                 else:
                     msg_nums = data[0].split()
 
+                always_rescan_nums: set[bytes] = set()
+                if recent_since_dt:
+                    typ_r, data_r = imap.search(None, f"(SINCE {recent_since_dt})")
+                    if typ_r == "OK" and data_r and data_r[0]:
+                        always_rescan_nums = set(data_r[0].split())
+
                 recent_nums = list(reversed(msg_nums[-max_messages:]))
+                acc_checked_count = len(recent_nums)
                 pending_nums: List[bytes] = []
                 for num in recent_nums:
                     uid_key = f"{user}:{mailbox}:{num.decode('ascii', errors='ignore')}"
-                    if not force_rescan and uid_key in processed_ids:
+                    if (
+                        not force_rescan
+                        and num not in always_rescan_nums
+                        and uid_key in processed_ids
+                    ):
                         continue
                     pending_nums.append(num)
 
-                # Batch-fetch headers in chunks of 100 for fast 60-day scanning
-                candidate_bodies: List[tuple[bytes, str, str]] = []
+                # Batch-fetch headers in chunks of 100 for fast scanning
+                candidate_bodies: List[tuple[bytes, str, str, bool]] = []
                 for b_start in range(0, len(pending_nums), 100):
                     chunk = pending_nums[b_start : b_start + 100]
                     seq_set = b",".join(chunk)
@@ -1164,7 +1412,11 @@ def sync_imap_order_emails(
                         sender = _decode_mime_header(hdr_msg.get("From"))
                         raw_mid = str(hdr_msg.get("Message-ID") or "").strip()
                         msg_id = f"{user}:{raw_mid}" if raw_mid else uid_key
-                        if not force_rescan and msg_id in processed_ids:
+                        is_always = force_rescan or (num_b in always_rescan_nums)
+                        if not is_always and msg_id in processed_ids:
+                            continue
+                        if _CANCELED_EMAIL_SUBJECT_RE.search(subj):
+                            candidate_bodies.append((num_b, msg_id, uid_key, True))
                             continue
                         if _IGNORE_EMAIL_SUBJECT_RE.search(subj) or not _ORDER_EMAIL_SUBJECT_RE.search(
                             f"{subj} {sender}"
@@ -1172,12 +1424,12 @@ def sync_imap_order_emails(
                             new_processed.append(msg_id)
                             new_processed.append(uid_key)
                             continue
-                        candidate_bodies.append((num_b, msg_id, uid_key))
+                        candidate_bodies.append((num_b, msg_id, uid_key, False))
 
                 for b_start in range(0, len(candidate_bodies), 25):
                     chunk_cands = candidate_bodies[b_start : b_start + 25]
-                    by_seq = {num_b: (m_id, u_id) for num_b, m_id, u_id in chunk_cands}
-                    seq_set = b",".join(num_b for num_b, _, _ in chunk_cands)
+                    by_seq = {num_b: (m_id, u_id, is_c) for num_b, m_id, u_id, is_c in chunk_cands}
+                    seq_set = b",".join(num_b for num_b, _, _, _ in chunk_cands)
                     typ_b, body_data = imap.fetch(seq_set, "(BODY.PEEK[])")
                     if typ_b != "OK" or not body_data:
                         continue
@@ -1195,11 +1447,15 @@ def sync_imap_order_emails(
                         if not raw_eml:
                             continue
 
-                        acc_scanned += 1
-                        extracted = parse_raw_email_bytes_or_text(raw_eml)
-                        acc_orders.extend(extracted)
+                        is_cancel_msg = by_seq[seq_k][2] if seq_k in by_seq else False
+                        if is_cancel_msg:
+                            canceled_apps.update(_extract_cancel_approval_nos_from_eml(raw_eml))
+                        else:
+                            acc_scanned += 1
+                            extracted = parse_raw_email_bytes_or_text(raw_eml)
+                            acc_orders.extend(extracted)
                         if seq_k in by_seq:
-                            m_id, u_id = by_seq[seq_k]
+                            m_id, u_id, _ = by_seq[seq_k]
                             new_processed.append(m_id)
                             new_processed.append(u_id)
             finally:
@@ -1208,19 +1464,24 @@ def sync_imap_order_emails(
                 except Exception:
                     pass
 
+            acc_merged = _merge_companion_email_orders(acc_orders)
             success_accounts += 1
             total_scanned_emails += acc_scanned
             all_orders.extend(acc_orders)
             acc["last_sync_at"] = acc_now
             acc["last_status"] = "synced"
-            acc["last_message"] = f"스캔 {acc_scanned}통 · 주문 {len(acc_orders)}건 추출"
+            acc["last_message"] = (
+                f"메일함 {acc_checked_count}통 확인 · 주문메일 {acc_scanned}통 분석 · "
+                f"주문 {len(acc_merged)}건 추출"
+            )
             account_results.append(
                 {
                     "account_id": aid,
                     "email_address": user,
                     "status": "synced",
+                    "checked_mailbox_count": acc_checked_count,
                     "scanned_emails": acc_scanned,
-                    "parsed_orders_count": len(acc_orders),
+                    "parsed_orders_count": len(acc_merged),
                     "message": acc["last_message"],
                 }
             )
@@ -1272,28 +1533,57 @@ def sync_imap_order_emails(
             "scanned_emails": total_scanned_emails,
             "parsed_orders_count": 0,
             "matched_count": 0,
+            "created_count": 0,
+            "newly_stated_count": 0,
             "updated_tx_ids": [],
             "matched_items": [],
             "account_results": account_results,
         }
 
-    all_orders.sort(key=_order_priority_key)
+    if canceled_apps:
+        placeholders = ",".join("?" for _ in canceled_apps)
+        cursor.execute(
+            f"""
+            UPDATE card_transactions
+            SET reconcile_status = 'CANCELED', updated_at = CURRENT_TIMESTAMP
+            WHERE reconcile_status = 'EMAIL_ORDER'
+              AND approval_no IN ({placeholders})
+            """,
+            tuple(canceled_apps),
+        )
+
+    merged_orders = _merge_companion_email_orders(all_orders)
+    if canceled_apps:
+        merged_orders = [
+            o for o in merged_orders if str(o.get("승인번호") or "").strip() not in canceled_apps
+        ]
+
+    latest_stmt_dt = _latest_card_statement_date(cursor)
     rec_res = reconcile_scraped_ecommerce_orders(
         cursor,
-        raw_content=json.dumps(all_orders, ensure_ascii=False),
+        raw_content=json.dumps(merged_orders, ensure_ascii=False),
         archive_dir=archive_dir,
-        orders_list=all_orders,
+        orders_list=merged_orders,
+        auto_create_after_date=latest_stmt_dt,
     )
     matched = int(rec_res.get("matched_count") or 0)
+    created_cnt = int(rec_res.get("created_count") or 0)
+    newly_stated_cnt = int(rec_res.get("newly_stated_count") or 0)
     matched_items = rec_res.get("matched_items") or []
     merged_history = _merge_recent_matched_items(
         cfg.get("recent_matched_items") or [],
         matched_items,
     )
-    summary_msg = (
-        f"계정 {success_accounts}/{len(valid_targets)}개 · 메일 {total_scanned_emails}통 스캔 · "
-        f"주문 {len(all_orders)}건 추출 · 전표 {matched}건 매칭 및 거래명세서 작성 완료"
-    )
+    if created_cnt > 0:
+        summary_msg = (
+            f"계정 {success_accounts}/{len(valid_targets)}개 · 주문메일 {total_scanned_emails}통 분석 · "
+            f"주문 {len(merged_orders)}건 확인 · 전표 {matched}건 반영 (신규 전표 {created_cnt}건 자동생성)"
+        )
+    else:
+        summary_msg = (
+            f"계정 {success_accounts}/{len(valid_targets)}개 · 주문메일 {total_scanned_emails}통 분석 · "
+            f"주문 {len(merged_orders)}건 확인 · 전표 {matched}건 거래명세서 반영 완료"
+        )
     if error_messages:
         summary_msg += f" (일부 계정 오류 {len(error_messages)}건)"
 
@@ -1315,8 +1605,12 @@ def sync_imap_order_emails(
         "last_sync_at": now_str,
         "scanned_accounts": success_accounts,
         "scanned_emails": total_scanned_emails,
-        "parsed_orders_count": len(all_orders),
+        "parsed_orders_count": len(merged_orders),
         "matched_count": matched,
+        "created_count": created_cnt,
+        "newly_stated_count": newly_stated_cnt,
+        "created_tx_ids": rec_res.get("created_tx_ids") or [],
+        "newly_stated_tx_ids": rec_res.get("newly_stated_tx_ids") or [],
         "updated_tx_ids": rec_res.get("updated_tx_ids") or [],
         "matched_items": matched_items,
         "generated_statements_count": matched,

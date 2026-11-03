@@ -187,6 +187,47 @@ def import_phone_sms_to_ledger(
             skipped_duplicates += 1
             continue
 
+        # Merge into existing EMAIL_ORDER record if same amount & ±15min (or matching approval_no)
+        cursor.execute(
+            """
+            SELECT tx_id FROM card_transactions
+            WHERE total_amount = ?
+              AND reconcile_status = 'EMAIL_ORDER'
+              AND (
+                  (? IS NOT NULL AND approval_no = ?)
+                  OR ABS(strftime('%s', transacted_at) - strftime('%s', ?)) <= 900
+              )
+            ORDER BY tx_id ASC
+            LIMIT 1
+            """,
+            (
+                parsed.total_amount,
+                parsed.approval_no,
+                parsed.approval_no,
+                parsed.transacted_at,
+            ),
+        )
+        email_tx = cursor.fetchone()
+        if email_tx:
+            cursor.execute(
+                """
+                UPDATE card_transactions
+                SET card_last4 = CASE WHEN ? != '0000' THEN ? ELSE card_last4 END,
+                    approval_no = COALESCE(?, approval_no),
+                    reconcile_status = 'OCR_MATCHED',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE tx_id = ?
+                """,
+                (
+                    parsed.card_last4,
+                    parsed.card_last4,
+                    parsed.approval_no,
+                    email_tx["tx_id"],
+                ),
+            )
+            skipped_duplicates += 1
+            continue
+
         rule_eval = evaluate_tax_rules(cursor, parsed.raw_merchant_name)
         supply_value, vat_amount = calculate_supply_and_vat(
             parsed.total_amount, rule_eval["vat_deduction_type"]

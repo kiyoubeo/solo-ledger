@@ -79,13 +79,17 @@ def reconcile_single_item(cursor: sqlite3.Cursor, item: ReconcileItem) -> Dict[s
             matched_tx_id = row[0]
             match_stage = "STAGE_1_APPROVAL_NO"
 
-    # Stage 2: Total amount + transacted_at within ±10 minutes (SMS_ONLY or CANCELED)
+    # Stage 2: Total amount + transacted_at within ±10 minutes (SMS_ONLY, EMAIL_ORDER, or CANCELED)
     if matched_tx_id is None:
         try:
             dt = datetime.strptime(item.transacted_at[:19].replace("T", " "), "%Y-%m-%d %H:%M:%S")
             window_start = (dt - timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M:%S")
             window_end = (dt + timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M:%S")
-            allowed_statuses = ("SMS_ONLY", "CANCELED") if item.is_cancel else ("SMS_ONLY",)
+            allowed_statuses = (
+                ("SMS_ONLY", "EMAIL_ORDER", "CANCELED")
+                if item.is_cancel
+                else ("SMS_ONLY", "EMAIL_ORDER")
+            )
             placeholders = ",".join("?" for _ in allowed_statuses)
             cursor.execute(
                 f"""
@@ -123,13 +127,19 @@ def reconcile_single_item(cursor: sqlite3.Cursor, item: ReconcileItem) -> Dict[s
             """
             SELECT tx_id FROM card_transactions
             WHERE SUBSTR(transacted_at, 1, 10) = ?
-              AND card_last4 = ?
+              AND (card_last4 = ? OR reconcile_status = 'EMAIL_ORDER')
               AND ABS(total_amount) = ABS(?)
-              AND (reconcile_status = 'SMS_ONLY' OR raw_merchant_name = ?)
-            ORDER BY tx_id ASC
+              AND (reconcile_status IN ('SMS_ONLY', 'EMAIL_ORDER') OR raw_merchant_name = ?)
+            ORDER BY CASE WHEN card_last4 = ? THEN 0 ELSE 1 END ASC, tx_id ASC
             LIMIT 1
             """,
-            (date_prefix, item.card_last4, item.total_amount, item.merchant_name),
+            (
+                date_prefix,
+                item.card_last4,
+                item.total_amount,
+                item.merchant_name,
+                item.card_last4,
+            ),
         )
         row = cursor.fetchone()
         if row:
@@ -141,13 +151,22 @@ def reconcile_single_item(cursor: sqlite3.Cursor, item: ReconcileItem) -> Dict[s
     if matched_tx_id is not None:
         cursor.execute(
             """
-            SELECT raw_merchant_name, account_code, account_name,
-                   vat_deduction_type, non_deduct_reason, counterparty_info
+            SELECT card_last4, raw_merchant_name, account_code, account_name,
+                   vat_deduction_type, non_deduct_reason, counterparty_info, reconcile_status
             FROM card_transactions WHERE tx_id = ?
             """,
             (matched_tx_id,),
         )
         existing_tx = cursor.fetchone()
+        old_card = str(existing_tx["card_last4"] or "0000") if existing_tx else "0000"
+        old_status = str(existing_tx["reconcile_status"] or "") if existing_tx else ""
+        resolved_card = (
+            item.card_last4
+            if item.card_last4
+            and item.card_last4 != "0000"
+            and (old_card == "0000" or old_status == "EMAIL_ORDER")
+            else old_card
+        )
         old_merchant = str(existing_tx["raw_merchant_name"] or "") if existing_tx else ""
         old_code = str(existing_tx["account_code"] or "999") if existing_tx else "999"
         old_name = str(existing_tx["account_name"] or "미분류") if existing_tx else "미분류"
@@ -185,7 +204,8 @@ def reconcile_single_item(cursor: sqlite3.Cursor, item: ReconcileItem) -> Dict[s
             cursor.execute(
                 """
                 UPDATE card_transactions
-                SET approval_no = COALESCE(?, approval_no),
+                SET card_last4 = ?,
+                    approval_no = COALESCE(?, approval_no),
                     biz_reg_no = COALESCE(?, biz_reg_no),
                     raw_merchant_name = ?,
                     account_code = ?,
@@ -201,6 +221,7 @@ def reconcile_single_item(cursor: sqlite3.Cursor, item: ReconcileItem) -> Dict[s
                 WHERE tx_id = ?
                 """,
                 (
+                    resolved_card,
                     item.approval_no,
                     clean_biz_no,
                     new_merchant,
@@ -219,7 +240,8 @@ def reconcile_single_item(cursor: sqlite3.Cursor, item: ReconcileItem) -> Dict[s
             cursor.execute(
                 """
                 UPDATE card_transactions
-                SET approval_no = COALESCE(?, approval_no),
+                SET card_last4 = ?,
+                    approval_no = COALESCE(?, approval_no),
                     biz_reg_no = COALESCE(?, biz_reg_no),
                     raw_merchant_name = ?,
                     account_code = ?,
@@ -235,6 +257,7 @@ def reconcile_single_item(cursor: sqlite3.Cursor, item: ReconcileItem) -> Dict[s
                 WHERE tx_id = ?
                 """,
                 (
+                    resolved_card,
                     item.approval_no,
                     clean_biz_no,
                     new_merchant,
@@ -253,7 +276,8 @@ def reconcile_single_item(cursor: sqlite3.Cursor, item: ReconcileItem) -> Dict[s
             cursor.execute(
                 """
                 UPDATE card_transactions
-                SET approval_no = COALESCE(?, approval_no),
+                SET card_last4 = ?,
+                    approval_no = COALESCE(?, approval_no),
                     biz_reg_no = COALESCE(?, biz_reg_no),
                     raw_merchant_name = ?,
                     account_code = ?,
@@ -269,6 +293,7 @@ def reconcile_single_item(cursor: sqlite3.Cursor, item: ReconcileItem) -> Dict[s
                 WHERE tx_id = ?
                 """,
                 (
+                    resolved_card,
                     item.approval_no,
                     clean_biz_no,
                     new_merchant,

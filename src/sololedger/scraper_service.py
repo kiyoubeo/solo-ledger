@@ -47,7 +47,7 @@ from sololedger.importers import (
 from sololedger.models import ReconcileItem
 from sololedger.reconciler import reconcile_single_item
 from sololedger.sms_parser import format_card_label, sanitize_card_folder_name
-from sololedger.tax_engine import calculate_supply_and_vat
+from sololedger.tax_engine import calculate_supply_and_vat, evaluate_tax_rules
 from sololedger.telegram_bot import _detect_memo_account_override
 
 SUPPORTED_SCRAPER_TARGETS: Dict[str, Dict[str, str]] = {
@@ -1153,11 +1153,131 @@ def _norm_merchant_token(name: str) -> str:
     return re.sub(r"\(주\)|㈜|주식회사|\(유\)|유한회사|[\s\-_()\[\]]+", "", str(name or "")).lower()
 
 
+def _norm_alnum_ko(text: str) -> str:
+    return re.sub(r"[^0-9a-zA-Z가-힣]+", "", str(text or "")).lower()
+
+
+def _resolve_card_last4_from_issuer(
+    cursor: sqlite3.Cursor,
+    card_hint: str,
+    merchant_name: str,
+) -> str:
+    """Resolve card_last4 from PG email issuer hint ('국민', '현대', etc.) or merchant history."""
+    hint = str(card_hint or "").strip()
+    m_digits = re.search(r"(\d[\d\*]{3})", hint)
+    if m_digits:
+        return m_digits.group(1)
+
+    issuer_kw = ""
+    hint_low = hint.lower()
+    for token, canonical in (
+        ("국민", "국민"),
+        ("kb", "국민"),
+        ("현대", "현대"),
+        ("롯데", "롯데"),
+        ("우리", "우리"),
+        ("신한", "신한"),
+        ("삼성", "삼성"),
+        ("하나", "하나"),
+        ("농협", "농협"),
+        ("nh", "농협"),
+        ("기업", "기업"),
+        ("ibk", "기업"),
+    ):
+        if token in hint_low:
+            issuer_kw = canonical
+            break
+
+    cursor.execute(
+        """
+        SELECT card_last4, COUNT(*) AS cnt
+        FROM card_transactions
+        WHERE reconcile_status != 'CANCELED'
+          AND card_last4 != '0000'
+        GROUP BY card_last4
+        ORDER BY cnt DESC
+        """
+    )
+    active_cards = [str(r["card_last4"]) for r in cursor.fetchall() if r["card_last4"]]
+
+    if issuer_kw:
+        for c_code in active_cards:
+            lbl = format_card_label(c_code)
+            if issuer_kw in lbl and "하이패스" not in lbl:
+                return c_code
+        for c_code in active_cards:
+            if issuer_kw in format_card_label(c_code):
+                return c_code
+        return f"{issuer_kw}카드"
+
+    merch_low = str(merchant_name or "").lower()
+    core_kw = ""
+    for kw in ("쿠팡", "네이버", "카카오", "교보문고", "11번가", "지마켓", "옥션", "컬리", "무신사"):
+        if kw in merch_low:
+            core_kw = kw
+            break
+    if core_kw:
+        cursor.execute(
+            """
+            SELECT card_last4, COUNT(*) AS cnt
+            FROM card_transactions
+            WHERE reconcile_status != 'CANCELED'
+              AND card_last4 != '0000'
+              AND raw_merchant_name LIKE ?
+            GROUP BY card_last4
+            ORDER BY cnt DESC
+            LIMIT 1
+            """,
+            (f"%{core_kw}%",),
+        )
+        m_row = cursor.fetchone()
+        if m_row and m_row["card_last4"]:
+            return str(m_row["card_last4"])
+
+    return "0000"
+
+
+def _infer_merchant_for_email_order(
+    cursor: sqlite3.Cursor,
+    row: Dict[str, Any],
+) -> str:
+    """Infer canonical ledger merchant name for a newly created email order transaction."""
+    shop_name = str(row.get("상점명") or row.get("가맹점명") or "").strip()
+    portal_hint = str(row.get("발신처") or "").strip()
+    item_name = str(row.get("상품명") or "").strip()
+    comb = f"{shop_name} {portal_hint}".lower()
+
+    if "쿠팡" in comb:
+        if "와우" in item_name and "멤버십" in item_name:
+            return "쿠팡(와우멤버십)"
+        cursor.execute(
+            """
+            SELECT raw_merchant_name, COUNT(*) AS cnt
+            FROM card_transactions
+            WHERE raw_merchant_name LIKE '%쿠팡%'
+              AND raw_merchant_name NOT LIKE '%와우%'
+              AND raw_merchant_name NOT LIKE '%이츠%'
+              AND reconcile_status != 'CANCELED'
+            GROUP BY raw_merchant_name
+            ORDER BY cnt DESC
+            LIMIT 1
+            """
+        )
+        m_row = cursor.fetchone()
+        if m_row and m_row["raw_merchant_name"]:
+            return str(m_row["raw_merchant_name"])
+        return shop_name or "쿠팡(주)"
+
+    return shop_name or portal_hint or "온라인결제(이메일)"
+
+
 def reconcile_scraped_ecommerce_orders(
     cursor: sqlite3.Cursor,
     raw_content: str,
     archive_dir: Optional[Path] = None,
     orders_list: Optional[List[Dict[str, Any]]] = None,
+    auto_create_after_date: Optional[str] = None,
+    auto_create_all: bool = False,
 ) -> Dict[str, Any]:
     """Match scraped Coupang / NaverPay / KakaoPay / PG order items against card transactions."""
     content = (raw_content or "").strip()
@@ -1165,6 +1285,10 @@ def reconcile_scraped_ecommerce_orders(
         return {
             "status": "empty",
             "matched_count": 0,
+            "created_count": 0,
+            "newly_stated_count": 0,
+            "created_tx_ids": [],
+            "newly_stated_tx_ids": [],
             "updated_tx_ids": [],
             "matched_items": [],
         }
@@ -1172,11 +1296,13 @@ def reconcile_scraped_ecommerce_orders(
     order_rows = orders_list if orders_list is not None else extract_coupang_orders_from_content(content)
 
     updated_tx_ids: List[int] = []
+    created_tx_ids: List[int] = []
+    newly_stated_tx_ids: List[int] = []
     matched_items: List[Dict[str, Any]] = []
     used_tx_ids: set[int] = set()
     for row in order_rows:
         raw_dt = _pick_col(
-            row, ["주문일시", "주문일자", "결제일시", "결제일자", "일자", "order_date", "date"]
+            row, ["주문일시", "결제일시", "주문일자", "결제일자", "일자", "order_date", "date"]
         )
         item_name = _pick_col(
             row, ["상품명", "품목명", "주문상품", "상품", "내역", "item_name", "product_name", "title"]
@@ -1195,6 +1321,7 @@ def reconcile_scraped_ecommerce_orders(
 
         shop_name = str(row.get("상점명") or row.get("가맹점명") or "").strip()
         app_no = str(row.get("승인번호") or "").strip()
+        card_hint = str(row.get("카드사") or row.get("결제기관") or "").strip()
         norm_shop = _norm_merchant_token(shop_name)
 
         cursor.execute(
@@ -1250,13 +1377,100 @@ def reconcile_scraped_ecommerce_orders(
             )
             is_online_or_unclassified = (
                 str(cand["account_code"] or "") == "999"
+                or str(cand["reconcile_status"] or "") == "EMAIL_ORDER"
                 or any(kw in cand_merch_low for kw in _ONLINE_OR_PG_MERCHANT_KEYWORDS)
             )
             if is_app_match or is_shop_match or is_online_or_unclassified:
                 tx_row = cand
                 break
+
+        is_newly_created = False
         if tx_row is None:
-            continue
+            should_auto_create = auto_create_all or (
+                auto_create_after_date is not None and date_prefix > auto_create_after_date
+            )
+            if not should_auto_create:
+                continue
+
+            # Skip auto-creating if a canceled transaction with the same amount/date already exists
+            cursor.execute(
+                """
+                SELECT 1 FROM card_transactions
+                WHERE ABS(total_amount) = ?
+                  AND ABS(julianday(SUBSTR(transacted_at, 1, 10)) - julianday(?)) <= 3.0
+                  AND reconcile_status = 'CANCELED'
+                LIMIT 1
+                """,
+                (amount, date_prefix),
+            )
+            if cursor.fetchone():
+                continue
+
+            full_ts = (
+                norm_dt[:19]
+                if len(norm_dt) >= 19 and norm_dt[11:19] != "00:00:00"
+                else f"{date_prefix} 12:00:00"
+            )
+            inferred_merchant = _infer_merchant_for_email_order(cursor, row)
+            resolved_card = _resolve_card_last4_from_issuer(cursor, card_hint, inferred_merchant)
+            rule_eval = evaluate_tax_rules(cursor, inferred_merchant, None)
+            sup_val, vat_val = calculate_supply_and_vat(amount, rule_eval["vat_deduction_type"])
+            cursor.execute(
+                """
+                INSERT INTO card_transactions (
+                    card_last4, approval_no, transacted_at, raw_merchant_name,
+                    total_amount, supply_value, vat_amount,
+                    account_code, account_name, vat_deduction_type,
+                    non_deduct_reason, is_vehicle_expense, counterparty_info, reconcile_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'EMAIL_ORDER')
+                """,
+                (
+                    resolved_card,
+                    app_no or None,
+                    full_ts,
+                    inferred_merchant,
+                    amount,
+                    sup_val,
+                    vat_val,
+                    rule_eval["account_code"],
+                    rule_eval["account_name"],
+                    rule_eval["vat_deduction_type"],
+                    rule_eval["non_deduct_reason"],
+                    1 if rule_eval["is_vehicle_expense"] else 0,
+                    item_name,
+                ),
+            )
+            new_tx_id = int(cursor.lastrowid)
+            cursor.execute("SELECT * FROM card_transactions WHERE tx_id = ?", (new_tx_id,))
+            tx_row = cursor.fetchone()
+            if tx_row is None:
+                continue
+            is_newly_created = True
+            created_tx_ids.append(new_tx_id)
+        else:
+            # Backfill approval_no or card_last4 onto an existing EMAIL_ORDER/SMS row if newly discovered
+            ex_id = int(tx_row["tx_id"])
+            ex_app = str(tx_row["approval_no"] or "").strip()
+            ex_card = str(tx_row["card_last4"] or "0000")
+            ex_status = str(tx_row["reconcile_status"] or "")
+            new_card = (
+                _resolve_card_last4_from_issuer(cursor, card_hint, str(tx_row["raw_merchant_name"]))
+                if card_hint and (ex_card == "0000" or ex_status == "EMAIL_ORDER")
+                else ex_card
+            )
+            if (app_no and not ex_app) or (new_card != ex_card and new_card != "0000"):
+                cursor.execute(
+                    """
+                    UPDATE card_transactions
+                    SET approval_no = COALESCE(approval_no, ?),
+                        card_last4 = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE tx_id = ?
+                    """,
+                    (app_no or None, new_card if new_card != "0000" else ex_card, ex_id),
+                )
+                cursor.execute("SELECT * FROM card_transactions WHERE tx_id = ?", (ex_id,))
+                tx_row = cursor.fetchone() or tx_row
 
         tx_id = int(tx_row["tx_id"])
         used_tx_ids.add(tx_id)
@@ -1269,26 +1483,42 @@ def reconcile_scraped_ecommerce_orders(
         raw_lines = row.get("품목내역") or row.get("line_items")
         row_line_items = raw_lines if isinstance(raw_lines, list) else None
 
-        # Prevent truncated PG 1-liners ('...포함 총 N') from overwriting an existing multi-item statement
-        if (not row_line_items or len(row_line_items) <= 1) and re.search(
-            r"포함\s*총\s*\d+", final_item_name
-        ):
-            cursor.execute(
-                """
-                SELECT line_items_json FROM receipt_ocr_metadata
-                WHERE tx_id = ? AND source_channel = 'STATEMENT'
-                ORDER BY receipt_id DESC LIMIT 1
-                """,
-                (tx_id,),
-            )
-            prev_stmt = cursor.fetchone()
-            if prev_stmt and prev_stmt["line_items_json"]:
+        cursor.execute(
+            """
+            SELECT archived_file_name, line_items_json
+            FROM receipt_ocr_metadata
+            WHERE tx_id = ? AND source_channel = 'STATEMENT'
+            ORDER BY receipt_id DESC LIMIT 1
+            """,
+            (tx_id,),
+        )
+        prev_stmt = cursor.fetchone()
+        prev_memo = str(tx_row["counterparty_info"] or "").strip()
+
+        # Prevent truncated PG 1-liners from overwriting a fuller or multi-item existing statement
+        if prev_stmt and (not row_line_items or len(row_line_items) <= 1):
+            keep_existing = False
+            if re.search(r"포함\s*총\s*\d+", final_item_name) and prev_stmt["line_items_json"]:
                 try:
                     prev_lines = json.loads(str(prev_stmt["line_items_json"]))
                     if isinstance(prev_lines, list) and len(prev_lines) >= 2:
-                        continue
+                        keep_existing = True
                 except Exception:
                     pass
+            if not keep_existing and prev_memo:
+                norm_prev = _norm_alnum_ko(prev_memo)
+                norm_new = _norm_alnum_ko(final_item_name)
+                if (
+                    len(norm_new) >= 6
+                    and len(norm_prev) > len(norm_new)
+                    and norm_prev.startswith(norm_new)
+                ):
+                    keep_existing = True
+            if keep_existing:
+                continue
+
+        if is_newly_created or prev_stmt is None or prev_memo != final_item_name:
+            newly_stated_tx_ids.append(tx_id)
 
         stmt_res = generate_electronic_statement_for_tx(
             cursor,
@@ -1310,6 +1540,7 @@ def reconcile_scraped_ecommerce_orders(
                 "account_code": stmt_res["account_code"],
                 "account_name": stmt_res["account_name"],
                 "archived_file_name": stmt_res["archived_file_name"],
+                "is_created": is_newly_created,
             }
         )
 
@@ -1317,6 +1548,10 @@ def reconcile_scraped_ecommerce_orders(
         "status": "matched",
         "parsed_orders_count": len(order_rows),
         "matched_count": len(updated_tx_ids),
+        "created_count": len(created_tx_ids),
+        "newly_stated_count": len(newly_stated_tx_ids),
+        "created_tx_ids": created_tx_ids,
+        "newly_stated_tx_ids": newly_stated_tx_ids,
         "updated_tx_ids": updated_tx_ids,
         "matched_items": matched_items,
     }

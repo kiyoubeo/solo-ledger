@@ -265,8 +265,10 @@ def build_dashboard_summary(
         """
     )
     bound_row = cursor.fetchone()
+    today_str = now.strftime("%Y-%m-%d")
     min_tx_date = (bound_row[0] if bound_row and bound_row[0] else None) or f"{now.year}-01-01"
-    max_tx_date = (bound_row[1] if bound_row and bound_row[1] else None) or now.strftime("%Y-%m-%d")
+    bound_max = bound_row[1] if bound_row and bound_row[1] else None
+    max_tx_date = max(str(bound_max), today_str) if bound_max else today_str
 
     cursor.execute(
         """
@@ -1303,10 +1305,10 @@ def render_dashboard_html(
             📬 연결된 이메일 계정 목록 (네이버 · Gmail · 카카오 · 회사메일 동시 감시)
           </div>
           <div style="display:flex; gap:6px; flex-wrap:wrap;">
-            <button onclick="triggerEmailSyncNow(false, '')">
+            <button id="btn-email-sync-all" onclick="triggerEmailSyncNow(false, '', this)">
               🚀 연결된 전체 메일함 즉시 통합 스캔
             </button>
-            <button class="secondary" onclick="triggerEmailSyncNow(true, '')">
+            <button id="btn-email-force-sync" class="secondary" onclick="triggerEmailSyncNow(true, '', this)">
               🔄 전체 강제 재매칭
             </button>
           </div>
@@ -2109,10 +2111,15 @@ def render_dashboard_html(
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;');
     }}
-    function scanEmailAccountByIdx(idx) {{
+    function scanEmailAccountByIdx(idx, btnEl) {{
       const acc = cachedEmailAccounts[idx];
       if (!acc) return;
-      triggerEmailSyncNow(false, acc.account_id);
+      const stLine = document.getElementById('email-acc-status-' + idx);
+      if (stLine) {{
+        stLine.style.color = '#1e40af';
+        stLine.textContent = '⏳ IMAP 메일함 접속 및 최근 주문·결제 메일 정밀 스캔 중...';
+      }}
+      triggerEmailSyncNow(false, acc.account_id, btnEl);
     }}
     async function toggleEmailAccountByIdx(idx) {{
       const acc = cachedEmailAccounts[idx];
@@ -2157,11 +2164,12 @@ def render_dashboard_html(
           '<code>' + escHtml(acc.email_address) + '</code> ' +
           '<span style="color:#64748b; font-size:11px;">(' +
           escHtml(acc.imap_host) + ':' + escHtml(acc.imap_port) + ')</span>' +
-          '<div style="font-size:11px; color:#475569; margin-top:2px;">' + stInfo + '</div>' +
+          '<div id="email-acc-status-' + idx + '" style="font-size:11px; color:#475569; margin-top:2px;">' +
+          stInfo + '</div>' +
           '</div>' +
           '<div style="display:flex; gap:4px; flex-wrap:wrap;">' +
           '<button class="secondary" style="padding:3px 7px; font-size:11px;" ' +
-          'onclick="scanEmailAccountByIdx(' + idx + ')">스캔</button>' +
+          'onclick="scanEmailAccountByIdx(' + idx + ', this)">스캔</button>' +
           '<button class="secondary" style="padding:3px 7px; font-size:11px;" ' +
           'onclick="toggleEmailAccountByIdx(' + idx + ')">' +
           (isOn ? '일시정지' : '켜기') + '</button>' +
@@ -2234,12 +2242,17 @@ def render_dashboard_html(
           ? (' <span style="background:#dbeafe; color:#1e40af; padding:1px 5px; ' +
              'border-radius:4px; font-size:10px; font-weight:700;">상세 ' + liCnt + '품목</span>')
           : '';
+        const newBadge = it.is_created
+          ? (' <span style="background:#fef3c7; color:#b45309; padding:1px 5px; ' +
+             'border-radius:4px; font-size:10px; font-weight:700;">⚡실시간 자동전표</span>')
+          : '';
         rows +=
           '<tr>' +
           '<td style="padding:5px 6px; white-space:nowrap;"><strong>#' + it.tx_id + '</strong></td>' +
           '<td style="padding:5px 6px; white-space:nowrap;">' + dtShort + '</td>' +
           '<td style="padding:5px 6px; white-space:nowrap;">' + escHtml(it.raw_merchant_name) + '</td>' +
-          '<td style="padding:5px 6px;"><strong>' + escHtml(it.item_name) + '</strong>' + liBadge + '</td>' +
+          '<td style="padding:5px 6px;"><strong>' + escHtml(it.item_name) + '</strong>' +
+          liBadge + newBadge + '</td>' +
           '<td style="padding:5px 6px; text-align:right; white-space:nowrap;"><strong>' +
           amtFmt + '</strong></td>' +
           '<td style="padding:5px 6px; text-align:center; white-space:nowrap;">' +
@@ -2381,28 +2394,48 @@ def render_dashboard_html(
         st.textContent = '⚠️ 이메일 계정 저장 또는 동기화 중 오류가 발생했습니다.';
       }}
     }}
-    async function triggerEmailSyncNow(forceRescan, accountId) {{
+    async function triggerEmailSyncNow(forceRescan, accountId, btnEl) {{
       const st = document.getElementById('email-sync-status');
+      const prevTxt = btnEl ? btnEl.textContent : '';
+      if (btnEl) {{
+        btnEl.disabled = true;
+        btnEl.textContent = '⏳ 스캔 중...';
+      }}
       st.style.color = '#1e40af';
       st.textContent = accountId
-        ? '⏳ 선택한 이메일 계정의 주문·결제 메일을 스캔 중입니다...'
+        ? '⏳ 선택한 이메일 계정에 접속하여 최신 주문·결제 메일을 스캔 중입니다...'
         : '⏳ 연결된 모든 활성 이메일 계정을 통합 스캔 중입니다...';
-      const res = await fetch('/api/v1/scraper/email-sync', {{
-        method: 'POST',
-        headers: API_HEADERS,
-        body: JSON.stringify({{ force_rescan: !!forceRescan, account_id: accountId || '' }})
-      }});
-      const sr = await res.json();
-      await refreshEmailWatcherState();
-      if (sr.status === 'synced') {{
-        st.style.color = '#15803d';
-        st.textContent = `✅ ${{sr.message}}`;
-        if (sr.matched_count > 0) {{
-          setTimeout(() => {{ window.location.reload(); }}, 1100);
+      try {{
+        const res = await fetch('/api/v1/scraper/email-sync', {{
+          method: 'POST',
+          headers: API_HEADERS,
+          body: JSON.stringify({{ force_rescan: !!forceRescan, account_id: accountId || '' }})
+        }});
+        const sr = await res.json();
+        await refreshEmailWatcherState();
+        if (sr.status === 'synced') {{
+          const hasNew = Number(sr.created_count || 0) > 0 || Number(sr.newly_stated_count || 0) > 0;
+          st.style.color = '#15803d';
+          if (hasNew) {{
+            st.textContent =
+              `✅ ${{sr.message}} — 원장 테이블에 즉시 반영합니다...`;
+            setTimeout(() => {{ window.location.reload(); }}, 1200);
+          }} else {{
+            st.textContent =
+              `✅ ${{sr.message}} (추가 미반영 주문 없음 · 최신 동기화 상태)`;
+          }}
+        }} else {{
+          st.style.color = '#b91c1c';
+          st.textContent = `⚠️ ${{sr.message || '동기화 실패'}}`;
         }}
-      }} else {{
+      }} catch (err) {{
         st.style.color = '#b91c1c';
-        st.textContent = `⚠️ ${{sr.message || '동기화 실패'}}`;
+        st.textContent = '⚠️ 이메일 스캔 요청 중 네트워크 오류가 발생했습니다.';
+      }} finally {{
+        if (btnEl) {{
+          btnEl.disabled = false;
+          btnEl.textContent = prevTxt;
+        }}
       }}
     }}
     async function submitEmailPaste() {{

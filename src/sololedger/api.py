@@ -898,6 +898,7 @@ async def update_email_watcher_config_endpoint(
     save_email_watcher_config(payload if isinstance(payload, dict) else {})
     sync_result: Optional[Dict[str, Any]] = None
     if isinstance(payload, dict) and payload.get("sync_now"):
+        rescan_days = int(payload.get("recent_rescan_days", 7))
 
         def _run_sync() -> Dict[str, Any]:
             init_db()
@@ -907,6 +908,7 @@ async def update_email_watcher_config_endpoint(
                 res = sync_imap_order_emails(
                     cur,
                     force_rescan=bool(payload.get("force_rescan", False)),
+                    recent_rescan_days=rescan_days,
                 )
                 conn.commit()
                 return res
@@ -978,6 +980,7 @@ async def sync_email_orders_endpoint(
     force = bool(payload.get("force_rescan", False)) if isinstance(payload, dict) else False
     max_msgs = int(payload.get("max_messages", 600)) if isinstance(payload, dict) else 600
     acc_id = str(payload.get("account_id") or "").strip() if isinstance(payload, dict) else ""
+    rescan_days = int(payload.get("recent_rescan_days", 7)) if isinstance(payload, dict) else 7
 
     def _run_sync() -> Dict[str, Any]:
         init_db()
@@ -989,6 +992,7 @@ async def sync_email_orders_endpoint(
                 max_messages=max_msgs,
                 force_rescan=force,
                 account_id=acc_id or None,
+                recent_rescan_days=rescan_days,
             )
             conn.commit()
             return res
@@ -1026,6 +1030,7 @@ async def email_order_webhook_endpoint(
             raw_content=raw_input,
             subject=str(payload.get("subject") or ""),
             date_str=str(payload.get("date_str") or ""),
+            auto_create_tx=bool(payload.get("auto_create_tx", False)),
         )
         conn.commit()
         return outcome
