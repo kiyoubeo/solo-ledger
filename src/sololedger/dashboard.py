@@ -1493,6 +1493,20 @@ def render_dashboard_html(
         + merchTok + '_' + accTok + '_' + amtTok + '_TX' + d.tx_id;
     }}
 
+    function formatBizRegNo(rawBiz, mpSeller, fallback) {{
+      const raw = String(rawBiz || '').trim();
+      const digits = raw.replace(/\\D/g, '');
+      if (digits.length === 10) {{
+        return digits.slice(0, 3) + '-' + digits.slice(3, 5) + '-' + digits.slice(5);
+      }}
+      if (raw) return raw;
+      if (mpSeller) {{
+        const safeMp = String(mpSeller).replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        return '미등록 (입점판매자: ' + safeMp + ' · 홈택스 대사 대기)';
+      }}
+      return fallback || '미등록 (SMS/RCS·PG 전표)';
+    }}
+
     function renderModalDocView() {{
       if (!activeModalData) return;
       const d = activeModalData;
@@ -1500,7 +1514,7 @@ def render_dashboard_html(
       const tabSlip = document.getElementById('tab-btn-slip');
       const tabStmt = document.getElementById('tab-btn-stmt');
       const fmt = (n) => Number(n || 0).toLocaleString('ko-KR') + '원';
-      const bizNo = d.biz_reg_no || '미등록 (SMS/RCS·PG 전표)';
+      const bizNo = formatBizRegNo(d.biz_reg_no, d.marketplace_seller, '미등록 (SMS/RCS·PG 전표)');
       const appNo = d.approval_no || ('TX-' + d.tx_id);
       const rowMemoEl = document.getElementById('memo-' + d.tx_id);
       const typedMemo = rowMemoEl && rowMemoEl.value ? rowMemoEl.value.trim() : '';
@@ -1533,6 +1547,10 @@ def render_dashboard_html(
         if (Array.isArray(d.line_items) && d.line_items.length > 0) {{
           d.line_items.forEach((li) => {{
             const liName = String(li.item || li.name || itemVal).replace(/</g, '&lt;');
+            const liSeller = (d.marketplace_seller && li.seller)
+              ? (' <span style="color:#64748b; font-size:11px; font-weight:400;">(판매자: ' +
+                 String(li.seller).replace(/</g, '&lt;') + ')</span>')
+              : '';
             const liQty = Math.max(1, parseInt(li.qty || 1, 10) || 1);
             const liTot = parseInt(li.price || li.amount || totAmt, 10);
             const liSup = d.vat_deduction_type === 'EXEMPT'
@@ -1542,7 +1560,8 @@ def render_dashboard_html(
             totQty += liQty;
             tbodyHtml += '<tr>' +
               '<td style="border:1px solid #cbd5e1; padding:6px; white-space:nowrap;">' + mdStr + '</td>' +
-              '<td style="border:1px solid #cbd5e1; padding:6px;"><strong>' + liName + '</strong></td>' +
+              '<td style="border:1px solid #cbd5e1; padding:6px;"><strong>' + liName + '</strong>' +
+              liSeller + '</td>' +
               '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right; white-space:nowrap;">' +
               liQty + '</td>' +
               '<td style="border:1px solid #cbd5e1; padding:6px; text-align:right; white-space:nowrap;">' +
@@ -2246,11 +2265,19 @@ def render_dashboard_html(
           ? (' <span style="background:#fef3c7; color:#b45309; padding:1px 5px; ' +
              'border-radius:4px; font-size:10px; font-weight:700;">⚡실시간 자동전표</span>')
           : '';
+        const bizSub = it.biz_reg_no
+          ? ('<div style="font-size:10px; color:#15803d; font-weight:600;">' +
+             escHtml(it.biz_reg_no) + '</div>')
+          : (it.marketplace_seller
+              ? ('<div style="font-size:10px; color:#b45309;">입점: ' +
+                 escHtml(it.marketplace_seller) + '</div>')
+              : '');
         rows +=
           '<tr>' +
           '<td style="padding:5px 6px; white-space:nowrap;"><strong>#' + it.tx_id + '</strong></td>' +
           '<td style="padding:5px 6px; white-space:nowrap;">' + dtShort + '</td>' +
-          '<td style="padding:5px 6px; white-space:nowrap;">' + escHtml(it.raw_merchant_name) + '</td>' +
+          '<td style="padding:5px 6px; white-space:nowrap;">' +
+          escHtml(it.raw_merchant_name) + bizSub + '</td>' +
           '<td style="padding:5px 6px;"><strong>' + escHtml(it.item_name) + '</strong>' +
           liBadge + newBadge + '</td>' +
           '<td style="padding:5px 6px; text-align:right; white-space:nowrap;"><strong>' +

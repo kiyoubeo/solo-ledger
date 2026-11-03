@@ -784,6 +784,9 @@ def test_email_order_auto_creates_future_tx_merges_companion_and_deduplicates_cs
     assert rec1["card_last4"] == "8691"
     assert rec1["approval_no"] == "30001975"
     assert rec1["raw_merchant_name"] == "쿠팡(쿠페이)"
+    assert rec1["biz_reg_no"] == "1208800767"
+    stmt_file_txt = client.get(f"/api/v1/transactions/{created_tx_id}/receipt-file").text
+    assert "120-88-00767" in stmt_file_txt
     assert (
         rec1["counterparty_info"]
         == "엄마의선택 베이킹소다 & 구연산 함유 주방세제 레몬향 리필, 1개, 1.2L"
@@ -826,6 +829,209 @@ def test_email_order_auto_creates_future_tx_merges_companion_and_deduplicates_cs
         nov3_txs[0]["counterparty_info"]
         == "엄마의선택 베이킹소다 & 구연산 함유 주방세제 레몬향 리필, 1개, 1.2L"
     )
+
+
+def test_email_supplier_biz_reg_no_extraction_and_marketplace_separation(
+    client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify direct supplier biz_reg_no extraction vs 3rd-party marketplace seller separation."""
+    from email.message import EmailMessage
+
+    import sololedger.email_watcher as ew_mod
+    from sololedger.email_watcher import extract_orders_from_email_content
+
+    # 1. Pure NaverPay intermediary email must NEVER falsely assign Naver Financial's biz_reg_no
+    np_only = extract_orders_from_email_content(
+        subject="[네이버페이] 결제하신 내역을 안내해드립니다.",
+        sender="네이버페이 <naverpayadmin_noreply@navercorp.com>",
+        date_str="Tue, 27 Oct 2026 21:45:00 +0900",
+        body_text=(
+            "결제일자 : 2026.10.27 21:45\n"
+            "가맹점명 : 스마트문구스토어\n"
+            "상품명 : A4 복사용지 80g 2박스\n"
+            "최종결제금액 : 42,000 원\n"
+            "네이버파이낸셜(주)은 결제정보의 중개자 또는 통신판매중개자이며 통신판매의 당사자가 아닙니다.\n"
+            "네이버파이낸셜(주) | 사업자등록번호 : 524-86-01528"
+        ),
+    )
+    assert len(np_only) == 1
+    assert not np_only[0].get("사업자번호")
+
+    # Seed 3 card statement rows without biz_reg_no (as imported from card issuer .xls):
+    # - Oct 11 63,700 KRW: Coupang 3rd-party marketplace order
+    # - Oct 27 12,780 KRW: NaverPay_Kyobo Book direct mall order
+    # - Oct 31  7,890 KRW: Coupang Wow Membership
+    seed_csv = (
+        "이용일,이용시간,이용고객명,이용카드명,이용하신곳,국내이용금액(원),결제방법,승인번호\n"
+        "2026-10-11,02:33,김영범,(신) 쿠팡 와우 카드 8691,쿠팡(쿠페이),63700,일시불,30001111\n"
+        "2026-10-27,21:45,김영범,(신) 쿠팡 와우 카드 8691,네이버페이_교보문고,12780,일시불,30002222\n"
+        "2026-10-31,09:56,김영범,(신) 쿠팡 와우 카드 8691,쿠팡(와우멤버십),7890,일시불,30003333\n"
+    )
+    client.post(
+        "/api/v1/scraper/ingest",
+        headers={"X-API-Key": "test-secret-key"},
+        json={"portal": "KB", "raw_content": seed_csv, "auto_generate_slips": False},
+    )
+
+    def _make_eml(msg_id: str, subj: str, frm: str, dt: str, html_body: str) -> bytes:
+        m = EmailMessage()
+        m["Message-ID"] = msg_id
+        m["Subject"] = subj
+        m["From"] = frm
+        m["To"] = "corp@gmail.com"
+        m["Date"] = dt
+        m.set_content(html_body, subtype="html", charset="utf-8")
+        return m.as_bytes()
+
+    # EML 1: Coupang 3rd-party seller ('주식회사 에스앤테크놀로지') with Coupang footer 120-88-00767
+    eml_cp_mp = _make_eml(
+        "<mp-oct11@e.coupang.com>",
+        "[쿠팡] 김*범님 주문하신 내역을 확인해주세요.",
+        "쿠팡 <noreply@e.coupang.com>",
+        "Sun, 11 Oct 2026 02:33:37 +0900",
+        (
+            "<p>판매자배송 상품</p>"
+            "<table>"
+            "<tr><th>구매 상세내역</th><th>쿠팡가</th><th>수량</th><th>구매금액</th><th>판매자</th></tr>"
+            "<tr><td>다크플래쉬 아쿠아루믹 DL-360 ARGB 블랙</td>"
+            "<td>67,000원</td><td>1</td><td>67,000원</td><td>주식회사 에스앤테크놀로지</td></tr>"
+            "</table>"
+            "<table><tr><th>총 결제금액</th><td>63,700원</td></tr></table>"
+            "<p>쿠팡㈜ | 사업자등록번호: 120-88-00767</p>"
+        ),
+    )
+
+    # EML 2: Kyobo Book direct online mall order ('102-81-11670')
+    eml_kyobo = _make_eml(
+        "<kyobo-oct27@kyobobook.com>",
+        "[교보문고] 주문이 완료되었어요.",
+        "교보문고 <noreply@kyobobook.com>",
+        "Tue, 27 Oct 2026 21:52:47 +0900",
+        (
+            "<div>주문 일자 : 2026.10.27</div>"
+            "<div>주문한 상품 총 1 개</div>"
+            "<div>[세트] 입트영 + 귀트영 세트(EBS 방송교재 2026년 11월호)</div>"
+            "<div>총결제금액 : 12,780 원</div>"
+            "<div>(주)교보문고 | 대표이사 : 허정도 | 사업자등록번호 : 102-81-11670</div>"
+        ),
+    )
+
+    # EML 3: Coupang Wow Membership ('120-88-00767')
+    eml_wow = _make_eml(
+        "<wow-oct31@coupang.com>",
+        "[쿠팡] 김*범님, 와우 멤버십 월회비가 결제되었습니다.",
+        "쿠팡 <no_reply@coupang.com>",
+        "Sat, 31 Oct 2026 09:56:17 +0900",
+        (
+            "<div>로켓와우클럽 월회비 결제내역</div>"
+            "<table><tr><th>결제금액</th><td>7,890원</td></tr></table>"
+            "<div>쿠팡(주) | 사업자등록번호 : 120-88-00767</div>"
+        ),
+    )
+
+    # EML 1b: Companion NICEPAY PG email for Oct 11 (carries Coupay PG 1058765162 — must be blocked!)
+    eml_nice_mp = _make_eml(
+        "<nice-oct11@nicepg.co.kr>",
+        "김*범님, 쿠팡(주)에서 결제하신 내역입니다.",
+        "나이스정보통신 <nice_customer@nicepg.co.kr>",
+        "Sun, 11 Oct 2026 02:33:45 +0900",
+        (
+            "<table>"
+            "<tr><th>상품명</th><td>다크플래쉬 아쿠아루믹 DL-360</td></tr>"
+            "<tr><th>결제일시</th><td>2026-10-11 02:33:04</td></tr>"
+            "<tr><th>승인번호</th><td>30001111</td></tr>"
+            "<tr><th>결제금액</th><td>63,700 원 (일시불)</td></tr>"
+            "<tr><th>상점명</th><td>쿠팡(주)</td></tr>"
+            "<tr><th>사업자등록번호</th><td>1058765162</td></tr>"
+            "</table>"
+        ),
+    )
+
+    fake_mailbox = {b"1": eml_cp_mp, b"2": eml_kyobo, b"3": eml_wow, b"4": eml_nice_mp}
+
+    class _FakeImap:
+        def __init__(self, host, port, timeout=25.0):
+            self.host = host
+
+        def login(self, user, password):
+            return ("OK", [b"Logged in"])
+
+        def select(self, mailbox, readonly=True):
+            return ("OK", [b"4"])
+
+        def search(self, charset, criteria):
+            return ("OK", [b"1 2 3 4"])
+
+        def fetch(self, seq_set, query):
+            nums = seq_set.split(b",")
+            out = []
+            for n in nums:
+                raw = fake_mailbox[n]
+                out.append((n + b" (BODY[] {" + str(len(raw)).encode() + b"}", raw))
+                out.append(b")")
+            return ("OK", out)
+
+        def logout(self):
+            return ("BYE", [b""])
+
+    monkeypatch.setattr(ew_mod.imaplib, "IMAP4_SSL", _FakeImap)
+
+    client.post(
+        "/api/v1/scraper/email-config",
+        headers={"X-API-Key": "test-secret-key"},
+        json={
+            "provider": "GMAIL",
+            "email_address": "corp@gmail.com",
+            "app_password": "abcd efgh ijkl mnop",
+            "sync_now": True,
+        },
+    )
+
+    txs = client.get(
+        "/api/v1/dashboard/summary?year_month=ALL",
+        headers={"X-API-Key": "test-secret-key"},
+    ).json()["transactions"]
+    by_amt = {t["total_amount"]: t for t in txs}
+
+    # Check 1: Coupang 3rd-party seller MUST NOT get Coupang's 1208800767!
+    mp_tx_id = by_amt[63700]["tx_id"]
+    mp_rec = client.get(f"/api/v1/transactions/{mp_tx_id}/receipt").json()
+    assert mp_rec["biz_reg_no"] is None
+    assert mp_rec["marketplace_seller"] == "주식회사 에스앤테크놀로지"
+    mp_html = client.get(f"/api/v1/transactions/{mp_tx_id}/receipt-file").text
+    assert "입점판매자: 주식회사 에스앤테크놀로지" in mp_html
+    assert "120-88-00767" not in mp_html
+
+    # Check 2: Kyobo Book direct mall MUST get 1028111670 (formatted 102-81-11670)
+    kb_tx_id = by_amt[12780]["tx_id"]
+    kb_rec = client.get(f"/api/v1/transactions/{kb_tx_id}/receipt").json()
+    assert kb_rec["biz_reg_no"] == "1028111670"
+    kb_html = client.get(f"/api/v1/transactions/{kb_tx_id}/receipt-file").text
+    assert "102-81-11670" in kb_html
+
+    # Check 3: Coupang Wow Membership MUST get 1208800767 (formatted 120-88-00767)
+    wow_tx_id = by_amt[7890]["tx_id"]
+    wow_rec = client.get(f"/api/v1/transactions/{wow_tx_id}/receipt").json()
+    assert wow_rec["biz_reg_no"] == "1208800767"
+    wow_html = client.get(f"/api/v1/transactions/{wow_tx_id}/receipt-file").text
+    assert "120-88-00767" in wow_html
+
+    # Check 4: Later Hometax CSV upload supplies real 3rd-party biz_reg_no (214-87-01235)
+    hometax_csv = (
+        "승인일시,카드번호,승인번호,가맹점사업자등록번호,가맹점명,공급가액,부가세,합계금액,과세유형,가맹점상태\n"
+        "2026-10-11 02:33:00,8691,30001111,214-87-01235,"
+        "주식회사 에스앤테크놀로지,57909,5791,63700,일반과세자,계속사업자\n"
+    )
+    client.post(
+        "/api/v1/scraper/ingest",
+        headers={"X-API-Key": "test-secret-key"},
+        json={"portal": "HOMETAX", "raw_content": hometax_csv, "auto_generate_slips": True},
+    )
+    mp_rec_after = client.get(f"/api/v1/transactions/{mp_tx_id}/receipt").json()
+    assert mp_rec_after["biz_reg_no"] == "2148701235"
+    mp_html_after = client.get(f"/api/v1/transactions/{mp_tx_id}/receipt-file").text
+    assert "214-87-01235" in mp_html_after
+
 
 
 

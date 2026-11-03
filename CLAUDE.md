@@ -58,3 +58,4 @@
 | 2026-11-03 | logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/email_watcher.py, tests/test_sms_parser.py | [fix] Gmail 16자리 앱 비밀번호 공백 자동 제거 및 IMAP 인증 오류 한국어 안내 보강 |
 | 2026-11-03 | logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/dashboard.py (+3 files) | [fix] 이메일 주문 파서 중복 품목 제거 및 연동 결과 확인 UI 추가 |
 | 2026-11-03 | logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/dashboard.py (+5 files) | [feat] 신규 이메일 주문 실시간 전표 자동생성 및 수동 스캔 최신구간 재탐색 적용 |
+| 2026-11-03 | logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/dashboard.py (+3 files) | [feat] 쿠팡 직매입·직영몰 사업자번호 자동추출 및 오픈마켓 입점판매자 분리 적용 |

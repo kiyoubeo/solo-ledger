@@ -22,9 +22,11 @@ from typing import Any, Dict, List, Optional
 
 from sololedger.config import settings
 from sololedger.importers import _normalize_datetime_str, _parse_int_amount
+from sololedger.nts_client import validate_biz_reg_no_checksum
 from sololedger.scraper_service import (
     extract_coupang_orders_from_content,
     extract_rows_from_html_table,
+    format_biz_reg_no_display,
     reconcile_scraped_ecommerce_orders,
 )
 from sololedger.sms_parser import format_card_label
@@ -189,6 +191,72 @@ _KV_PAY_METHOD_KEYS = (
     "결제방식",
     "지불수단",
 )
+_KV_BIZ_NO_KEYS = (
+    "가맹점사업자번호",
+    "공급자사업자번호",
+    "판매자사업자번호",
+    "사업자등록번호",
+    "사업자번호",
+)
+
+# Known PG & open-market intermediary business numbers (never assign as direct item supplier)
+_INTERMEDIARY_OR_PG_BIZ_NOS = frozenset(
+    {
+        "1058765162",  # 쿠팡페이(주) (Coupay PG / Coupang Eats intermediary)
+        "2208115770",  # 나이스정보통신(주)
+        "2208155597",  # KG이니시스
+        "4118601799",  # 토스페이먼츠
+        "1138621083",  # NHN KCP
+        "1048150311",  # 한국정보통신 (KICC / 이지페이)
+        "1168119948",  # 나이스페이먼츠
+        "1168119977",  # 나이스정보통신
+        "5248601528",  # 네이버파이낸셜
+        "2208162517",  # 네이버(주)
+        "5278800696",  # 카카오페이
+        "1208147521",  # 카카오
+        "2158700829",  # 십일번가(11번가)
+        "2208183676",  # 지마켓/옥션
+        "1208765763",  # 우아한형제들(배달의민족 중개)
+        "1148628575",  # 다날
+        "1448115549",  # 엔에이치엔페이코
+    }
+)
+
+_PG_OR_INTERMEDIARY_NAME_RE = re.compile(
+    r"(이니시스|토스페이먼츠|케이씨피|kcp|나이스페이|나이스정보통신|nicepay|한국정보통신|이지페이|easypay|"
+    r"다날|페이코|네이버파이낸셜|네이버페이|카카오페이|십일번가|11번가|지마켓|옥션|인터파크|"
+    r"쿠페이|쿠팡페이|쿠팡이츠|배달의민족|우아한형제들|요기요|위메프|티몬|"
+    r"스마트로|다우데이타|갤럭시아|세틀뱅크|헥토파이낸셜|모빌리언스)",
+    re.IGNORECASE,
+)
+
+# Platforms whose seller identity must come from the order table (not a generic PG receipt table)
+_PLATFORM_SHOP_IN_PG_RE = re.compile(
+    r"(쿠팡|coupang|쿠페이|쿠팡이츠|네이버|카카오|11번가|십일번가|지마켓|옥션|인터파크|"
+    r"배달의민족|우아한형제들|요기요|무신사|오늘의집)",
+    re.IGNORECASE,
+)
+
+
+def _clean_valid_biz_no(raw_val: str) -> str:
+    """Extract and validate a 10-digit Korean business registration number via checksum."""
+    if not raw_val:
+        return ""
+    for m in re.finditer(r"(\d{3})\s*-\s*(\d{2})\s*-\s*(\d{5})", str(raw_val)):
+        cand = f"{m.group(1)}{m.group(2)}{m.group(3)}"
+        if validate_biz_reg_no_checksum(cand):
+            return cand
+    for m in re.finditer(r"(?<!\d)(\d{10})(?!\d)", str(raw_val)):
+        cand = m.group(1)
+        if validate_biz_reg_no_checksum(cand):
+            return cand
+    return ""
+
+
+def _is_coupang_direct_seller(seller_name: str) -> bool:
+    """Return True only when the line-item seller is Coupang Corp. itself (Rocket Direct)."""
+    norm = re.sub(r"[\s()（）\[\]주식회사㈜유한회사]+", "", str(seller_name or "")).lower()
+    return norm in ("쿠팡", "coupang")
 
 
 def _config_file_path(archive_dir: Optional[Path] = None) -> Path:
@@ -448,9 +516,9 @@ def list_statement_matched_transactions(
     """Query live ledger transactions that have generated Transaction Statements (거래명세서)."""
     cursor.execute(
         """
-        SELECT t.tx_id, t.transacted_at, t.card_last4, t.raw_merchant_name,
+        SELECT t.tx_id, t.transacted_at, t.card_last4, t.raw_merchant_name, t.biz_reg_no,
                t.total_amount, t.account_code, t.account_name, t.counterparty_info,
-               t.reconcile_status, r.archived_file_name, r.line_items_json
+               t.reconcile_status, r.archived_file_name, r.line_items_json, r.raw_ocr_response
         FROM card_transactions t
         JOIN receipt_ocr_metadata r ON r.tx_id = t.tx_id
         WHERE t.reconcile_status != 'CANCELED'
@@ -471,12 +539,25 @@ def list_statement_matched_transactions(
                     li_cnt = len(parsed)
             except Exception:
                 pass
+        mp_seller = ""
+        raw_ocr = r["raw_ocr_response"]
+        if raw_ocr:
+            try:
+                ocr_obj = json.loads(str(raw_ocr))
+                if isinstance(ocr_obj, dict):
+                    mp_seller = str(ocr_obj.get("marketplace_seller") or "").strip()
+            except Exception:
+                pass
+        raw_biz = str(r["biz_reg_no"] or "").strip()
+        fmt_biz = format_biz_reg_no_display(raw_biz) if raw_biz else ""
         items.append(
             {
                 "tx_id": int(r["tx_id"]),
                 "transacted_at": str(r["transacted_at"]),
                 "card_label": format_card_label(str(r["card_last4"] or "0000")),
                 "raw_merchant_name": str(r["raw_merchant_name"]),
+                "biz_reg_no": fmt_biz,
+                "marketplace_seller": mp_seller,
                 "item_name": str(r["counterparty_info"] or "-"),
                 "line_items_count": li_cnt,
                 "total_amount": int(r["total_amount"]),
@@ -631,11 +712,32 @@ def _extract_coupang_email_orders(
                     or not re.match(r"^[\d,]+\s*원$", l_price_s)
                 ):
                     break
+                seller_s = ""
+                step = 4
+                if j + 4 < n:
+                    cand_seller = tokens[j + 4].strip()
+                    next_is_section = cand_seller in (
+                        "결제 정보",
+                        "결제정보",
+                        "받으시는 분",
+                    ) or cand_seller.startswith(("로켓배송 상품", "판매자배송 상품", "새벽배송 상품"))
+                    next_is_item_row = (
+                        j + 7 < n
+                        and re.match(r"^[\d,]+\s*원$", tokens[j + 5])
+                        and tokens[j + 6].isdigit()
+                        and re.match(r"^[\d,]+\s*원$", tokens[j + 7])
+                    )
+                    if not next_is_section and not next_is_item_row:
+                        seller_s = cand_seller
+                        step = 5
                 l_amt = _parse_int_amount(l_price_s)
                 qty_val = max(1, int(qty_s))
                 if not _is_noise_product_name(p_name) and l_amt > 0:
-                    raw_items.append({"item": p_name, "qty": qty_val, "price": l_amt})
-                j += 5 if j + 5 <= n else 4
+                    entry: Dict[str, Any] = {"item": p_name, "qty": qty_val, "price": l_amt}
+                    if seller_s:
+                        entry["seller"] = seller_s
+                    raw_items.append(entry)
+                j += step
             i = j
             continue
         i += 1
@@ -659,7 +761,10 @@ def _extract_coupang_email_orders(
                 running += net_p
             else:
                 net_p = total_paid - running
-            prorated_items.append({"item": it["item"], "qty": it["qty"], "price": net_p})
+            p_entry: Dict[str, Any] = {"item": it["item"], "qty": it["qty"], "price": net_p}
+            if it.get("seller"):
+                p_entry["seller"] = it["seller"]
+            prorated_items.append(p_entry)
     else:
         prorated_items = [dict(it) for it in raw_items]
 
@@ -670,6 +775,35 @@ def _extract_coupang_email_orders(
             order_dt = f"{int(m_dt.group(1)):04d}-{int(m_dt.group(2)):02d}-{int(m_dt.group(3)):02d}"
     if not order_dt:
         return []
+
+    # Separate Coupang Direct (쿠팡(주) -> 120-88-00767) from 3rd-party Marketplace/Rocket-Growth sellers
+    sellers = [
+        str(it.get("seller") or "").strip()
+        for it in prorated_items
+        if str(it.get("seller") or "").strip()
+    ]
+    third_party_sellers: List[str] = []
+    for s_name in sellers:
+        if not _is_coupang_direct_seller(s_name) and s_name not in third_party_sellers:
+            third_party_sellers.append(s_name)
+    has_direct_cp = any(_is_coupang_direct_seller(s_name) for s_name in sellers)
+
+    m_cp_biz = re.search(r"사업자등록번호\s*[:：]?\s*(\d{3}\s*-\s*\d{2}\s*-\s*\d{5})", combined_text)
+    cp_biz_no = _clean_valid_biz_no(m_cp_biz.group(1)) if m_cp_biz else "1208800767"
+    if not cp_biz_no:
+        cp_biz_no = "1208800767"
+
+    order_biz_no = ""
+    mp_seller = ""
+    if third_party_sellers:
+        if len(third_party_sellers) == 1 and not has_direct_cp:
+            mp_seller = third_party_sellers[0]
+        elif has_direct_cp:
+            mp_seller = f"{third_party_sellers[0]} 외 (쿠팡 복합주문)"
+        else:
+            mp_seller = f"{third_party_sellers[0]} 외 {len(third_party_sellers) - 1}곳"
+    elif has_direct_cp or ("로켓배송" in combined_text and "판매자배송" not in combined_text):
+        order_biz_no = cp_biz_no
 
     summary_title = (
         prorated_items[0]["item"]
@@ -688,6 +822,8 @@ def _extract_coupang_email_orders(
             "승인번호": "",
             "카드사": "",
             "결제수단": "",
+            "사업자번호": order_biz_no,
+            "입점판매자": mp_seller,
             "품목내역": prorated_items,
         }
     ]
@@ -736,10 +872,11 @@ def _extract_kv_pairs_from_html_and_text(
         "approvals": [],
         "cards": [],
         "pay_methods": [],
+        "table_biz_nos": [],
     }
     priority_amt_keys = ("총결제금액", "총 결제금액", "최종결제금액", "결제금액", "승인금액", "실결제금액")
 
-    def _record_kv(k: str, v: str) -> None:
+    def _record_kv(k: str, v: str, *, from_html_table: bool = False) -> None:
         if not v or k == v:
             return
         if _match_kv_label(k, _KV_PRODUCT_KEYS) and not _is_noise_product_name(v):
@@ -759,6 +896,8 @@ def _extract_kv_pairs_from_html_and_text(
             found["cards"].append(v)
         elif _match_kv_label(k, _KV_PAY_METHOD_KEYS):
             found["pay_methods"].append(v)
+        elif from_html_table and _match_kv_label(k, _KV_BIZ_NO_KEYS):
+            found["table_biz_nos"].append(v)
 
     # 1. Scan HTML <tr><th>/<td> key-value pairs directly (2-cell or 4-cell KV rows only)
     if body_html:
@@ -776,7 +915,7 @@ def _extract_kv_pairs_from_html_and_text(
             clean_cells = [c for c in clean_cells if c]
             if len(clean_cells) in (2, 4):
                 for idx in range(0, len(clean_cells) - 1, 2):
-                    _record_kv(clean_cells[idx], clean_cells[idx + 1])
+                    _record_kv(clean_cells[idx], clean_cells[idx + 1], from_html_table=True)
 
     # 2. Scan structured text lines for "Key : Value" or "Key\nValue"
     lines = [ln.strip() for ln in body_text.splitlines() if ln.strip()]
@@ -947,6 +1086,50 @@ def extract_orders_from_email_content(
             kv_pay = clean_pm
             break
 
+    # Extract supplier biz_reg_no ONLY for verified direct sellers (never PG/intermediary footers)
+    kv_biz_no = ""
+    is_pg_sender = bool(_PG_OR_INTERMEDIARY_NAME_RE.search(f"{sender} {portal_hint}"))
+    for raw_b in kv["table_biz_nos"]:
+        cand_b = _clean_valid_biz_no(raw_b)
+        if (
+            cand_b
+            and cand_b not in _INTERMEDIARY_OR_PG_BIZ_NOS
+            and (not kv_shop or not _PG_OR_INTERMEDIARY_NAME_RE.search(kv_shop))
+            and not (is_pg_sender and kv_shop and _PLATFORM_SHOP_IN_PG_RE.search(kv_shop))
+        ):
+            kv_biz_no = cand_b
+            break
+
+    if not kv_biz_no and portal_hint == "쿠팡" and (
+        "로켓와우클럽 월회비" in combined_text
+        or "와우 멤버십 월회비" in subject
+        or kv_prod == "와우 멤버십"
+    ):
+        m_wow_biz = re.search(
+            r"사업자등록번호\s*[:：]?\s*(\d{3}\s*-\s*\d{2}\s*-\s*\d{5})", combined_text
+        )
+        kv_biz_no = _clean_valid_biz_no(m_wow_biz.group(1)) if m_wow_biz else "1208800767"
+        if not kv_biz_no:
+            kv_biz_no = "1208800767"
+
+    if (
+        not kv_biz_no
+        and "통신판매중개자" not in combined_text
+        and not _PG_OR_INTERMEDIARY_NAME_RE.search(f"{sender} {portal_hint}")
+    ):
+        for m_fb in re.finditer(
+            r"사업자(?:등록)?번호\s*[:：]?\s*(\d{3}\s*-\s*\d{2}\s*-\s*\d{5})", combined_text
+        ):
+            ctx_win = combined_text[
+                max(0, m_fb.start() - 80) : min(len(combined_text), m_fb.end() + 40)
+            ]
+            if _PG_OR_INTERMEDIARY_NAME_RE.search(ctx_win):
+                continue
+            cand_b = _clean_valid_biz_no(m_fb.group(1))
+            if cand_b and cand_b not in _INTERMEDIARY_OR_PG_BIZ_NOS:
+                kv_biz_no = cand_b
+                break
+
     if kv_dt and kv_amt > 0 and kv_prod and not orders:
         orders.append(
             {
@@ -959,6 +1142,7 @@ def extract_orders_from_email_content(
                 "승인번호": kv_app,
                 "카드사": kv_card,
                 "결제수단": kv_pay,
+                "사업자번호": kv_biz_no,
                 "품목내역": [{"item": kv_prod, "qty": 1, "price": kv_amt}],
             }
         )
@@ -993,6 +1177,8 @@ def extract_orders_from_email_content(
             o["카드사"] = kv_card
         if kv_pay and not o.get("결제수단"):
             o["결제수단"] = kv_pay
+        if kv_biz_no and not o.get("사업자번호") and not o.get("입점판매자"):
+            o["사업자번호"] = kv_biz_no
         sig = f"{dt_k}|{amt_k}|{prod_k}"
         if sig not in seen:
             seen.add(sig)
@@ -1152,7 +1338,20 @@ def _merge_companion_email_orders(orders: List[Dict[str, Any]]) -> List[Dict[str
                 clusters.append(dict(cand))
                 continue
 
-            for meta_key in ("승인번호", "카드사", "결제수단", "상점명", "발신처"):
+            for meta_key in (
+                "승인번호",
+                "카드사",
+                "결제수단",
+                "상점명",
+                "발신처",
+                "입점판매자",
+                "사업자번호",
+            ):
+                if meta_key == "사업자번호" and (
+                    target_cluster.get("입점판매자") or cand.get("입점판매자")
+                ):
+                    target_cluster["사업자번호"] = ""
+                    continue
                 if not target_cluster.get(meta_key) and cand.get(meta_key):
                     target_cluster[meta_key] = cand[meta_key]
 

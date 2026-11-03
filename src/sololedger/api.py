@@ -553,6 +553,7 @@ async def get_transaction_receipt_detail(tx_id: int):
         is_renderable_image = False
         archived_name = rec_dict["archived_file_name"] if rec_dict else None
         line_items_list = []
+        marketplace_seller = None
         if rec_dict:
             raw_li = rec_dict.get("line_items_json")
             if raw_li:
@@ -560,6 +561,14 @@ async def get_transaction_receipt_detail(tx_id: int):
                     parsed_li = json.loads(str(raw_li))
                     if isinstance(parsed_li, list):
                         line_items_list = [r for r in parsed_li if isinstance(r, dict)]
+                except Exception:
+                    pass
+            raw_ocr_meta = rec_dict.get("raw_ocr_response")
+            if raw_ocr_meta:
+                try:
+                    parsed_meta = json.loads(str(raw_ocr_meta))
+                    if isinstance(parsed_meta, dict) and parsed_meta.get("marketplace_seller"):
+                        marketplace_seller = str(parsed_meta["marketplace_seller"]).strip() or None
                 except Exception:
                     pass
             candidates = [
@@ -600,6 +609,7 @@ async def get_transaction_receipt_detail(tx_id: int):
             "approval_no": tx_dict.get("approval_no"),
             "raw_merchant_name": tx_dict["raw_merchant_name"],
             "biz_reg_no": tx_dict.get("biz_reg_no"),
+            "marketplace_seller": marketplace_seller,
             "total_amount": int(tx_dict["total_amount"]),
             "supply_value": int(tx_dict["supply_value"]),
             "vat_amount": int(tx_dict["vat_amount"]),

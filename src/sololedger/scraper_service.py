@@ -45,6 +45,7 @@ from sololedger.importers import (
     parse_hometax_csv,
 )
 from sololedger.models import ReconcileItem
+from sololedger.nts_client import validate_biz_reg_no_checksum
 from sololedger.reconciler import reconcile_single_item
 from sololedger.sms_parser import format_card_label, sanitize_card_folder_name
 from sololedger.tax_engine import calculate_supply_and_vat, evaluate_tax_rules
@@ -620,7 +621,11 @@ def build_coupang_browser_extractor_script(
 
   const orders = [];
   const seen = new Set();
-  const addOrder = (dt, name, amt, lineItems) => {{
+  const isDirectCoupang = (s) => {{
+    const norm = String(s || '').replace(/[\\s()（）\\[\\]주식회사㈜유한회사]+/g, '').toLowerCase();
+    return norm === '쿠팡' || norm === 'coupang';
+  }};
+  const addOrder = (dt, name, amt, lineItems, bizNo, mpSeller) => {{
     if (!dt || !name || !amt || amt <= 0) return;
     const key = dt + '|' + name + '|' + amt;
     if (seen.has(key)) return;
@@ -629,6 +634,8 @@ def build_coupang_browser_extractor_script(
       주문일자: dt,
       상품명: String(name).trim(),
       결제금액: Number(amt),
+      사업자번호: bizNo || '',
+      입점판매자: mpSeller || '',
       품목내역: Array.isArray(lineItems) && lineItems.length > 0
         ? lineItems
         : [{{ item: String(name).trim(), qty: 1, price: Number(amt) }}]
@@ -657,25 +664,42 @@ def build_coupang_browser_extractor_script(
               ? new Date(rawDt + 9 * 3600 * 1000).toISOString().slice(0, 10)
               : String(rawDt).slice(0, 10).replace(/\\./g, '-');
             const items = [];
-            const findProds = (s) => {{
+            const findProds = (s, inheritedSeller) => {{
               if (!s || typeof s !== 'object') return;
-              if (Array.isArray(s)) {{ s.forEach(findProds); return; }}
+              if (Array.isArray(s)) {{ s.forEach((el) => findProds(el, inheritedSeller)); return; }}
+              const curSeller = String(
+                s.vendorName || s.sellerName || (s.vendor && s.vendor.name) || inheritedSeller || ''
+              ).trim();
               const pName = s.productName || s.itemName || s.title;
               const pAmt = s.combinedPrice || s.totalPrice || s.unitPrice || s.price;
               const pQty = parseInt(String(s.quantity || s.qty || s.count || 1), 10) || 1;
               if (pName && pAmt) {{
                 const nAmt = parseInt(String(pAmt).replace(/[^0-9]/g, ''), 10);
-                if (nAmt > 0) items.push([String(pName).trim(), pQty, nAmt]);
+                if (nAmt > 0) items.push([String(pName).trim(), pQty, nAmt, curSeller]);
               }}
-              Object.values(s).forEach(findProds);
+              Object.values(s).forEach((child) => findProds(child, curSeller));
             }};
-            findProds(node.deliveryGroupList || node.productList || node.bundleReceiptList || node.items);
-            items.forEach(([n, q, a]) => addOrder(dt, n, a, [{{ item: n, qty: q, price: a }}]));
+            findProds(node.deliveryGroupList || node.productList || node.bundleReceiptList || node.items, '');
+            items.forEach(([n, q, a, sel]) => {{
+              const bNo = sel && isDirectCoupang(sel) ? '120-88-00767' : '';
+              const mp = sel && !isDirectCoupang(sel) ? sel : '';
+              const li = sel ? {{ item: n, qty: q, price: a, seller: sel }} : {{ item: n, qty: q, price: a }};
+              addOrder(dt, n, a, [li], bNo, mp);
+            }});
             const tot = parseInt(String(node.totalPayedPrice || node.totalProductPrice || 0).replace(/[^0-9]/g, ''), 10)
               || items.reduce((acc, x) => acc + x[2], 0);
             if (items.length >= 2 && tot > 0) {{
-              const lines = items.map(([n, q, a]) => ({{ item: n, qty: q, price: a }}));
-              addOrder(dt, `${{items[0][0]}} 외 ${{items.length - 1}}건`, tot, lines);
+              const lines = items.map(([n, q, a, sel]) => (
+                sel ? {{ item: n, qty: q, price: a, seller: sel }} : {{ item: n, qty: q, price: a }}
+              ));
+              const sellers = items.map((x) => x[3]).filter(Boolean);
+              const third = [...new Set(sellers.filter((s) => !isDirectCoupang(s)))];
+              const hasCp = sellers.some(isDirectCoupang);
+              const grpBiz = (third.length === 0 && hasCp) ? '120-88-00767' : '';
+              const grpMp = third.length > 0
+                ? (third.length === 1 && !hasCp ? third[0] : (third[0] + ' 외'))
+                : '';
+              addOrder(dt, `${{items[0][0]}} 외 ${{items.length - 1}}건`, tot, lines, grpBiz, grpMp);
             }}
           }}
           Object.values(node).forEach(walk);
@@ -875,7 +899,11 @@ _CDP_COLLECT_JS = """(async () => {
 
   const orders = [];
   const seen = new Set();
-  const addOrder = (dt, name, amt, lineItems) => {
+  const isDirectCoupang = (s) => {
+    const norm = String(s || '').replace(/[\\s()（）\\[\\]주식회사㈜유한회사]+/g, '').toLowerCase();
+    return norm === '쿠팡' || norm === 'coupang';
+  };
+  const addOrder = (dt, name, amt, lineItems, bizNo, mpSeller) => {
     if (!dt || !name || !amt || amt <= 0) return;
     const key = dt + '|' + name + '|' + amt;
     if (seen.has(key)) return;
@@ -884,6 +912,8 @@ _CDP_COLLECT_JS = """(async () => {
       주문일자: dt,
       상품명: String(name).trim(),
       결제금액: Number(amt),
+      사업자번호: bizNo || '',
+      입점판매자: mpSeller || '',
       품목내역: Array.isArray(lineItems) && lineItems.length > 0
         ? lineItems
         : [{ item: String(name).trim(), qty: 1, price: Number(amt) }]
@@ -916,25 +946,42 @@ _CDP_COLLECT_JS = """(async () => {
               ? new Date(rawDt + 9 * 3600 * 1000).toISOString().slice(0, 10)
               : String(rawDt).slice(0, 10).replace(/\\./g, '-');
             const items = [];
-            const findProds = (s) => {
+            const findProds = (s, inheritedSeller) => {
               if (!s || typeof s !== 'object') return;
-              if (Array.isArray(s)) { s.forEach(findProds); return; }
+              if (Array.isArray(s)) { s.forEach((el) => findProds(el, inheritedSeller)); return; }
+              const curSeller = String(
+                s.vendorName || s.sellerName || (s.vendor && s.vendor.name) || inheritedSeller || ''
+              ).trim();
               const pName = s.productName || s.itemName || s.title;
               const pAmt = s.combinedPrice || s.totalPrice || s.unitPrice || s.price;
               const pQty = parseInt(String(s.quantity || s.qty || s.count || 1), 10) || 1;
               if (pName && pAmt) {
                 const nAmt = parseInt(String(pAmt).replace(/[^0-9]/g, ''), 10);
-                if (nAmt > 0) items.push([String(pName).trim(), pQty, nAmt]);
+                if (nAmt > 0) items.push([String(pName).trim(), pQty, nAmt, curSeller]);
               }
-              Object.values(s).forEach(findProds);
+              Object.values(s).forEach((child) => findProds(child, curSeller));
             };
-            findProds(node.deliveryGroupList || node.productList || node.bundleReceiptList || node.items);
-            items.forEach(([n, q, a]) => addOrder(dt, n, a, [{ item: n, qty: q, price: a }]));
+            findProds(node.deliveryGroupList || node.productList || node.bundleReceiptList || node.items, '');
+            items.forEach(([n, q, a, sel]) => {
+              const bNo = sel && isDirectCoupang(sel) ? '120-88-00767' : '';
+              const mp = sel && !isDirectCoupang(sel) ? sel : '';
+              const li = sel ? { item: n, qty: q, price: a, seller: sel } : { item: n, qty: q, price: a };
+              addOrder(dt, n, a, [li], bNo, mp);
+            });
             const tot = parseInt(String(node.totalPayedPrice || node.totalProductPrice || 0).replace(/[^0-9]/g, ''), 10)
               || items.reduce((acc, x) => acc + x[2], 0);
             if (items.length >= 2 && tot > 0) {
-              const lines = items.map(([n, q, a]) => ({ item: n, qty: q, price: a }));
-              addOrder(dt, `${items[0][0]} 외 ${items.length - 1}건`, tot, lines);
+              const lines = items.map(([n, q, a, sel]) => (
+                sel ? { item: n, qty: q, price: a, seller: sel } : { item: n, qty: q, price: a }
+              ));
+              const sellers = items.map((x) => x[3]).filter(Boolean);
+              const third = [...new Set(sellers.filter((s) => !isDirectCoupang(s)))];
+              const hasCp = sellers.some(isDirectCoupang);
+              const grpBiz = (third.length === 0 && hasCp) ? '120-88-00767' : '';
+              const grpMp = third.length > 0
+                ? (third.length === 1 && !hasCp ? third[0] : (third[0] + ' 외'))
+                : '';
+              addOrder(dt, `${items[0][0]} 외 ${items.length - 1}건`, tot, lines, grpBiz, grpMp);
             }
           }
           Object.values(node).forEach(walk);
@@ -1271,6 +1318,55 @@ def _infer_merchant_for_email_order(
     return shop_name or portal_hint or "온라인결제(이메일)"
 
 
+def clean_valid_biz_reg_no(raw_biz_no: Optional[str]) -> Optional[str]:
+    """Normalize a 10-digit Korean business registration number and validate its checksum."""
+    if not raw_biz_no:
+        return None
+    digits = re.sub(r"\D", "", str(raw_biz_no))
+    if len(digits) == 10 and validate_biz_reg_no_checksum(digits):
+        return digits
+    return None
+
+
+def format_biz_reg_no_display(
+    biz_reg_no: Optional[str],
+    marketplace_seller: Optional[str] = None,
+    fallback: str = "미등록 (온라인/PG 가맹점)",
+) -> str:
+    """Format a 10-digit biz_reg_no as XXX-XX-XXXXX or show marketplace seller notice."""
+    raw = str(biz_reg_no or "").strip()
+    if raw:
+        digits = re.sub(r"\D", "", raw)
+        if len(digits) == 10:
+            return f"{digits[:3]}-{digits[3:5]}-{digits[5:]}"
+        return raw
+    mp = str(marketplace_seller or "").strip()
+    if mp:
+        return f"미등록 (입점판매자: {mp} · 홈택스 대사 대기)"
+    return fallback
+
+
+def _ensure_merchant_master(
+    cursor: sqlite3.Cursor,
+    biz_reg_no: str,
+    merchant_name: str,
+) -> None:
+    """Ensure foreign-key target row exists in `merchants` without overwriting NTS cache."""
+    if not biz_reg_no:
+        return
+    m_name = (merchant_name or "온라인가맹점").strip() or "온라인가맹점"
+    is_pg = 1 if any(k in m_name.lower() for k in _ONLINE_OR_PG_MERCHANT_KEYWORDS) else 0
+    cursor.execute(
+        """
+        INSERT INTO merchants (
+            biz_reg_no, merchant_name, tax_type_code, biz_status, is_pg_provider
+        ) VALUES (?, ?, 'GENERAL', 'ACTIVE', ?)
+        ON CONFLICT(biz_reg_no) DO NOTHING
+        """,
+        (biz_reg_no, m_name, is_pg),
+    )
+
+
 def reconcile_scraped_ecommerce_orders(
     cursor: sqlite3.Cursor,
     raw_content: str,
@@ -1322,6 +1418,10 @@ def reconcile_scraped_ecommerce_orders(
         shop_name = str(row.get("상점명") or row.get("가맹점명") or "").strip()
         app_no = str(row.get("승인번호") or "").strip()
         card_hint = str(row.get("카드사") or row.get("결제기관") or "").strip()
+        clean_biz_no = clean_valid_biz_reg_no(
+            str(row.get("사업자번호") or row.get("biz_reg_no") or "")
+        )
+        mp_seller = str(row.get("입점판매자") or row.get("marketplace_seller") or "").strip()
         norm_shop = _norm_merchant_token(shop_name)
 
         cursor.execute(
@@ -1385,6 +1485,7 @@ def reconcile_scraped_ecommerce_orders(
                 break
 
         is_newly_created = False
+        biz_backfilled = False
         if tx_row is None:
             should_auto_create = auto_create_all or (
                 auto_create_after_date is not None and date_prefix > auto_create_after_date
@@ -1412,23 +1513,26 @@ def reconcile_scraped_ecommerce_orders(
                 else f"{date_prefix} 12:00:00"
             )
             inferred_merchant = _infer_merchant_for_email_order(cursor, row)
+            if clean_biz_no:
+                _ensure_merchant_master(cursor, clean_biz_no, shop_name or inferred_merchant)
             resolved_card = _resolve_card_last4_from_issuer(cursor, card_hint, inferred_merchant)
-            rule_eval = evaluate_tax_rules(cursor, inferred_merchant, None)
+            rule_eval = evaluate_tax_rules(cursor, inferred_merchant, clean_biz_no)
             sup_val, vat_val = calculate_supply_and_vat(amount, rule_eval["vat_deduction_type"])
             cursor.execute(
                 """
                 INSERT INTO card_transactions (
-                    card_last4, approval_no, transacted_at, raw_merchant_name,
+                    card_last4, approval_no, transacted_at, raw_merchant_name, biz_reg_no,
                     total_amount, supply_value, vat_amount,
                     account_code, account_name, vat_deduction_type,
                     non_deduct_reason, is_vehicle_expense, counterparty_info, reconcile_status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'EMAIL_ORDER')
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'EMAIL_ORDER')
                 """,
                 (
                     resolved_card,
                     app_no or None,
                     full_ts,
                     inferred_merchant,
+                    clean_biz_no,
                     amount,
                     sup_val,
                     vat_val,
@@ -1448,29 +1552,46 @@ def reconcile_scraped_ecommerce_orders(
             is_newly_created = True
             created_tx_ids.append(new_tx_id)
         else:
-            # Backfill approval_no or card_last4 onto an existing EMAIL_ORDER/SMS row if newly discovered
+            # Backfill approval_no, card_last4, or verified direct-seller biz_reg_no if empty
             ex_id = int(tx_row["tx_id"])
             ex_app = str(tx_row["approval_no"] or "").strip()
             ex_card = str(tx_row["card_last4"] or "0000")
+            ex_biz = str(tx_row["biz_reg_no"] or "").strip()
             ex_status = str(tx_row["reconcile_status"] or "")
             new_card = (
                 _resolve_card_last4_from_issuer(cursor, card_hint, str(tx_row["raw_merchant_name"]))
                 if card_hint and (ex_card == "0000" or ex_status == "EMAIL_ORDER")
                 else ex_card
             )
-            if (app_no and not ex_app) or (new_card != ex_card and new_card != "0000"):
+            can_backfill_biz = bool(clean_biz_no and not ex_biz)
+            if can_backfill_biz and clean_biz_no:
+                _ensure_merchant_master(
+                    cursor, clean_biz_no, shop_name or str(tx_row["raw_merchant_name"])
+                )
+            if (
+                (app_no and not ex_app)
+                or (new_card != ex_card and new_card != "0000")
+                or can_backfill_biz
+            ):
                 cursor.execute(
                     """
                     UPDATE card_transactions
                     SET approval_no = COALESCE(approval_no, ?),
                         card_last4 = ?,
+                        biz_reg_no = COALESCE(biz_reg_no, ?),
                         updated_at = CURRENT_TIMESTAMP
                     WHERE tx_id = ?
                     """,
-                    (app_no or None, new_card if new_card != "0000" else ex_card, ex_id),
+                    (
+                        app_no or None,
+                        new_card if new_card != "0000" else ex_card,
+                        clean_biz_no if can_backfill_biz else None,
+                        ex_id,
+                    ),
                 )
                 cursor.execute("SELECT * FROM card_transactions WHERE tx_id = ?", (ex_id,))
                 tx_row = cursor.fetchone() or tx_row
+                biz_backfilled = can_backfill_biz
 
         tx_id = int(tx_row["tx_id"])
         used_tx_ids.add(tx_id)
@@ -1485,7 +1606,7 @@ def reconcile_scraped_ecommerce_orders(
 
         cursor.execute(
             """
-            SELECT archived_file_name, line_items_json
+            SELECT archived_file_name, line_items_json, raw_ocr_response
             FROM receipt_ocr_metadata
             WHERE tx_id = ? AND source_channel = 'STATEMENT'
             ORDER BY receipt_id DESC LIMIT 1
@@ -1494,17 +1615,35 @@ def reconcile_scraped_ecommerce_orders(
         )
         prev_stmt = cursor.fetchone()
         prev_memo = str(tx_row["counterparty_info"] or "").strip()
+        prev_mp_seller = ""
+        prev_parsed_lines: Optional[List[Dict[str, Any]]] = None
+        if prev_stmt:
+            if prev_stmt["line_items_json"]:
+                try:
+                    p_li = json.loads(str(prev_stmt["line_items_json"]))
+                    if isinstance(p_li, list):
+                        prev_parsed_lines = p_li
+                except Exception:
+                    pass
+            if prev_stmt["raw_ocr_response"]:
+                try:
+                    p_ocr = json.loads(str(prev_stmt["raw_ocr_response"]))
+                    if isinstance(p_ocr, dict):
+                        prev_mp_seller = str(p_ocr.get("marketplace_seller") or "").strip()
+                except Exception:
+                    pass
+
+        mp_changed = bool(mp_seller and mp_seller != prev_mp_seller)
 
         # Prevent truncated PG 1-liners from overwriting a fuller or multi-item existing statement
         if prev_stmt and (not row_line_items or len(row_line_items) <= 1):
             keep_existing = False
-            if re.search(r"포함\s*총\s*\d+", final_item_name) and prev_stmt["line_items_json"]:
-                try:
-                    prev_lines = json.loads(str(prev_stmt["line_items_json"]))
-                    if isinstance(prev_lines, list) and len(prev_lines) >= 2:
-                        keep_existing = True
-                except Exception:
-                    pass
+            if (
+                re.search(r"포함\s*총\s*\d+", final_item_name)
+                and prev_parsed_lines
+                and len(prev_parsed_lines) >= 2
+            ):
+                keep_existing = True
             if not keep_existing and prev_memo:
                 norm_prev = _norm_alnum_ko(prev_memo)
                 norm_new = _norm_alnum_ko(final_item_name)
@@ -1515,25 +1654,40 @@ def reconcile_scraped_ecommerce_orders(
                 ):
                     keep_existing = True
             if keep_existing:
-                continue
+                if not biz_backfilled and not mp_changed:
+                    continue
+                final_item_name = prev_memo or final_item_name
+                if prev_parsed_lines:
+                    row_line_items = prev_parsed_lines
 
-        if is_newly_created or prev_stmt is None or prev_memo != final_item_name:
+        if (
+            is_newly_created
+            or prev_stmt is None
+            or prev_memo != final_item_name
+            or biz_backfilled
+            or mp_changed
+        ):
             newly_stated_tx_ids.append(tx_id)
 
+        effective_mp_seller = mp_seller or prev_mp_seller
         stmt_res = generate_electronic_statement_for_tx(
             cursor,
             tx_id=tx_id,
             item_name=final_item_name,
             line_items=row_line_items,
+            marketplace_seller=effective_mp_seller or None,
             archive_dir=archive_dir,
         )
         updated_tx_ids.append(tx_id)
+        tx_biz_raw = str(tx_row["biz_reg_no"] or "").strip()
         matched_items.append(
             {
                 "tx_id": tx_id,
                 "transacted_at": str(tx_row["transacted_at"]),
                 "card_label": format_card_label(str(tx_row["card_last4"] or "0000")),
                 "raw_merchant_name": str(tx_row["raw_merchant_name"]),
+                "biz_reg_no": format_biz_reg_no_display(tx_biz_raw) if tx_biz_raw else "",
+                "marketplace_seller": effective_mp_seller,
                 "item_name": stmt_res["item_name"],
                 "line_items_count": len(stmt_res.get("line_items") or []),
                 "total_amount": int(tx_row["total_amount"]),
@@ -1565,7 +1719,9 @@ def render_electronic_slip_html(tx_row: Dict[str, Any]) -> str:
     t_dt = html.escape(str(tx_row["transacted_at"]))
     app_no = html.escape(str(tx_row.get("approval_no") or f"SMS-{tx_id:06d}"))
     merchant = html.escape(str(tx_row["raw_merchant_name"]))
-    biz_no = html.escape(str(tx_row.get("biz_reg_no") or "문자수집(추후대사)"))
+    biz_no = html.escape(
+        format_biz_reg_no_display(tx_row.get("biz_reg_no"), fallback="문자수집(추후대사)")
+    )
     total_amt = int(tx_row["total_amount"])
     supply_val = int(tx_row["supply_value"])
     vat_amt = int(tx_row["vat_amount"])
@@ -1629,6 +1785,7 @@ def render_electronic_slip_html(tx_row: Dict[str, Any]) -> str:
 def render_electronic_statement_html(
     tx_row: Dict[str, Any],
     line_items: Optional[List[Dict[str, Any]]] = None,
+    marketplace_seller: Optional[str] = None,
 ) -> str:
     """Render a standalone printable Korean Transaction Statement (거래명세서)."""
     c_code = str(tx_row.get("card_last4") or "0000")
@@ -1638,7 +1795,13 @@ def render_electronic_statement_html(
     md_str = html.escape(str(tx_row["transacted_at"])[5:10].replace("-", "/"))
     app_no = html.escape(str(tx_row.get("approval_no") or f"STMT-{tx_id:06d}"))
     merchant = html.escape(str(tx_row["raw_merchant_name"]))
-    biz_no = html.escape(str(tx_row.get("biz_reg_no") or "미등록 (온라인/PG 가맹점)"))
+    biz_no = html.escape(
+        format_biz_reg_no_display(
+            tx_row.get("biz_reg_no"),
+            marketplace_seller=marketplace_seller,
+            fallback="미등록 (온라인/PG 가맹점)",
+        )
+    )
     total_amt = int(tx_row["total_amount"])
     vat_type = str(tx_row.get("vat_deduction_type") or "DEDUCTIBLE")
     supply_val = int(tx_row["supply_value"])
@@ -1663,6 +1826,13 @@ def render_electronic_statement_html(
     if line_items and len(line_items) > 0:
         for li in line_items:
             li_name = html.escape(str(li.get("item") or li.get("상품명") or item_title))
+            li_seller = str(li.get("seller") or "").strip()
+            seller_suffix = (
+                f" <span style='color:#64748b; font-size:11px; font-weight:400;'>"
+                f"(판매자: {html.escape(li_seller)})</span>"
+                if (marketplace_seller and li_seller)
+                else ""
+            )
             li_qty = max(1, int(li.get("qty") or 1))
             li_price = int(li.get("price") or total_amt)
             li_sup, li_vat = calculate_supply_and_vat(li_price, vat_type)
@@ -1670,7 +1840,7 @@ def render_electronic_statement_html(
             tbody_rows.append(
                 f"<tr>"
                 f"<td>{md_str}</td>"
-                f"<td><strong>{li_name}</strong></td>"
+                f"<td><strong>{li_name}</strong>{seller_suffix}</td>"
                 f"<td class='num'>{li_qty}</td>"
                 f"<td class='num'>{li_sup:,}원</td>"
                 f"<td class='num'>{li_vat:,}원</td>"
@@ -1788,6 +1958,7 @@ def generate_electronic_statement_for_tx(
     file_bytes: Optional[bytes] = None,
     file_name: Optional[str] = None,
     line_items: Optional[List[Dict[str, Any]]] = None,
+    marketplace_seller: Optional[str] = None,
     archive_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Generate or attach a Transaction Statement (거래명세서) for a specific transaction."""
@@ -1796,6 +1967,25 @@ def generate_electronic_statement_for_tx(
     if row is None:
         raise ValueError(f"Transaction #{tx_id} not found.")
     tx = dict(row)
+
+    resolved_mp_seller = (marketplace_seller or "").strip()
+    if not resolved_mp_seller:
+        cursor.execute(
+            """
+            SELECT raw_ocr_response FROM receipt_ocr_metadata
+            WHERE tx_id = ? AND source_channel = 'STATEMENT'
+            ORDER BY receipt_id DESC LIMIT 1
+            """,
+            (tx_id,),
+        )
+        old_stmt_meta = cursor.fetchone()
+        if old_stmt_meta and old_stmt_meta["raw_ocr_response"]:
+            try:
+                old_obj = json.loads(str(old_stmt_meta["raw_ocr_response"]))
+                if isinstance(old_obj, dict):
+                    resolved_mp_seller = str(old_obj.get("marketplace_seller") or "").strip()
+            except Exception:
+                pass
 
     resolved_item = (item_name or "").strip()
     resolved_lines: Optional[List[Dict[str, Any]]] = line_items
@@ -1880,7 +2070,11 @@ def generate_electronic_statement_for_tx(
         payload_bytes = file_bytes
         orig_name = file_name or f"statement_tx_{tx_id}.pdf"
     else:
-        stmt_html = render_electronic_statement_html(updated_tx, line_items=final_lines)
+        stmt_html = render_electronic_statement_html(
+            updated_tx,
+            line_items=final_lines,
+            marketplace_seller=resolved_mp_seller or None,
+        )
         payload_bytes = stmt_html.encode("utf-8")
         orig_name = f"statement_tx_{tx_id}.html"
 
@@ -1911,13 +2105,16 @@ def generate_electronic_statement_for_tx(
         "DELETE FROM receipt_ocr_metadata WHERE file_hash_sha256 = ?",
         (file_hash,),
     )
+    meta_json_obj: Dict[str, Any] = {"type": "TRANSACTION_STATEMENT"}
+    if resolved_mp_seller:
+        meta_json_obj["marketplace_seller"] = resolved_mp_seller
     cursor.execute(
         """
         INSERT INTO receipt_ocr_metadata (
             tx_id, source_channel, original_file_path, archived_file_name,
             file_hash_sha256, ocr_biz_reg_no, ocr_total_amount,
             line_items_json, raw_ocr_response, ocr_confidence
-        ) VALUES (?, 'STATEMENT', ?, ?, ?, ?, ?, ?, '{"type":"TRANSACTION_STATEMENT"}', 1.0)
+        ) VALUES (?, 'STATEMENT', ?, ?, ?, ?, ?, ?, ?, 1.0)
         """,
         (
             tx_id,
@@ -1927,6 +2124,7 @@ def generate_electronic_statement_for_tx(
             updated_tx.get("biz_reg_no"),
             int(updated_tx["total_amount"]),
             json.dumps(final_lines, ensure_ascii=False),
+            json.dumps(meta_json_obj, ensure_ascii=False),
         ),
     )
 
@@ -1935,6 +2133,7 @@ def generate_electronic_statement_for_tx(
         "tx_id": tx_id,
         "item_name": resolved_item,
         "line_items": final_lines,
+        "marketplace_seller": resolved_mp_seller,
         "account_code": new_code,
         "account_name": new_name,
         "archived_file_name": arch_name,
@@ -2073,10 +2272,34 @@ def ingest_scraped_payload(
         st = r["match_stage"]
         stage_counts[st] = stage_counts.get(st, 0) + 1
         if r.get("action") == "updated" and r.get("tx_id"):
+            upd_id = int(r["tx_id"])
             cursor.execute(
                 "DELETE FROM receipt_ocr_metadata WHERE tx_id = ? AND source_channel = 'AUTO_SLIP'",
-                (r["tx_id"],),
+                (upd_id,),
             )
+            cursor.execute(
+                """
+                SELECT r.line_items_json, r.ocr_biz_reg_no, t.biz_reg_no
+                FROM receipt_ocr_metadata r
+                JOIN card_transactions t ON t.tx_id = r.tx_id
+                WHERE r.tx_id = ? AND r.source_channel = 'STATEMENT'
+                ORDER BY r.receipt_id DESC LIMIT 1
+                """,
+                (upd_id,),
+            )
+            st_row = cursor.fetchone()
+            if st_row and st_row["biz_reg_no"] and st_row["ocr_biz_reg_no"] != st_row["biz_reg_no"]:
+                prev_li = None
+                if st_row["line_items_json"]:
+                    try:
+                        parsed_li = json.loads(str(st_row["line_items_json"]))
+                        if isinstance(parsed_li, list):
+                            prev_li = parsed_li
+                    except Exception:
+                        pass
+                generate_electronic_statement_for_tx(
+                    cursor, tx_id=upd_id, line_items=prev_li, archive_dir=archive_dir
+                )
 
     cursor.execute(
         """
