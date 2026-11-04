@@ -1760,7 +1760,7 @@ def render_electronic_slip_html(tx_row: Dict[str, Any]) -> str:
 </head>
 <body>
   <div class="slip">
-    <h1>신용카드 매출전표 (적격증빙)</h1>
+    <h1>신용카드 매출전표</h1>
     <div class="row"><span>전표번호</span><strong>#{tx_id}</strong></div>
     <div class="row"><span>카드종류</span><strong>{c_label}</strong></div>
     <div class="row"><span>거래일시</span><strong>{t_dt}</strong></div>
@@ -1887,7 +1887,7 @@ def render_electronic_statement_html(
 <body>
   <div class="stmt">
     <h1>거 래 명 세 서</h1>
-    <div class="sub">(공급받는자 보관용 · 전표번호 #{tx_id})</div>
+    <div class="sub">(전표번호 #{tx_id})</div>
     <table>
       <tr>
         <th>거래일시</th><td>{t_dt}</td>

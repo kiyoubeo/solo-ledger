@@ -1202,7 +1202,7 @@ def render_dashboard_html(
       <div class="no-print" style="display:flex; gap:6px; margin-bottom:12px;">
         <button id="tab-btn-slip" onclick="switchModalDocTab('SLIP')">🧾 신용카드 매출전표</button>
         <button id="tab-btn-stmt" class="secondary" onclick="switchModalDocTab('STATEMENT')">
-          📄 거래명세서 (공급받는자 보관용)
+          📄 거래명세서
         </button>
       </div>
       <div id="modal-slip-content" class="slip-box">불러오는 중...</div>
@@ -1587,7 +1587,7 @@ def render_dashboard_html(
             '</tr>';
         }}
         slipEl.innerHTML =
-          '<div class="slip-title" style="color:#1e3a8a;">[ 거 래 명 세 서 ] (공급받는자 보관용)</div>' +
+          '<div class="slip-title" style="color:#1e3a8a;">[ 거 래 명 세 서 ]</div>' +
           '<div class="slip-row"><span>거래일시</span><strong>' + d.transacted_at + '</strong></div>' +
           '<div class="slip-row"><span>전표/승인번호</span><span>#' + d.tx_id + ' / ' + appNo + '</span></div>' +
           '<div class="slip-divider"></div>' +
@@ -1649,7 +1649,7 @@ def render_dashboard_html(
         document.getElementById('modal-header-title').textContent =
           '🧾 신용카드 매출전표 (#' + d.tx_id + ')';
         slipEl.innerHTML =
-          '<div class="slip-title">[신용카드 매출전표 / 적격증빙]</div>' +
+          '<div class="slip-title">[신용카드 매출전표]</div>' +
           '<div class="slip-row"><span>카드종류</span><strong>' + d.card_label + '</strong></div>' +
           '<div class="slip-row"><span>거래일시</span><strong>' + d.transacted_at + '</strong></div>' +
           '<div class="slip-row"><span>승인번호</span><span>' + appNo + '</span></div>' +

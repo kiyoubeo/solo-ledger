@@ -1033,6 +1033,43 @@ def test_email_supplier_biz_reg_no_extraction_and_marketplace_separation(
     assert "214-87-01235" in mp_html_after
 
 
+def test_receipt_and_statement_titles_omit_verbose_suffixes(client):
+    """Ensure '적격증빙' and '공급받는자 보관용' labels are removed from UI and HTML archives."""
+    from sololedger.scraper_service import (
+        render_electronic_slip_html,
+        render_electronic_statement_html,
+    )
+
+    dash_html = client.get("/dashboard").text
+    assert "적격증빙" not in dash_html
+    assert "공급받는자 보관용" not in dash_html
+    assert "[신용카드 매출전표]" in dash_html
+    assert "[ 거 래 명 세 서 ]" in dash_html
+
+    sample_tx = {
+        "tx_id": 5865,
+        "card_last4": "6534",
+        "transacted_at": "2026-08-24 21:47:14",
+        "approval_no": "84411412",
+        "raw_merchant_name": "씨유(CU) 영등포신성점",
+        "biz_reg_no": "8352100866",
+        "total_amount": 2370,
+        "supply_value": 2155,
+        "vat_amount": 215,
+        "account_code": "811",
+        "account_name": "복리후생비",
+        "vat_deduction_type": "DEDUCTIBLE",
+        "counterparty_info": "대표자(임직원) 식대 및 복리후생",
+        "reconcile_status": "HOMETAX_VERIFIED",
+    }
+    slip_html = render_electronic_slip_html(sample_tx)
+    stmt_html = render_electronic_statement_html(sample_tx)
+    assert "적격증빙" not in slip_html
+    assert "<h1>신용카드 매출전표</h1>" in slip_html
+    assert "공급받는자 보관용" not in stmt_html
+    assert "<h1>거 래 명 세 서</h1>" in stmt_html
+
+
 
 
 
