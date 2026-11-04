@@ -49,3 +49,4 @@
 | 2026-11-03 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/dashboard.py (+3 files)` | 쿠팡 직매입·직영몰 사업자번호 자동추출 및 오픈마켓 입점판매자 분리 적용 | `PASSED` |
 | 2026-11-03 | `fix` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/scraper_service.py` | 거래명세서 갱신 시 기존 다품목 상세내역 보존 보강 | `PASSED` |
 | 2026-11-04 | `refactor` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/dashboard.py, src/sololedger/scraper_service.py (+1 files)` | 매출전표·거래명세서에서 적격증빙 및 공급받는자 보관용 문구 제거 | `PASSED` |
+| 2026-11-04 | `chore` | `.gitignore, logs/last_verification.json, logs/verification_history.jsonl` | 로컬 참고 매뉴얼 폴더(references/) .gitignore 추가 | `PASSED` |
