@@ -83,12 +83,37 @@ def sanitize_card_folder_name(card_last4: str) -> str:
     return cleaned or "기타카드_0000"
 
 
-def parse_korean_card_sms(
-    raw_text: str, fallback_time: Optional[str] = None
-) -> ParsedSmsResult:
-    """Parse multi-line or single-line Korean corporate card SMS into structured fields.
+def is_promotional_or_non_tx_notification(raw_text: str) -> bool:
+    """Return True if a notification is an advertisement, statement notice, or non-payment alert."""
+    text = (raw_text or "").strip()
+    if not text:
+        return True
+    if re.search(r"(\(광고\)|\[광고\]|광고\)|수신거부)", text):
+        return True
+    has_tx_verb = bool(
+        re.search(
+            r"(승인|취소|일시불|\d+개월|할부|체크결제|법인결제|해외결제|결제완료)",
+            text,
+        )
+    )
+    if re.search(
+        r"(이용대금명세서|명세서.*도착|청구서|결제예정금액|결제일\s*안내|"
+        r"한도\s*상향|리볼빙|장기카드대출|단기카드대출|카드론|이벤트\s*응모|캐시백\s*혜택)",
+        text,
+    ) and not re.search(r"(일시불|\d+개월|승인번호)", text):
+        return True
+    return not has_tx_verb
 
-    Supports Shinhan, KB, Hyundai, Samsung, Hana, Woori, IBK/BC, NH Nonghyup, and RCS JSON formats.
+
+def parse_korean_card_sms(
+    raw_text: str,
+    fallback_time: Optional[str] = None,
+    card_hint: Optional[str] = None,
+) -> ParsedSmsResult:
+    """Parse multi-line or single-line Korean corporate card SMS/Push into structured fields.
+
+    Supports Shinhan, KB, Hyundai, Samsung, Hana, Woori (including Woori WON Card Push),
+    IBK/BC, NH Nonghyup, and RCS JSON formats.
     """
     unwrapped = extract_rcs_text(raw_text)
     clean_text = unwrapped.replace("\r\n", "\n").strip()
@@ -111,6 +136,9 @@ def parse_korean_card_sms(
     )
     if not amount_match:
         raise ValueError("Failed to extract KRW payment amount from SMS.")
+
+    if is_promotional_or_non_tx_notification(clean_text):
+        raise ValueError("Promotional or non-transaction notification ignored.")
 
     raw_amt_str = amount_match.group(1) or amount_match.group(2)
     raw_amount = int(raw_amt_str.replace(",", ""))
@@ -148,6 +176,8 @@ def parse_korean_card_sms(
         card_last4 = "현대백화"
     elif "KB국민카드" in clean_text and "후불하이패스" in clean_text:
         card_last4 = "KB하이"
+    elif card_hint and card_hint.strip():
+        card_last4 = card_hint.strip()
     else:
         card_last4 = "0000"
 
@@ -163,6 +193,8 @@ def parse_korean_card_sms(
         stripped = re.sub(r"\[Web발신\]|\[웹발신\]", "", line, flags=re.IGNORECASE)
         stripped = re.sub(r"^[●◼■▶*]\s*.*이용안내.*", "", stripped)
         stripped = re.sub(r"\[[^\]]*카드[^\]]*\]", "", stripped)
+        stripped = re.sub(r"우리WON카드|WON카드", "", stripped, flags=re.IGNORECASE)
+        stripped = re.sub(r"(?:승인|결제|취소)\s*알림", "", stripped)
         stripped = re.sub(r"승인번호\s*:?\s*\d{8}", "", stripped)
         stripped = re.sub(r"누적.*", "", stripped)
         stripped = re.sub(

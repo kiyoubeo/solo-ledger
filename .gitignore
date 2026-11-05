@@ -34,3 +34,15 @@ logs/server.pid
 Thumbs.db
 .vscode/
 .idea/
+
+# Android Gradle & APK build artifacts
+.gradle/
+android/.gradle/
+android/.kotlin/
+android/local.properties
+*.apk
+*.ap_
+*.aab
+*.dex
+*.jks
+*.keystore

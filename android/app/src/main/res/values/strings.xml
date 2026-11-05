@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">SoloLedger 법인원장</string>
+    <string name="push_listener_label">SoloLedger 우리카드 결제알림 수집</string>
+</resources>

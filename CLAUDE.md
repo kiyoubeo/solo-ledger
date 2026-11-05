@@ -62,3 +62,4 @@
 | 2026-11-03 | logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/scraper_service.py | [fix] 거래명세서 갱신 시 기존 다품목 상세내역 보존 보강 |
 | 2026-11-04 | logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/dashboard.py, src/sololedger/scraper_service.py (+1 files) | [refactor] 매출전표·거래명세서에서 적격증빙 및 공급받는자 보관용 문구 제거 |
 | 2026-11-04 | .gitignore, logs/last_verification.json, logs/verification_history.jsonl | [chore] 로컬 참고 매뉴얼 폴더(references/) .gitignore 추가 |
+| 2026-11-05 | .gitignore, docs/DEVELOPMENT_PLAN.md, logs/last_verification.json, logs/verification_history.jsonl (+11 files) | [feat] 순수 Android 전용 앱(v1.1.0) 구축 및 원격 세무증빙 ZIP 다운로드·모바일 인증·우리카드 푸시 API 추가 |

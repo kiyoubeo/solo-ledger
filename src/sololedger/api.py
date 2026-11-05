@@ -2,15 +2,21 @@
 
 import asyncio
 import base64
+import contextvars
+import hashlib
+import hmac
 import json
+import re
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib.parse import quote
 
 from fastapi import BackgroundTasks, Body, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from sololedger import __version__
 from sololedger.archiver import DuplicateReceiptError, build_receipt_print_title
@@ -40,8 +46,10 @@ from sololedger.merchant_service import (
     get_or_verify_merchant,
 )
 from sololedger.models import (
+    AppPushWebhookPayload,
     HometaxCsvImportRequest,
     MerchantVerifyRequest,
+    MobileLoginRequest,
     NasBackupRequest,
     ReceiptUploadRequest,
     ReconcileBatchRequest,
@@ -63,6 +71,7 @@ from sololedger.scraper_service import (
     ingest_scraped_payload,
 )
 from sololedger.sms_parser import (
+    CARD_LABEL_MAP,
     format_card_label,
     parse_korean_card_sms,
     sanitize_card_folder_name,
@@ -130,24 +139,193 @@ app.add_middleware(
 )
 
 
+_current_request_var: contextvars.ContextVar[Optional[Request]] = contextvars.ContextVar(
+    "sololedger_current_request", default=None
+)
+SESSION_COOKIE_NAME = "sololedger_session"
+SESSION_TTL_SECONDS = 60 * 60 * 24 * 30  # 30 days
+
+
+def _create_session_token(ttl_seconds: int = SESSION_TTL_SECONDS) -> str:
+    exp = int(time.time()) + max(60, ttl_seconds)
+    payload = f"sl1.{exp}"
+    sig = hmac.new(
+        settings.api_key.encode("utf-8"),
+        payload.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{payload}.{sig}"
+
+
+def _verify_session_token(token: Optional[str]) -> bool:
+    if not token or not isinstance(token, str):
+        return False
+    cleaned = token.strip()
+    if hmac.compare_digest(cleaned.encode("utf-8"), settings.api_key.encode("utf-8")):
+        return True
+    parts = cleaned.split(".")
+    if len(parts) != 3 or parts[0] != "sl1" or not parts[1].isdigit():
+        return False
+    exp = int(parts[1])
+    if exp < int(time.time()):
+        return False
+    expected_sig = hmac.new(
+        settings.api_key.encode("utf-8"),
+        f"sl1.{exp}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(parts[2], expected_sig)
+
+
+def _is_credential_valid(candidate: str) -> bool:
+    if not candidate:
+        return False
+    cand_bytes = candidate.encode("utf-8")
+    if hmac.compare_digest(cand_bytes, settings.api_key.encode("utf-8")):
+        return True
+    admin_pw = settings.admin_password.strip()
+    if admin_pw and hmac.compare_digest(cand_bytes, admin_pw.encode("utf-8")):
+        return True
+    return False
+
+
+def _has_valid_auth(
+    x_api_key: Optional[str] = None,
+    sololedger_api_key: Optional[str] = None,
+) -> bool:
+    provided = x_api_key or sololedger_api_key
+    if provided and _verify_session_token(provided):
+        return True
+    req = _current_request_var.get()
+    if req is not None:
+        hdr_key = req.headers.get("x-api-key") or req.headers.get("sololedger_api_key")
+        if hdr_key and _verify_session_token(hdr_key):
+            return True
+        auth_hdr = req.headers.get("authorization", "")
+        if auth_hdr.lower().startswith("bearer "):
+            bearer_tok = auth_hdr[7:].strip()
+            if _verify_session_token(bearer_tok):
+                return True
+        cookie_tok = req.cookies.get(SESSION_COOKIE_NAME)
+        if cookie_tok and _verify_session_token(cookie_tok):
+            return True
+    return False
+
+
 @app.middleware("http")
 async def add_private_network_access_header(request: Request, call_next):
-    """Allow HTTPS pages (e.g., mc.coupang.com) to call localhost SoloLedger API."""
-    if request.method == "OPTIONS":
-        resp = Response(status_code=204)
-    else:
-        resp = await call_next(request)
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PATCH, DELETE, OPTIONS"
-    resp.headers["Access-Control-Allow-Headers"] = "*"
-    resp.headers["Access-Control-Allow-Private-Network"] = "true"
+    """Allow HTTPS pages (e.g., mc.coupang.com) and mobile clients to call SoloLedger API."""
+    ctx_token = _current_request_var.set(request)
+    try:
+        if request.method == "OPTIONS":
+            resp = Response(status_code=204)
+        else:
+            resp = await call_next(request)
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PATCH, DELETE, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "*"
+        resp.headers["Access-Control-Allow-Private-Network"] = "true"
+        return resp
+    finally:
+        _current_request_var.reset(ctx_token)
+
+
+def _verify_api_key(
+    x_api_key: Optional[str] = None,
+    sololedger_api_key: Optional[str] = None,
+) -> None:
+    if not _has_valid_auth(x_api_key, sololedger_api_key):
+        raise HTTPException(status_code=401, detail="Unauthorized API key or session token.")
+
+
+def _verify_read_access() -> None:
+    """Enforce authentication on read/UI endpoints when settings.require_auth is enabled."""
+    if settings.require_auth and not _has_valid_auth():
+        raise HTTPException(status_code=401, detail="Authentication required.")
+
+
+@app.post("/api/v1/auth/login")
+async def mobile_auth_login_endpoint(payload: MobileLoginRequest):
+    """Authenticate Android app or remote client and issue a 30-day signed Bearer token."""
+    cred = (payload.credential or "").strip()
+    if not _is_credential_valid(cred):
+        raise HTTPException(status_code=401, detail="비밀번호 또는 API 키가 일치하지 않습니다.")
+    token = _create_session_token()
+    return {
+        "status": "authenticated",
+        "token": token,
+        "version": __version__,
+        "device_name": payload.device_name or "Android",
+        "require_auth": settings.require_auth,
+        "card_labels": CARD_LABEL_MAP,
+    }
+
+
+def _render_login_html(error_msg: str = "") -> str:
+    err_block = (
+        f'<div style="background:#fee2e2;color:#b91c1c;padding:10px;border-radius:8px;'
+        f'font-size:13px;margin-bottom:12px;">{error_msg}</div>'
+        if error_msg
+        else ""
+    )
+    return f"""<!DOCTYPE html>
+<html lang="ko"><head><meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>SoloLedger 로그인</title>
+<style>
+  body {{ font-family:-apple-system,BlinkMacSystemFont,'Malgun Gothic',sans-serif;
+         background:#f1f5f9; display:flex; align-items:center; justify-content:center;
+         min-height:100vh; margin:0; }}
+  .card {{ background:#fff; padding:28px; border-radius:14px; width:92%; max-width:360px;
+          box-shadow:0 10px 25px rgba(15,23,42,0.08); }}
+  h1 {{ margin:0 0 6px; font-size:20px; color:#0f172a; }}
+  p {{ margin:0 0 18px; font-size:13px; color:#64748b; }}
+  input {{ width:100%; box-sizing:border-box; padding:11px 12px; border:1px solid #cbd5e1;
+          border-radius:8px; font-size:14px; margin-bottom:12px; }}
+  button {{ width:100%; padding:11px; background:#2563eb; color:#fff; border:none;
+           border-radius:8px; font-size:14px; font-weight:700; cursor:pointer; }}
+</style></head>
+<body><div class="card">
+  <h1>🔐 SoloLedger 원격 접속</h1>
+  <p>관리자 비밀번호 또는 API 키를 입력해 주세요.</p>
+  {err_block}
+  <form method="post" action="/login">
+    <input type="password" name="credential" placeholder="비밀번호 또는 SOLOLEDGER_API_KEY"
+           required autofocus />
+    <button type="submit">로그인</button>
+  </form>
+</div></body></html>"""
+
+
+@app.get("/login", response_class=HTMLResponse)
+async def render_login_page():
+    """Render web login page for remote dashboard access."""
+    return HTMLResponse(content=_render_login_html())
+
+
+@app.post("/login")
+async def submit_login_page(request: Request):
+    """Validate web login form and set HttpOnly session cookie."""
+    body_bytes = await request.body()
+    from urllib.parse import parse_qs
+
+    form_data = parse_qs(body_bytes.decode("utf-8", errors="ignore"))
+    cred = (form_data.get("credential", [""])[0] or "").strip()
+    if not _is_credential_valid(cred):
+        return HTMLResponse(
+            content=_render_login_html("비밀번호 또는 API 키가 올바르지 않습니다."),
+            status_code=401,
+        )
+    token = _create_session_token()
+    resp = RedirectResponse(url="/dashboard", status_code=303)
+    resp.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=token,
+        max_age=SESSION_TTL_SECONDS,
+        httponly=True,
+        samesite="lax",
+    )
     return resp
-
-
-def _verify_api_key(x_api_key: Optional[str], sololedger_api_key: Optional[str]) -> None:
-    provided = x_api_key or sololedger_api_key
-    if provided != settings.api_key:
-        raise HTTPException(status_code=401, detail="Unauthorized webhook API key.")
 
 
 @app.get("/health")
@@ -240,6 +418,96 @@ async def receive_card_sms_webhook(
         return {
             "status": "recorded",
             "tx_id": tx_id,
+            "merchant": parsed.raw_merchant_name,
+            "amount": parsed.total_amount,
+            "account_code": rule_result["account_code"],
+            "account_name": rule_result["account_name"],
+            "vat_deduction_type": rule_result["vat_deduction_type"],
+            "is_vehicle_expense": rule_result["is_vehicle_expense"],
+            "reconcile_status": status_code,
+        }
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/webhooks/push")
+async def receive_card_app_push_webhook(
+    payload: AppPushWebhookPayload,
+    background_tasks: BackgroundTasks,
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Webhook endpoint receiving Android NotificationListenerService card push alerts (e.g. Woori WON Card)."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+
+    combined_text = "\n".join(
+        part.strip() for part in (payload.title or "", payload.body or "") if part and part.strip()
+    )
+    try:
+        parsed = parse_korean_card_sms(
+            combined_text,
+            fallback_time=payload.received_at,
+            card_hint=payload.card_hint,
+        )
+    except ValueError as e:
+        return {"status": "ignored", "reason": str(e), "package_name": payload.package_name}
+
+    init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT tx_id FROM card_transactions
+            WHERE raw_merchant_name = ? AND total_amount = ? AND transacted_at = ?
+            """,
+            (parsed.raw_merchant_name, parsed.total_amount, parsed.transacted_at),
+        )
+        existing = cursor.fetchone()
+        if existing:
+            return {"status": "duplicate_skipped", "tx_id": existing[0]}
+
+        rule_result = evaluate_tax_rules(cursor, parsed.raw_merchant_name)
+        supply_value, vat_amount = calculate_supply_and_vat(
+            parsed.total_amount, rule_result["vat_deduction_type"]
+        )
+        status_code = "CANCELED" if parsed.is_cancel else "SMS_ONLY"
+
+        cursor.execute(
+            """
+            INSERT INTO card_transactions (
+                card_last4, approval_no, transacted_at, raw_merchant_name,
+                total_amount, supply_value, vat_amount,
+                account_code, account_name, vat_deduction_type,
+                non_deduct_reason, is_vehicle_expense, reconcile_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                parsed.card_last4,
+                parsed.approval_no,
+                parsed.transacted_at,
+                parsed.raw_merchant_name,
+                parsed.total_amount,
+                supply_value,
+                vat_amount,
+                rule_result["account_code"],
+                rule_result["account_name"],
+                rule_result["vat_deduction_type"],
+                rule_result["non_deduct_reason"],
+                rule_result["is_vehicle_expense"],
+                status_code,
+            ),
+        )
+        tx_id = cursor.lastrowid
+        conn.commit()
+
+        if rule_result["require_memo_prompt"] and not parsed.is_cancel:
+            background_tasks.add_task(send_telegram_memo_prompt, tx_id, parsed, rule_result)
+
+        return {
+            "status": "recorded",
+            "tx_id": tx_id,
+            "card_last4": parsed.card_last4,
             "merchant": parsed.raw_merchant_name,
             "amount": parsed.total_amount,
             "account_code": rule_result["account_code"],
@@ -474,6 +742,98 @@ async def export_tax_pack_endpoint(
         conn.close()
 
 
+@app.get("/api/v1/exports/tax-pack/{year_month}/download")
+async def download_tax_pack_zip_endpoint(
+    year_month: str,
+    force_reexport: bool = Query(default=False),
+    auto_generate: bool = Query(default=True),
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Stream SoloLedger_세무증빙_{year_month}.zip to mobile/remote clients for direct sharing."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    if not re.fullmatch(r"\d{6}", year_month or ""):
+        raise HTTPException(status_code=400, detail="Invalid year_month format (expected YYYYMM).")
+
+    zip_filename = f"SoloLedger_세무증빙_{year_month}.zip"
+    zip_path = settings.archive_dir / "exports" / zip_filename
+    if force_reexport or (auto_generate and not zip_path.exists()):
+        init_db()
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            generate_tax_accountant_pack(
+                cursor,
+                year_month=year_month,
+                force_reexport=force_reexport or (not zip_path.exists()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    if not zip_path.exists() or not zip_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Tax pack ZIP not found for {year_month}.")
+
+    encoded_name = quote(zip_filename)
+    headers = {
+        "Content-Disposition": (
+            f'attachment; filename="SoloLedger_tax_pack_{year_month}.zip"; '
+            f"filename*=UTF-8''{encoded_name}"
+        )
+    }
+    return Response(
+        content=zip_path.read_bytes(),
+        media_type="application/zip",
+        headers=headers,
+    )
+
+
+@app.get("/api/v1/exports/tax-pack/{year_month}/csv")
+async def download_tax_pack_csv_endpoint(
+    year_month: str,
+    force_reexport: bool = Query(default=False),
+    auto_generate: bool = Query(default=True),
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Stream SoloLedger_기장원장_{year_month}.csv (UTF-8-BOM) to mobile/remote clients."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    if not re.fullmatch(r"\d{6}", year_month or ""):
+        raise HTTPException(status_code=400, detail="Invalid year_month format (expected YYYYMM).")
+
+    csv_filename = f"SoloLedger_기장원장_{year_month}.csv"
+    csv_path = settings.archive_dir / "exports" / csv_filename
+    if force_reexport or (auto_generate and not csv_path.exists()):
+        init_db()
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            generate_tax_accountant_pack(
+                cursor,
+                year_month=year_month,
+                force_reexport=force_reexport or (not csv_path.exists()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    if not csv_path.exists() or not csv_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Tax pack CSV not found for {year_month}.")
+
+    encoded_name = quote(csv_filename)
+    headers = {
+        "Content-Disposition": (
+            f'attachment; filename="SoloLedger_ledger_{year_month}.csv"; '
+            f"filename*=UTF-8''{encoded_name}"
+        )
+    }
+    return Response(
+        content=csv_path.read_bytes(),
+        media_type="text/csv; charset=utf-8",
+        headers=headers,
+    )
+
+
 @app.get("/api/v1/transactions")
 async def list_transactions(
     x_api_key: Optional[str] = Header(default=None),
@@ -527,6 +887,7 @@ async def patch_transaction_endpoint(
 @app.get("/api/v1/transactions/{tx_id}/receipt")
 async def get_transaction_receipt_detail(tx_id: int):
     """Return electronic card sales slip details and attached receipt metadata for a transaction."""
+    _verify_read_access()
     init_db()
     conn = get_connection()
     cursor = conn.cursor()
@@ -672,6 +1033,7 @@ async def save_transaction_statement_endpoint(
 @app.get("/api/v1/transactions/{tx_id}/receipt-file")
 async def serve_transaction_receipt_file(tx_id: int):
     """Serve the archived receipt file (image, PDF, or text) linked to a transaction."""
+    _verify_read_access()
     init_db()
     conn = get_connection()
     cursor = conn.cursor()
@@ -699,6 +1061,7 @@ async def serve_transaction_receipt_file(tx_id: int):
             raise HTTPException(status_code=404, detail="Receipt file not found on disk.")
 
         raw = target_path.read_bytes()
+        headers: Dict[str, str] = {}
         if raw.startswith(b"\x89PNG"):
             media = "image/png"
         elif raw.startswith(b"\xff\xd8"):
@@ -709,9 +1072,12 @@ async def serve_transaction_receipt_file(tx_id: int):
             media = "application/pdf"
         elif target_path.suffix.lower() in (".html", ".htm") or b"<!DOCTYPE html" in raw[:120]:
             media = "text/html; charset=utf-8"
+            headers["Content-Security-Policy"] = (
+                "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:"
+            )
         else:
             media = "text/plain; charset=utf-8"
-        return Response(content=raw, media_type=media)
+        return Response(content=raw, media_type=media, headers=headers)
     finally:
         conn.close()
 
@@ -751,10 +1117,24 @@ async def backup_nas_endpoint(
     sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
 ):
     """Safely back up the active SQLite database and mirror receipt archives to NAS storage."""
-    from pathlib import Path
-
     _verify_api_key(x_api_key, sololedger_api_key)
-    target_dir = Path(request.nas_dir) if request.nas_dir else None
+    target_dir: Optional[Path] = None
+    if request.nas_dir:
+        if settings.app_env == "production":
+            raw_dir = request.nas_dir.strip()
+            if raw_dir.startswith("\\\\") or raw_dir.startswith("//"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Arbitrary UNC path overrides are disabled in production.",
+                )
+            configured_root = settings.nas_backup_dir.resolve(strict=False)
+            requested_root = Path(raw_dir).resolve(strict=False)
+            if requested_root != configured_root and configured_root not in requested_root.parents:
+                raise HTTPException(
+                    status_code=400,
+                    detail="NAS backup path override outside SOLOLEDGER_NAS_DIR is blocked in production.",
+                )
+        target_dir = Path(request.nas_dir)
     return sync_to_nas(target_nas_dir=target_dir)
 
 
@@ -766,6 +1146,8 @@ async def seed_demo_endpoint(
 ):
     """Seed realistic test/demo corporate card transactions and sample receipts."""
     _verify_api_key(x_api_key, sololedger_api_key)
+    if settings.app_env == "production":
+        raise HTTPException(status_code=403, detail="Demo seeding is disabled in production.")
     init_db()
     conn = get_connection()
     cursor = conn.cursor()
@@ -785,6 +1167,8 @@ async def reset_test_endpoint(
 ):
     """Clear all transactions, receipts, and cached merchants from the test ledger."""
     _verify_api_key(x_api_key, sololedger_api_key)
+    if settings.app_env == "production":
+        raise HTTPException(status_code=403, detail="Ledger reset is disabled in production.")
     init_db()
     conn = get_connection()
     cursor = conn.cursor()
@@ -850,6 +1234,7 @@ async def list_scraper_targets_endpoint():
 @app.get("/api/v1/scraper/coupang-script")
 async def get_coupang_extractor_script_endpoint():
     """Return 1-click browser console script for extracting Coupang order list & receipts."""
+    _verify_read_access()
     script = build_coupang_browser_extractor_script(
         api_url="http://127.0.0.1:8000",
         api_key=settings.api_key,
@@ -888,6 +1273,7 @@ async def coupang_auto_crawl_endpoint(
 @app.get("/api/v1/scraper/email-config")
 async def get_email_watcher_config_endpoint():
     """Return current IMAP email watcher configuration (with password masked) and sync status."""
+    _verify_read_access()
     init_db()
     conn = get_connection()
     cur = conn.cursor()
@@ -1111,6 +1497,8 @@ async def render_dashboard_page(
     end_date: Optional[str] = Query(default=None),
 ):
     """Render the lightweight HTML5 management dashboard."""
+    if settings.require_auth and not _has_valid_auth():
+        return RedirectResponse(url="/login", status_code=303)
     init_db()
     conn = get_connection()
     cursor = conn.cursor()
@@ -1131,8 +1519,40 @@ async def render_dashboard_page(
 @app.get("/manual", response_class=HTMLResponse)
 async def render_user_manual_page():
     """Serve the standalone HTML5 User Manual page."""
+    if settings.require_auth and not _has_valid_auth():
+        return RedirectResponse(url="/login", status_code=303)
     manual_path = PROJECT_ROOT / "docs" / "USER_MANUAL.html"
     if not manual_path.exists():
         raise HTTPException(status_code=404, detail="USER_MANUAL.html not found.")
     return HTMLResponse(content=manual_path.read_text(encoding="utf-8"))
+
+
+@app.get("/download/apk")
+async def download_android_apk_endpoint():
+    """Serve the compiled SoloLedger Android native APK for 1-click phone installation."""
+    _verify_read_access()
+    candidates = [
+        PROJECT_ROOT / "dist" / "SoloLedger-mobile.apk",
+        PROJECT_ROOT
+        / "android"
+        / "app"
+        / "build"
+        / "outputs"
+        / "apk"
+        / "debug"
+        / "app-debug.apk",
+    ]
+    apk_path = next((p for p in candidates if p.exists() and p.is_file()), None)
+    if apk_path is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Android APK file not found. Build android:assembleDebug first.",
+        )
+    return Response(
+        content=apk_path.read_bytes(),
+        media_type="application/vnd.android.package-archive",
+        headers={
+            "Content-Disposition": f'attachment; filename="SoloLedger-v{__version__}.apk"'
+        },
+    )
 

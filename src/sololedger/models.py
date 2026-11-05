@@ -171,3 +171,30 @@ class NasBackupRequest(BaseModel):
     nas_dir: Optional[str] = Field(
         default=None, description="Optional override path for NAS backup root (defaults to Z:\\SoloLedger)"
     )
+
+
+class MobileLoginRequest(BaseModel):
+    """Request payload for SoloLedger Android app or remote web session login."""
+
+    credential: str = Field(..., description="Admin password or SOLOLEDGER_API_KEY")
+    device_name: Optional[str] = Field(
+        default="Android", description="Client device name for session context"
+    )
+
+
+class AppPushWebhookPayload(BaseModel):
+    """Payload sent by SoloLedger Android NotificationListenerService (e.g. Woori WON Card)."""
+
+    package_name: str = Field(
+        default="com.wooricard.smartapp",
+        description="Android package name of the card issuer app",
+    )
+    title: Optional[str] = Field(default="", description="Notification title")
+    body: str = Field(..., description="Notification text / bigText body")
+    received_at: Optional[str] = Field(
+        default=None, description="ISO timestamp from mobile device"
+    )
+    card_hint: Optional[str] = Field(
+        default=None,
+        description="Fallback card last4 code (e.g. 6534) when push omits card digits",
+    )

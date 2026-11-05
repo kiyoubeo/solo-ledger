@@ -20,6 +20,7 @@ PHASE_TEST_MAPPING = {
     "Phase 3": ["tests/test_ocr_and_bot.py", "tests/test_receipt_dataset.py"],
     "Phase 4": ["tests/test_import_export.py"],
     "Phase 5": ["tests/test_e2e_lifecycle.py", "tests/test_nas_sync.py"],
+    "Phase 6": ["tests/test_mobile_api.py"],
 }
 
 REQUIRED_PLAN_SECTIONS = [
@@ -75,7 +76,7 @@ def parse_development_plan(plan_path: Optional[Path] = None) -> Dict[str, Any]:
         sec_match = sec_pattern.search(content)
         sec_text = sec_match.group(0) if sec_match else ""
         endpoints = re.findall(
-            r"`((?:GET|POST|PUT|DELETE|PATCH)\s+/[a-zA-Z0-9_\-/]+)", sec_text
+            r"`((?:GET|POST|PUT|DELETE|PATCH)\s+/[a-zA-Z0-9_\-/{}]+)", sec_text
         )
 
         phases.append(

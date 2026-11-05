@@ -1493,16 +1493,23 @@ def render_dashboard_html(
         + merchTok + '_' + accTok + '_' + amtTok + '_TX' + d.tx_id;
     }}
 
+    function escHtml(s) {{
+      return String(s ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }}
+
     function formatBizRegNo(rawBiz, mpSeller, fallback) {{
       const raw = String(rawBiz || '').trim();
       const digits = raw.replace(/\\D/g, '');
       if (digits.length === 10) {{
         return digits.slice(0, 3) + '-' + digits.slice(3, 5) + '-' + digits.slice(5);
       }}
-      if (raw) return raw;
+      if (raw) return escHtml(raw);
       if (mpSeller) {{
-        const safeMp = String(mpSeller).replace(/</g, '&lt;').replace(/>/g, '&gt;');
-        return '미등록 (입점판매자: ' + safeMp + ' · 홈택스 대사 대기)';
+        return '미등록 (입점판매자: ' + escHtml(mpSeller) + ' · 홈택스 대사 대기)';
       }}
       return fallback || '미등록 (SMS/RCS·PG 전표)';
     }}
@@ -1515,13 +1522,17 @@ def render_dashboard_html(
       const tabStmt = document.getElementById('tab-btn-stmt');
       const fmt = (n) => Number(n || 0).toLocaleString('ko-KR') + '원';
       const bizNo = formatBizRegNo(d.biz_reg_no, d.marketplace_seller, '미등록 (SMS/RCS·PG 전표)');
-      const appNo = d.approval_no || ('TX-' + d.tx_id);
+      const appNo = escHtml(d.approval_no || ('TX-' + d.tx_id));
       const rowMemoEl = document.getElementById('memo-' + d.tx_id);
       const typedMemo = rowMemoEl && rowMemoEl.value ? rowMemoEl.value.trim() : '';
-      const memo = d.counterparty_info || typedMemo || '-';
-      const arch = d.archived_file_name
+      const memo = escHtml(d.counterparty_info || typedMemo || '-');
+      const arch = escHtml(d.archived_file_name
         ? ('by_card/' + d.card_folder + '/' + d.archived_file_name)
-        : '실물 증빙 미첨부 (전자 전표)';
+        : '실물 증빙 미첨부 (전자 전표)');
+      const safeMerch = escHtml(d.raw_merchant_name);
+      const safeCard = escHtml(d.card_label);
+      const safeAcc = escHtml(d.account_code + ' ' + d.account_name);
+      const safeTxAt = escHtml(d.transacted_at);
 
       if (activeModalMode === 'STATEMENT') {{
         tabSlip.className = 'secondary';
@@ -1532,9 +1543,8 @@ def render_dashboard_html(
         document.title = activeModalPrintTitle;
         document.getElementById('modal-header-title').textContent =
           '📄 거래명세서 (#' + d.tx_id + ')';
-        const mdStr = String(d.transacted_at || '').slice(5, 10).replace('-', '/');
-        const itemVal = (d.counterparty_info || typedMemo || (d.raw_merchant_name + ' 구매 품목'))
-          .replace(/"/g, '&quot;');
+        const mdStr = escHtml(String(d.transacted_at || '').slice(5, 10).replace('-', '/'));
+        const itemVal = escHtml(d.counterparty_info || typedMemo || (d.raw_merchant_name + ' 구매 품목'));
         const totAmt = Number(d.total_amount || 0);
         const supAmt = (d.vat_deduction_type === 'EXEMPT')
           ? totAmt
@@ -1546,10 +1556,10 @@ def render_dashboard_html(
         let totQty = 0;
         if (Array.isArray(d.line_items) && d.line_items.length > 0) {{
           d.line_items.forEach((li) => {{
-            const liName = String(li.item || li.name || itemVal).replace(/</g, '&lt;');
+            const liName = escHtml(li.item || li.name || itemVal);
             const liSeller = (d.marketplace_seller && li.seller)
               ? (' <span style="color:#64748b; font-size:11px; font-weight:400;">(판매자: ' +
-                 String(li.seller).replace(/</g, '&lt;') + ')</span>')
+                 escHtml(li.seller) + ')</span>')
               : '';
             const liQty = Math.max(1, parseInt(li.qty || 1, 10) || 1);
             const liTot = parseInt(li.price || li.amount || totAmt, 10);
@@ -1588,14 +1598,13 @@ def render_dashboard_html(
         }}
         slipEl.innerHTML =
           '<div class="slip-title" style="color:#1e3a8a;">[ 거 래 명 세 서 ]</div>' +
-          '<div class="slip-row"><span>거래일시</span><strong>' + d.transacted_at + '</strong></div>' +
+          '<div class="slip-row"><span>거래일시</span><strong>' + safeTxAt + '</strong></div>' +
           '<div class="slip-row"><span>전표/승인번호</span><span>#' + d.tx_id + ' / ' + appNo + '</span></div>' +
           '<div class="slip-divider"></div>' +
-          '<div class="slip-row"><span>공급자 상호</span><strong>' + d.raw_merchant_name + '</strong></div>' +
+          '<div class="slip-row"><span>공급자 상호</span><strong>' + safeMerch + '</strong></div>' +
           '<div class="slip-row"><span>사업자번호</span><span>' + bizNo + '</span></div>' +
-          '<div class="slip-row"><span>결제수단</span><strong>' + d.card_label + '</strong></div>' +
-          '<div class="slip-row"><span>회계계정</span><strong>' +
-          d.account_code + ' ' + d.account_name + '</strong></div>' +
+          '<div class="slip-row"><span>결제수단</span><strong>' + safeCard + '</strong></div>' +
+          '<div class="slip-row"><span>회계계정</span><strong>' + safeAcc + '</strong></div>' +
           '<div class="slip-divider"></div>' +
           '<table style="width:100%; border-collapse:collapse; font-size:12px; margin:8px 0;">' +
           '<thead><tr style="background:#eff6ff;">' +
@@ -1624,7 +1633,7 @@ def render_dashboard_html(
           '<div class="slip-row"><span>VAT 제외 가격 (공급가액)</span><strong>' +
           fmt(supAmt) + '</strong></div>' +
           '<div class="slip-row"><span>VAT 가격 (부가세액)</span><strong>' +
-          fmt(vatAmt) + ' (' + d.vat_deduction_type + ')</strong></div>' +
+          fmt(vatAmt) + ' (' + escHtml(d.vat_deduction_type) + ')</strong></div>' +
           '<div class="slip-row slip-total"><span>합계 가격 (총 결제금액)</span><span>' +
           fmt(totAmt) + '</span></div>' +
           '<div class="slip-divider"></div>' +
@@ -1640,7 +1649,7 @@ def render_dashboard_html(
           '<div class="slip-row"><span>보관경로</span><code style="font-size:11px;">' +
           arch + '</code></div>' +
           '<div class="slip-row no-print"><span>PDF 저장명</span>' +
-          '<code style="font-size:11px; color:#1d4ed8;">' + activeModalPrintTitle + '.pdf</code></div>';
+          '<code style="font-size:11px; color:#1d4ed8;">' + escHtml(activeModalPrintTitle) + '.pdf</code></div>';
       }} else {{
         tabSlip.className = '';
         tabStmt.className = 'secondary';
@@ -1650,27 +1659,26 @@ def render_dashboard_html(
           '🧾 신용카드 매출전표 (#' + d.tx_id + ')';
         slipEl.innerHTML =
           '<div class="slip-title">[신용카드 매출전표]</div>' +
-          '<div class="slip-row"><span>카드종류</span><strong>' + d.card_label + '</strong></div>' +
-          '<div class="slip-row"><span>거래일시</span><strong>' + d.transacted_at + '</strong></div>' +
+          '<div class="slip-row"><span>카드종류</span><strong>' + safeCard + '</strong></div>' +
+          '<div class="slip-row"><span>거래일시</span><strong>' + safeTxAt + '</strong></div>' +
           '<div class="slip-row"><span>승인번호</span><span>' + appNo + '</span></div>' +
           '<div class="slip-divider"></div>' +
-          '<div class="slip-row"><span>가맹점명</span><strong>' + d.raw_merchant_name + '</strong></div>' +
+          '<div class="slip-row"><span>가맹점명</span><strong>' + safeMerch + '</strong></div>' +
           '<div class="slip-row"><span>사업자번호</span><span>' + bizNo + '</span></div>' +
           '<div class="slip-divider"></div>' +
           '<div class="slip-row"><span>공급가액</span><span>' + fmt(d.supply_value) + '</span></div>' +
           '<div class="slip-row"><span>부가세액(VAT)</span><span>' + fmt(d.vat_amount) +
-          ' (' + d.vat_deduction_type + ')</span></div>' +
+          ' (' + escHtml(d.vat_deduction_type) + ')</span></div>' +
           '<div class="slip-row slip-total"><span>합계금액</span><span>' +
           fmt(d.total_amount) + '</span></div>' +
           '<div class="slip-divider"></div>' +
-          '<div class="slip-row"><span>회계계정</span><strong>' +
-          d.account_code + ' ' + d.account_name + '</strong></div>' +
+          '<div class="slip-row"><span>회계계정</span><strong>' + safeAcc + '</strong></div>' +
           '<div class="slip-row"><span>적요/품목</span><span>' + memo + '</span></div>' +
-          '<div class="slip-row"><span>대사상태</span><span>' + d.reconcile_status + '</span></div>' +
+          '<div class="slip-row"><span>대사상태</span><span>' + escHtml(d.reconcile_status) + '</span></div>' +
           '<div class="slip-row"><span>보관경로</span><code style="font-size:11px;">' +
           arch + '</code></div>' +
           '<div class="slip-row no-print"><span>PDF 저장명</span>' +
-          '<code style="font-size:11px; color:#1d4ed8;">' + activeModalPrintTitle + '.pdf</code></div>';
+          '<code style="font-size:11px; color:#1d4ed8;">' + escHtml(activeModalPrintTitle) + '.pdf</code></div>';
       }}
     }}
 
@@ -1694,7 +1702,7 @@ def render_dashboard_html(
       slipEl.innerHTML = '전표/명세서 정보를 불러오는 중...';
       imgEl.innerHTML = '';
 
-      const res = await fetch('/api/v1/transactions/' + txId + '/receipt');
+      const res = await fetch('/api/v1/transactions/' + txId + '/receipt', {{ headers: API_HEADERS }});
       if (!res.ok) {{
         slipEl.innerHTML = '전표 정보를 찾을 수 없습니다.';
         return;

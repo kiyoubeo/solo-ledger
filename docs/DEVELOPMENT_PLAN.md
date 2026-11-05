@@ -27,8 +27,9 @@ flowchart TD
     P3["Phase 3 (v0.3.0)\n텔레그램 법인전표봇(@SoloLedgerBot) 양방향 연동\n& Vision LLM 영수증 OCR · 증빙 정규화 아카이빙"]
     P4["Phase 4 (v0.4.0)\n홈택스/카드사 매입내역 CSV·엑셀 배치 파서\n업무용승용차 한도 트래커 · 세무대리인 제출 패키지 생성기"]
     P5["Phase 5 (v1.0.0)\n경량 웹 대시보드 · CLI 관리 도구\nDocker Compose 무비용 배포 패키지 & E2E 통합 검증"]
+    P6["Phase 6 (v1.1.0)\n순수 Android 네이티브 앱(Kotlin · Compose)\n원격 세무증빙 ZIP 다운로드 · 보안 인증 · 우리카드 푸시 연동"]
 
-    P1 --> P2 --> P3 --> P4 --> P5
+    P1 --> P2 --> P3 --> P4 --> P5 --> P6
 ```
 
 | 단계 | 목표 버전 | 핵심 개발 범위 | 주요 산출물 (`src/sololedger/`) | 예상 공수 | 현재 상태 |
@@ -38,6 +39,7 @@ flowchart TD
 | **Phase 3** | `v0.3.0` | `@SoloLedgerBot` 양방향 콜백/답장 처리, Vision LLM 영수증·주문내역 OCR, SHA-256 중복 방지, 증빙 파일 정규화 보관 | `telegram_bot.py`, `ocr_engine.py`, `archiver.py` | 14h | **완료 (`PASSED`)** |
 | **Phase 4** | `v0.4.0` | 홈택스·카드사 엑셀/CSV 파서, 외화 결제 확정, 업무용승용차 1,500만 원 한도 집계, 세무사 제출용 CSV+ZIP 번들 생성기 | `importers.py`, `exporters.py`, `vehicle_tracker.py` | 12h | **완료 (`PASSED`)** |
 | **Phase 5** | `v1.0.0` | 경량 웹 대시보드(미분류·소명 관리/파일 업로드), 운영 CLI, Docker Compose 배포 및 NAS(`Z:\`) 백업 자동화 | `dashboard.py`, `cli.py`, `nas_sync.py`, `docker-compose.yml` | 8h | **완료 (`PASSED`)** |
+| **Phase 6** | `v1.1.0` | 순수 Android 전용 앱(`Kotlin + Jetpack Compose`), 원격 세무사 제출 ZIP/CSV 다운로드 API, Bearer 세션 인증 및 우리카드 푸시 수집 | `api.py`, `sms_parser.py`, `android/app/build.gradle.kts` | 12h | **완료 (`PASSED`)** |
 
 ---
 
@@ -136,6 +138,23 @@ flowchart TD
      - `sololedger-api` 컨테이너 정의, SQLite DB 및 영수증 보관소(`archive/`) 볼륨 마운트 구성.
 - **하네스 검증 테스트 (`tests/test_e2e_lifecycle.py`)**:
   - `SMS 수신 → 텔레그램 메모/OCR 결합 → 국세청 과세유형 반영 → 홈택스 CSV 대사 → 세무사 ZIP+CSV 출력 → 대시보드 통계 조회` 전 주기(Full Lifecycle) 통합 시나리오 검증.
+
+---
+
+### Phase 6: 순수 Android 전용 앱(`Kotlin · Jetpack Compose`) 및 원격 세무증빙·보안 API 확장 (`v1.1.0`)
+- **목적**: 외부에서도 스마트폰 전용 앱(`.apk`)으로 영수증을 촬영·분류하고 거래명세서를 점검한 뒤, 세무사 제출용 `SoloLedger_세무증빙_{YYYYMM}.zip` 패키지를 카카오톡·이메일로 즉시 공유할 수 있도록 구현합니다.
+- **세부 구현 과제**:
+  1. **원격 모바일 인증 · 보안 강화 및 세무증빙 스트리밍 API (`api.py`, `config.py`, `sms_parser.py`)**
+     - `POST /api/v1/auth/login`: 관리자 비밀번호(`SOLOLEDGER_ADMIN_PASSWORD`) 또는 API 키 검증(`hmac.compare_digest`) 후 30일 유효 서명 Bearer 세션 토큰 발급.
+     - `GET /api/v1/exports/tax-pack/{year_month}/download` 및 `GET /api/v1/exports/tax-pack/{year_month}/csv`: 원격 앱에서 세무사 제출용 ZIP/CSV 번들을 즉시 생성·다운로드.
+     - `POST /api/v1/webhooks/push`: 우리WON카드(`com.wooricard.smartapp`) 등 카드사 앱 푸시 수신 및 광고·명세서 알림 자동 필터링.
+     - 외부 노출 대비 보안 강화(`SOLOLEDGER_AUTH_REQUIRED` 잠금, HTML 증빙 CSP 샌드박스, 프로덕션 초기화/UNC 경로 차단).
+  2. **순수 Android 네이티브 앱 (`android/`, `kr.sololedger.mobile`)**
+     - 요약 대시보드(월별 지출·부가세·승용차 1,500만 원 한도·원격 이메일 스캔·NAS 백업), 카메라 영수증 촬영 및 홈택스/우리카드 엑셀·CSV 업로드, 원장·거래명세서 상세 열람 및 계정·적요 편집, 세무사 제출 ZIP 원터치 공유(`Intent.ACTION_SEND`), 선택형 우리카드 푸시 자동 수집(`NotificationListenerService` + 오프라인 큐) 및 지문 잠금(`BiometricPrompt`).
+- **하네스 검증 테스트 (`tests/test_mobile_api.py`)**:
+  - 모바일 로그인 토큰 발급·Bearer 인증·`SOLOLEDGER_AUTH_REQUIRED` 잠금 검증
+  - 우리WON카드 결제 푸시 파싱 및 광고·청구서 알림 자동 무시 검증
+  - 세무사 제출용 ZIP/CSV 원격 다운로드 무결성 및 프로덕션 보호 가드 검증
 
 ---
 

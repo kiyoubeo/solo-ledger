@@ -46,6 +46,19 @@ class Settings:
         return os.getenv("SOLOLEDGER_API_KEY", "dev-sololedger-secret-key")
 
     @property
+    def admin_password(self) -> str:
+        return os.getenv("SOLOLEDGER_ADMIN_PASSWORD", "")
+
+    @property
+    def require_auth(self) -> bool:
+        explicit = os.getenv("SOLOLEDGER_AUTH_REQUIRED", "").strip().lower()
+        if explicit in ("1", "true", "yes", "on"):
+            return True
+        if explicit in ("0", "false", "no", "off"):
+            return False
+        return self.app_env == "production" or bool(self.admin_password.strip())
+
+    @property
     def telegram_bot_token(self) -> str:
         return os.getenv("TELEGRAM_BOT_TOKEN", "")
 
