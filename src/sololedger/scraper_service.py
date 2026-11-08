@@ -47,7 +47,13 @@ from sololedger.importers import (
 from sololedger.models import ReconcileItem
 from sololedger.nts_client import validate_biz_reg_no_checksum
 from sololedger.reconciler import reconcile_single_item
-from sololedger.sms_parser import format_card_label, sanitize_card_folder_name
+from sololedger.sms_parser import (
+    format_card_label,
+    is_allowed_corporate_card,
+    load_corp_card_policy,
+    register_corp_card,
+    sanitize_card_folder_name,
+)
 from sololedger.tax_engine import calculate_supply_and_vat, evaluate_tax_rules
 from sololedger.telegram_bot import _detect_memo_account_override
 
@@ -1487,6 +1493,13 @@ def reconcile_scraped_ecommerce_orders(
         is_newly_created = False
         biz_backfilled = False
         if tx_row is None:
+            corp_policy = load_corp_card_policy(archive_dir)
+            if (
+                corp_policy.get("corp_only_mode")
+                and corp_policy.get("block_unmatched_email_orders", True)
+                and not auto_create_all
+            ):
+                continue
             should_auto_create = auto_create_all or (
                 auto_create_after_date is not None and date_prefix > auto_create_after_date
             )
@@ -1516,6 +1529,10 @@ def reconcile_scraped_ecommerce_orders(
             if clean_biz_no:
                 _ensure_merchant_master(cursor, clean_biz_no, shop_name or inferred_merchant)
             resolved_card = _resolve_card_last4_from_issuer(cursor, card_hint, inferred_merchant)
+            if corp_policy.get("corp_only_mode") and not is_allowed_corporate_card(
+                resolved_card, raw_text=card_hint, archive_dir=archive_dir
+            ):
+                continue
             rule_eval = evaluate_tax_rules(cursor, inferred_merchant, clean_biz_no)
             sup_val, vat_val = calculate_supply_and_vat(amount, rule_eval["vat_deduction_type"])
             cursor.execute(
@@ -2280,7 +2297,25 @@ def ingest_scraped_payload(
             "generated_slips_count": slip_res["generated_slips_count"],
         }
 
-    items = parse_scraped_card_statement(raw_content)
+    raw_items = parse_scraped_card_statement(raw_content)
+    corp_policy = load_corp_card_policy(archive_dir)
+    items: List[ReconcileItem] = []
+    skipped_personal_count = 0
+    for it in raw_items:
+        if not is_allowed_corporate_card(
+            it.card_last4, archive_dir=archive_dir, is_statement_upload=True
+        ):
+            skipped_personal_count += 1
+            continue
+        if (
+            corp_policy.get("corp_only_mode")
+            and corp_policy.get("auto_register_on_statement_upload", True)
+            and it.card_last4 != "0000"
+        ):
+            issuer_code = portal_key if portal_key not in ("HOMETAX", "CARDSALES") else "CORP"
+            register_corp_card(it.card_last4, issuer=issuer_code, archive_dir=archive_dir)
+        items.append(it)
+
     results = [reconcile_single_item(cursor, item) for item in items]
     stage_counts: Dict[str, int] = {}
     for r in results:
@@ -2366,6 +2401,7 @@ def ingest_scraped_payload(
         "portal_name": portal_info["name"],
         "mode": "CARD_SLIP",
         "scraped_rows_count": len(results),
+        "skipped_personal_count": skipped_personal_count,
         "stage_breakdown": stage_counts,
         "generated_slips_count": slip_res["generated_slips_count"],
     }

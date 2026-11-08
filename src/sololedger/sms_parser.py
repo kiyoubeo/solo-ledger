@@ -1,10 +1,13 @@
 """Korean corporate card SMS parser supporting single-line and multi-line formats."""
 
 import json
+import os
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from sololedger.config import settings
 from sololedger.models import ParsedSmsResult
 
 CARD_LABEL_MAP: Dict[str, str] = {
@@ -33,6 +36,267 @@ CARD_LABEL_MAP: Dict[str, str] = {
     "12*4": "신한법인(12*4)",
     "3456": "하나법인(3456)",
 }
+
+DEFAULT_BLOCKED_PERSONAL_CARDS: tuple[str, ...] = (
+    "8691",
+    "KB하이",
+    "KB위시",
+    "6*4*",
+    "4*4*",
+    "6*1*",
+    "0*7*",
+    "8*6*",
+    "현대NV",
+    "현대백화",
+    "8508",
+    "4195",
+    "7023",
+    "1000",
+    "1266",
+    "6096",
+    "6534",
+    "1595",
+    "4479",
+    "5*5*",
+)
+
+CORP_CARD_ISSUER_PREFIX: Dict[str, str] = {
+    "WOORI": "우리법인",
+    "SHINHAN": "신한법인",
+    "KB": "KB국민법인",
+    "HANA": "하나법인",
+    "HYUNDAI": "현대법인",
+    "SAMSUNG": "삼성법인",
+    "LOTTE": "롯데법인",
+    "IBK": "IBK기업법인",
+    "NH": "NH농협법인",
+    "BC": "BC법인",
+    "CORP": "법인카드",
+}
+
+
+def get_corp_card_policy_path(archive_dir: Optional[Path] = None) -> Path:
+    """Return path to corp_card_policy.json inside the active archive directory."""
+    base_dir = archive_dir or settings.archive_dir
+    base_dir.mkdir(parents=True, exist_ok=True)
+    return base_dir / "corp_card_policy.json"
+
+
+def load_corp_card_policy(archive_dir: Optional[Path] = None) -> Dict[str, Any]:
+    """Load corporate card dedicated mode policy and registered corporate cards."""
+    env_flag = os.getenv("SOLOLEDGER_CORP_ONLY_MODE", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    default_policy: Dict[str, Any] = {
+        "corp_only_mode": env_flag,
+        "strict_registered_only": True,
+        "block_unmatched_email_orders": True,
+        "auto_register_on_statement_upload": True,
+        "registered_corp_cards": [],
+        "blocked_personal_cards": list(DEFAULT_BLOCKED_PERSONAL_CARDS),
+    }
+    cfg_path = get_corp_card_policy_path(archive_dir)
+    if not cfg_path.exists():
+        return default_policy
+    try:
+        raw = json.loads(cfg_path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            return default_policy
+        merged = dict(default_policy)
+        for k in (
+            "corp_only_mode",
+            "strict_registered_only",
+            "block_unmatched_email_orders",
+            "auto_register_on_statement_upload",
+        ):
+            if k in raw:
+                merged[k] = bool(raw[k])
+        if isinstance(raw.get("registered_corp_cards"), list):
+            merged["registered_corp_cards"] = [
+                c for c in raw["registered_corp_cards"] if isinstance(c, dict) and c.get("card_last4")
+            ]
+        if isinstance(raw.get("blocked_personal_cards"), list):
+            merged["blocked_personal_cards"] = [
+                str(x).strip() for x in raw["blocked_personal_cards"] if str(x).strip()
+            ]
+        return merged
+    except Exception:
+        return default_policy
+
+
+def save_corp_card_policy(
+    updates: Dict[str, Any], archive_dir: Optional[Path] = None
+) -> Dict[str, Any]:
+    """Update and persist corp_card_policy.json."""
+    current = load_corp_card_policy(archive_dir)
+    for k in (
+        "corp_only_mode",
+        "strict_registered_only",
+        "block_unmatched_email_orders",
+        "auto_register_on_statement_upload",
+    ):
+        if k in updates and updates[k] is not None:
+            current[k] = bool(updates[k])
+    if "registered_corp_cards" in updates and isinstance(updates["registered_corp_cards"], list):
+        current["registered_corp_cards"] = [
+            c
+            for c in updates["registered_corp_cards"]
+            if isinstance(c, dict) and str(c.get("card_last4") or "").strip()
+        ]
+    if "blocked_personal_cards" in updates and isinstance(updates["blocked_personal_cards"], list):
+        current["blocked_personal_cards"] = [
+            str(x).strip() for x in updates["blocked_personal_cards"] if str(x).strip()
+        ]
+
+    cfg_path = get_corp_card_policy_path(archive_dir)
+    cfg_path.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+    return current
+
+
+def register_corp_card(
+    card_last4: str,
+    card_label: Optional[str] = None,
+    issuer: str = "CORP",
+    enabled: bool = True,
+    archive_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Register or update a corporate card in corp_card_policy.json and unblock it if needed."""
+    code = str(card_last4 or "").strip()
+    if not code or code == "0000":
+        return load_corp_card_policy(archive_dir)
+
+    issuer_key = str(issuer or "CORP").strip().upper()
+    prefix = CORP_CARD_ISSUER_PREFIX.get(issuer_key, "법인카드")
+    resolved_label = (card_label or "").strip()
+    if not resolved_label:
+        existing_lbl = CARD_LABEL_MAP.get(code, "")
+        if "법인" in existing_lbl:
+            resolved_label = existing_lbl
+        else:
+            resolved_label = f"{prefix}({code})"
+
+    policy = load_corp_card_policy(archive_dir)
+    cards: List[Dict[str, Any]] = list(policy.get("registered_corp_cards") or [])
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    updated_flag = False
+    for entry in cards:
+        if str(entry.get("card_last4") or "").strip() == code:
+            entry["card_label"] = resolved_label
+            entry["issuer"] = issuer_key
+            entry["enabled"] = bool(enabled)
+            entry["updated_at"] = now_str
+            updated_flag = True
+            break
+    if not updated_flag:
+        cards.append(
+            {
+                "card_last4": code,
+                "card_label": resolved_label,
+                "issuer": issuer_key,
+                "enabled": bool(enabled),
+                "registered_at": now_str,
+            }
+        )
+
+    blocked = [
+        x for x in (policy.get("blocked_personal_cards") or []) if str(x).strip() != code
+    ]
+    return save_corp_card_policy(
+        {
+            "registered_corp_cards": cards,
+            "blocked_personal_cards": blocked,
+        },
+        archive_dir=archive_dir,
+    )
+
+
+def remove_corp_card(
+    card_last4: str,
+    add_to_blocked: bool = False,
+    archive_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Remove a corporate card from registered_corp_cards."""
+    code = str(card_last4 or "").strip()
+    policy = load_corp_card_policy(archive_dir)
+    cards = [
+        c
+        for c in (policy.get("registered_corp_cards") or [])
+        if str(c.get("card_last4") or "").strip() != code
+    ]
+    blocked = list(policy.get("blocked_personal_cards") or [])
+    if add_to_blocked and code and code not in blocked:
+        blocked.append(code)
+    return save_corp_card_policy(
+        {
+            "registered_corp_cards": cards,
+            "blocked_personal_cards": blocked,
+        },
+        archive_dir=archive_dir,
+    )
+
+
+def is_allowed_corporate_card(
+    card_last4: str,
+    raw_text: str = "",
+    archive_dir: Optional[Path] = None,
+    is_statement_upload: bool = False,
+) -> bool:
+    """Return True if card_last4 is allowed under the active corporate card policy."""
+    policy = load_corp_card_policy(archive_dir)
+    if not policy.get("corp_only_mode", False):
+        return True
+
+    key = (card_last4 or "0000").strip()
+    reg_list = [
+        c
+        for c in (policy.get("registered_corp_cards") or [])
+        if isinstance(c, dict) and c.get("enabled", True)
+    ]
+    reg_codes = {str(c.get("card_last4") or "").strip() for c in reg_list if c.get("card_last4")}
+    blocked_codes = {str(x).strip() for x in (policy.get("blocked_personal_cards") or []) if x}
+
+    if key in reg_codes:
+        return True
+    if key in blocked_codes:
+        return False
+
+    if is_statement_upload:
+        if (
+            reg_codes
+            and policy.get("strict_registered_only", True)
+            and not policy.get("auto_register_on_statement_upload", True)
+        ):
+            return key in reg_codes
+        return True
+
+    if reg_codes and policy.get("strict_registered_only", True):
+        return key in reg_codes
+
+    lbl = CARD_LABEL_MAP.get(key, "")
+    if "법인" in lbl:
+        return True
+    if re.search(r"(법인|기업)", raw_text or ""):
+        return True
+    return False
+
+
+def get_effective_card_label_map(archive_dir: Optional[Path] = None) -> Dict[str, str]:
+    """Return effective card_last4 -> display label mapping respecting corp_card_policy."""
+    policy = load_corp_card_policy(archive_dir)
+    base = dict(CARD_LABEL_MAP)
+    if policy.get("corp_only_mode", False):
+        blocked = set(policy.get("blocked_personal_cards") or [])
+        for b_code in blocked:
+            base.pop(b_code, None)
+    for entry in policy.get("registered_corp_cards") or []:
+        c_code = str(entry.get("card_last4") or "").strip()
+        c_lbl = str(entry.get("card_label") or "").strip()
+        if c_code and c_lbl:
+            base[c_code] = c_lbl
+    return base
 
 
 def extract_rcs_text(raw_body: str) -> str:
@@ -65,9 +329,15 @@ def extract_rcs_text(raw_body: str) -> str:
     return "\n".join(collected) if collected else body_str
 
 
-def format_card_label(card_last4: str) -> str:
+def format_card_label(card_last4: str, archive_dir: Optional[Path] = None) -> str:
     """Return a human-readable card display label for a given card_last4 code."""
     key = (card_last4 or "0000").strip()
+    policy = load_corp_card_policy(archive_dir)
+    for entry in policy.get("registered_corp_cards") or []:
+        if str(entry.get("card_last4") or "").strip() == key:
+            custom_lbl = str(entry.get("card_label") or "").strip()
+            if custom_lbl:
+                return custom_lbl
     if key in CARD_LABEL_MAP:
         return CARD_LABEL_MAP[key]
     if key == "0000":

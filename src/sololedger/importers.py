@@ -12,6 +12,11 @@ from typing import Any, Dict, List, Optional
 
 from sololedger.models import ReconcileItem
 from sololedger.reconciler import reconcile_single_item
+from sololedger.sms_parser import (
+    is_allowed_corporate_card,
+    load_corp_card_policy,
+    register_corp_card,
+)
 
 
 def _decode_rk_number(rk: int) -> float:
@@ -523,7 +528,22 @@ def import_and_reconcile_hometax_csv(
     cursor: sqlite3.Cursor, csv_text: str
 ) -> Dict[str, Any]:
     """Parse Hometax CSV and execute 3-stage reconciliation for all rows."""
-    items = parse_hometax_csv(csv_text)
+    raw_items = parse_hometax_csv(csv_text)
+    policy = load_corp_card_policy()
+    items: List[ReconcileItem] = []
+    skipped_personal_count = 0
+    for it in raw_items:
+        if not is_allowed_corporate_card(it.card_last4, is_statement_upload=True):
+            skipped_personal_count += 1
+            continue
+        if (
+            policy.get("corp_only_mode")
+            and policy.get("auto_register_on_statement_upload", True)
+            and it.card_last4 != "0000"
+        ):
+            register_corp_card(it.card_last4, issuer="CORP")
+        items.append(it)
+
     results = [reconcile_single_item(cursor, item) for item in items]
 
     stage_counts: Dict[str, int] = {}
@@ -534,6 +554,7 @@ def import_and_reconcile_hometax_csv(
     return {
         "status": "imported",
         "total_rows": len(results),
+        "skipped_personal_count": skipped_personal_count,
         "stage_breakdown": stage_counts,
         "results": results,
     }

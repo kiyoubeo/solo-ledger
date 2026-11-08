@@ -9,7 +9,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from sololedger.sms_parser import extract_rcs_text, parse_korean_card_sms
+from sololedger.sms_parser import (
+    extract_rcs_text,
+    is_allowed_corporate_card,
+    parse_korean_card_sms,
+)
 from sololedger.tax_engine import (
     calculate_supply_and_vat,
     evaluate_tax_rules,
@@ -135,6 +139,7 @@ def import_phone_sms_to_ledger(
 
     inserted_ids: List[int] = []
     skipped_duplicates = 0
+    skipped_personal_cards = 0
     canceled_count = 0
     failed_count = 0
     parsed_preview: List[Dict[str, Any]] = []
@@ -144,6 +149,10 @@ def import_phone_sms_to_ledger(
             parsed = parse_korean_card_sms(msg["raw_message"], fallback_time=msg["received_at"])
         except ValueError:
             failed_count += 1
+            continue
+
+        if not is_allowed_corporate_card(parsed.card_last4, raw_text=msg["raw_message"]):
+            skipped_personal_cards += 1
             continue
 
         if parsed.is_cancel:
@@ -284,6 +293,7 @@ def import_phone_sms_to_ledger(
         "fetched_sms_count": len(messages),
         "inserted_count": len(inserted_ids),
         "skipped_duplicates": skipped_duplicates,
+        "skipped_personal_cards": skipped_personal_cards,
         "canceled_count": canceled_count,
         "failed_count": failed_count,
         "inserted_tx_ids": inserted_ids,

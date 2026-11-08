@@ -17,6 +17,7 @@ build/
 *.db-shm
 archive/
 archive_test/
+archive_personal_backup/
 references/
 
 # Environment variables & secrets
