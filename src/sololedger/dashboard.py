@@ -11,7 +11,11 @@ from typing import Any, Dict, List, Optional
 from sololedger import __version__
 from sololedger.archiver import compute_sha256_hex, save_receipt_files
 from sololedger.config import settings
-from sololedger.sms_parser import format_card_label, sanitize_card_folder_name
+from sololedger.sms_parser import (
+    format_card_label,
+    load_corp_card_policy,
+    sanitize_card_folder_name,
+)
 from sololedger.tax_engine import (
     calculate_supply_and_vat,
     evaluate_tax_rules,
@@ -505,6 +509,7 @@ def build_dashboard_summary(
         "pending_transactions": pending_items,
         "transactions": rows,
         "vehicle_limit": vehicle_summary,
+        "corp_card_policy": load_corp_card_policy(),
     }
 
 
@@ -700,13 +705,21 @@ def reset_test_ledger(
     cursor.execute("DELETE FROM receipt_ocr_metadata")
     cursor.execute("DELETE FROM card_transactions")
     cursor.execute("DELETE FROM merchants")
+    cursor.execute("DELETE FROM tax_classification_rules WHERE priority = 5")
+    try:
+        cursor.execute(
+            "DELETE FROM sqlite_sequence WHERE name IN ('card_transactions', 'receipt_ocr_metadata')"
+        )
+    except sqlite3.OperationalError:
+        pass
 
     target_archive = archive_dir or settings.archive_dir
-    for sub in ("original", "normalized", "exports"):
+    for sub in ("original", "normalized", "exports", "by_card"):
         sub_path = target_archive / sub
         if sub_path.exists():
             shutil.rmtree(sub_path, ignore_errors=True)
-            sub_path.mkdir(parents=True, exist_ok=True)
+            if sub != "by_card":
+                sub_path.mkdir(parents=True, exist_ok=True)
 
     return {
         "status": "reset",
@@ -911,6 +924,54 @@ def render_dashboard_html(
         else "<tr><td colspan='10' class='empty'>해당 조건의 거래 내역이 없습니다.</td></tr>"
     )
 
+    corp_policy = summary.get("corp_card_policy") or load_corp_card_policy()
+    corp_only_active = bool(corp_policy.get("corp_only_mode", False))
+    reg_cards = corp_policy.get("registered_corp_cards", [])
+    corp_mode_badge_html = (
+        '<span class="badge env" style="background:#dbeafe; color:#1e40af;">🏢 법인카드 전용 모드</span>'
+        if corp_only_active
+        else ""
+    )
+    if corp_only_active:
+        if reg_cards:
+            reg_badges = " ".join(
+                f"<span class='badge card' style='background:#0f766e; color:#fff;'>"
+                f"{html.escape(str(c.get('label') or c.get('card_last4')))}</span>"
+                for c in reg_cards
+            )
+            reg_summary_html = f"등록된 법인카드({len(reg_cards)}장): {reg_badges}"
+        else:
+            reg_summary_html = (
+                "<span style='color:#b45309; font-weight:700;'>"
+                "⚠️ 아직 등록된 법인카드 번호가 없습니다. "
+                "우측 버튼으로 법인카드 끝 4자리를 등록하거나 법인카드 명세서(.xls/.xlsx/.csv)를 업로드하세요."
+                "</span>"
+            )
+        corp_banner_html = (
+            "<section class='section no-print' "
+            "style='background:#f0fdfa; border:2px solid #0d9488; margin-bottom:20px;'>"
+            "<div style='display:flex; justify-content:space-between; align-items:center; "
+            "flex-wrap:wrap; gap:10px;'>"
+            "<div>"
+            "<div style='font-size:15px; font-weight:800; color:#115e59; margin-bottom:4px;'>"
+            "🏢 법인카드 사용내역 전용 테스트 모드 활성화됨 "
+            "(개인카드 SMS·푸시 및 미매칭 개인 쇼핑메일 자동 차단)"
+            "</div>"
+            f"<div style='font-size:13px; color:#134e4a;'>{reg_summary_html}</div>"
+            "</div>"
+            "<div style='display:flex; gap:6px; flex-wrap:wrap;'>"
+            "<button style='background:#0f766e; font-weight:700;' onclick='openCorpCardModal()'>"
+            "💳 법인카드 번호 등록 · 정책 설정</button>"
+            "<button onclick=\"document.getElementById('csv-file-input').click()\">"
+            "📂 법인카드 명세서(.xls/.xlsx/.csv) 업로드</button>"
+            "<button class='secondary' onclick='seedDemoData()'>법인카드 샘플 6건 생성</button>"
+            "</div>"
+            "</div>"
+            "</section>"
+        )
+    else:
+        corp_banner_html = ""
+
     return f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -1019,6 +1080,7 @@ def render_dashboard_html(
       <div class="header-title-wrap">
         <h1>SoloLedger 경비·세무증빙 대시보드 (v{__version__})
           <span class="badge env">{html.escape(summary['app_env'].upper())} MODE</span>
+          {corp_mode_badge_html}
         </h1>
         <div class="header-meta">
           귀속 연도: <strong>{summary['year']}년</strong>
@@ -1029,9 +1091,11 @@ def render_dashboard_html(
       <div class="action-toolbar no-print">
         <input type="file" id="receipt-file-input" accept="image/*,.pdf"
                style="display:none" onchange="uploadReceiptFile(this)" />
-        <input type="file" id="csv-file-input" accept=".csv,.txt,.xls,.html,.json"
+        <input type="file" id="csv-file-input" accept=".csv,.txt,.xls,.xlsx,.html,.json"
                style="display:none" onchange="uploadCsvFile(this)" />
         <button class="secondary" onclick="window.open('/manual', '_blank')">사용 매뉴얼(HTML)</button>
+        <button style="background:#0f766e; font-weight:700;"
+                onclick="openCorpCardModal()">💳 법인카드 등록·전용모드</button>
         <button onclick="reapplyRules()">스마트 자동분류 실행</button>
         <button onclick="generateElectronicSlips()">전자 매출전표 일괄 생성</button>
         <button onclick="document.getElementById('receipt-file-input').click()">영수증 업로드(OCR)</button>
@@ -1091,6 +1155,8 @@ def render_dashboard_html(
       </div>
     </div>
   </header>
+
+  {corp_banner_html}
 
   <section class="cards">
     <div class="card">
@@ -1453,6 +1519,124 @@ def render_dashboard_html(
             <button onclick="submitEmailPaste()">⚡ 붙여넣은 메일 즉시 매칭 · 명세서 생성</button>
             <button class="secondary" onclick="closeEmailOrderModal()">닫기</button>
           </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="corp-card-modal-backdrop" class="modal-backdrop" onclick="onCorpCardBackdropClick(event)">
+    <div class="modal-card" style="max-width:740px;">
+      <div class="modal-header">
+        <strong>💳 법인카드 번호 등록 · 법인카드 전용 테스트 모드 설정</strong>
+        <button class="secondary" onclick="closeCorpCardModal()">✕ 닫기</button>
+      </div>
+      <div class="slip-box" style="background:#f0fdfa; border-color:#5eead4; margin-bottom:12px;">
+        <div style="font-weight:800; color:#115e59; margin-bottom:6px;">
+          🛡️ 법인카드 전용 필터링 정책 (개인카드·미매칭 개인메일 혼입 방지)
+        </div>
+        <div style="display:flex; flex-direction:column; gap:6px; font-size:13px;">
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-weight:700;">
+            <input type="checkbox" id="corp-only-mode-chk" checked />
+            법인카드 전용 모드 활성화 (개인카드 KB 8691/롯데 6*4*/네이버현대/개인우리 6534/삼성 8508 등 차단)
+          </label>
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+            <input type="checkbox" id="corp-strict-registered-chk" checked />
+            등록된 법인카드 번호만 USB 문자(SMS)·앱 푸시에서 수집 (미등록 카드번호 자동 무시)
+          </label>
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+            <input type="checkbox" id="corp-block-unmatched-email-chk" checked />
+            법인카드 전표와 매칭되지 않는 쇼핑몰 이메일의 단독 전표(EMAIL_ORDER) 자동 생성 차단
+          </label>
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+            <input type="checkbox" id="corp-auto-reg-upload-chk" checked />
+            법인카드 이용내역 명세서(.xls/.xlsx/.csv) 업로드 시 포함된 법인카드 번호 자동 등록
+          </label>
+        </div>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:10px;">
+          <span id="corp-policy-status" style="font-size:12px; font-weight:700; color:#0f766e;"></span>
+          <button style="background:#0f766e;" onclick="saveCorpCardPolicySettings()">
+            💾 전용 모드 정책 저장
+          </button>
+        </div>
+      </div>
+
+      <div class="slip-box" style="margin-bottom:12px;">
+        <div style="font-weight:800; color:#0f172a; margin-bottom:8px;">
+          ➕ 새 법인카드 등록 (카드 끝 4자리 또는 마스킹 번호)
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr 1.3fr auto; gap:8px; align-items:end;">
+          <div>
+            <label style="font-size:11px; font-weight:700; display:block; margin-bottom:3px;">카드사 선택</label>
+            <select id="corp-card-issuer" style="width:100%;" onchange="onCorpIssuerChange()">
+              <option value="WOORI">우리법인카드</option>
+              <option value="KB">KB국민법인카드</option>
+              <option value="SHINHAN">신한법인카드</option>
+              <option value="HANA">하나법인카드</option>
+              <option value="SAMSUNG">삼성법인카드</option>
+              <option value="HYUNDAI">현대법인카드</option>
+              <option value="LOTTE">롯데법인카드</option>
+              <option value="NH">NH농협법인카드</option>
+              <option value="IBK">IBK기업법인카드</option>
+              <option value="BC">BC법인카드</option>
+              <option value="CORP">기타 법인카드</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:11px; font-weight:700; display:block; margin-bottom:3px;">
+              카드 끝 4자리 (예: 1234, 9*8*)
+            </label>
+            <input type="text" id="corp-card-last4" placeholder="예: 4321" style="width:100%;" />
+          </div>
+          <div>
+            <label style="font-size:11px; font-weight:700; display:block; margin-bottom:3px;">
+              표시 별칭 (자동완성/수정 가능)
+            </label>
+            <input type="text" id="corp-card-label" placeholder="예: 우리법인(4321)" style="width:100%;" />
+          </div>
+          <div>
+            <button style="background:#0f766e; padding:7px 14px; font-weight:700;" onclick="registerNewCorpCard()">
+              ➕ 법인카드 추가
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="slip-box" style="margin-bottom:12px;">
+        <div style="font-weight:800; color:#0f172a; margin-bottom:6px;">
+          📋 현재 등록된 법인카드 목록 (<span id="corp-reg-count">0</span>장)
+        </div>
+        <div id="corp-registered-list" style="font-size:13px;">
+          등록된 법인카드 목록을 불러오는 중...
+        </div>
+      </div>
+
+      <div class="slip-box" style="background:#eff6ff; border-color:#93c5fd;">
+        <div style="font-weight:800; color:#1e3a8a; margin-bottom:6px;">
+          📂 법인카드사 이용대금명세서 / 승인내역 엑셀·CSV 바로 업로드
+        </div>
+        <div style="font-size:12px; color:#334155; margin-bottom:8px;">
+          우리·국민·신한·하나·삼성·현대·비씨 법인카드 홈페이지나 홈택스에서 내려받은
+          <code>.xls</code>, <code>.xlsx</code>, <code>.csv</code> 명세서를 업로드하면 법인카드 내역이 등록됩니다.
+        </div>
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+          <select id="corp-upload-portal">
+            <option value="HOMETAX">자동 감지 (홈택스 / 전체 카드사 통합)</option>
+            <option value="WOORI_CARD">우리법인카드 명세서</option>
+            <option value="KB_CARD">KB국민법인카드 명세서</option>
+            <option value="SHINHAN_CARD">신한법인카드 명세서</option>
+            <option value="SAMSUNG_CARD">삼성법인카드 명세서</option>
+            <option value="HYUNDAI_CARD">현대법인카드 명세서</option>
+            <option value="LOTTE_CARD">롯데법인카드 명세서</option>
+            <option value="CREFIA">여신금융협회 통합매입내역</option>
+          </select>
+          <input type="file" id="corp-stmt-upload-input" accept=".csv,.txt,.xls,.xlsx,.html,.json"
+                 style="display:none" onchange="uploadCorpStatementFile(this)" />
+          <button onclick="document.getElementById('corp-stmt-upload-input').click()">
+            📂 법인카드 명세서 파일 선택 · 업로드
+          </button>
+          <button class="secondary" onclick="importPhoneSms()">
+            📱 USB 휴대폰에서 등록 법인카드 문자만 가져오기
+          </button>
         </div>
       </div>
     </div>
@@ -2525,8 +2709,176 @@ def render_dashboard_html(
         closeReceiptModal();
         closeCoupangModal();
         closeEmailOrderModal();
+        closeCorpCardModal();
       }}
     }});
+
+    const CORP_ISSUER_PREFIX_MAP = {{
+      WOORI: '우리법인',
+      KB: 'KB국민법인',
+      SHINHAN: '신한법인',
+      HANA: '하나법인',
+      SAMSUNG: '삼성법인',
+      HYUNDAI: '현대법인',
+      LOTTE: '롯데법인',
+      NH: 'NH농협법인',
+      IBK: 'IBK기업법인',
+      BC: 'BC법인',
+      CORP: '법인카드'
+    }};
+
+    function onCorpIssuerChange() {{
+      const iss = document.getElementById('corp-card-issuer').value;
+      const last4 = (document.getElementById('corp-card-last4').value || '').trim();
+      const prefix = CORP_ISSUER_PREFIX_MAP[iss] || '법인카드';
+      if (last4) {{
+        document.getElementById('corp-card-label').value = `${{prefix}}(${{last4}})`;
+      }}
+    }}
+
+    async function refreshCorpCardPolicyState() {{
+      const res = await fetch('/api/v1/system/corp-card-policy', {{ headers: API_HEADERS }});
+      if (!res.ok) return null;
+      const pol = await res.json();
+      document.getElementById('corp-only-mode-chk').checked = !!pol.corp_only_mode;
+      document.getElementById('corp-strict-registered-chk').checked = !!pol.strict_registered_only;
+      document.getElementById('corp-block-unmatched-email-chk').checked = !!pol.block_unmatched_email_orders;
+      document.getElementById('corp-auto-reg-upload-chk').checked = !!pol.auto_register_on_statement_upload;
+      const cards = Array.isArray(pol.registered_corp_cards) ? pol.registered_corp_cards : [];
+      cachedRegisteredCorpCards = cards;
+      document.getElementById('corp-reg-count').textContent = String(cards.length);
+      const listEl = document.getElementById('corp-registered-list');
+      if (cards.length === 0) {{
+        listEl.innerHTML =
+          '<div style="color:#b45309; font-size:12px; padding:6px;">' +
+          '등록된 법인카드가 없습니다. 위 입력창에서 끝 4자리를 추가하거나 법인카드 명세서를 업로드해 주세요.' +
+          '</div>';
+      }} else {{
+        let rows = '';
+        cards.forEach((c, idx) => {{
+          const c4 = escHtml(c.card_last4);
+          const lbl = escHtml(c.card_label || c.label || c.card_last4);
+          const iss = escHtml(c.issuer || 'CORP');
+          rows +=
+            '<div style="display:flex; justify-content:space-between; align-items:center; ' +
+            'padding:6px 4px; border-bottom:1px solid #e2e8f0;">' +
+            '<div><span class="badge card" style="background:#0f766e; color:#fff; margin-right:8px;">' +
+            lbl + '</span>' +
+            '<code style="font-size:12px;">끝 4자리/식별자: ' + c4 + '</code> ' +
+            '<span style="color:#64748b; font-size:11px;">(' + iss + ')</span></div>' +
+            '<button class="danger" style="padding:3px 8px; font-size:11px;" ' +
+            'onclick="deleteRegisteredCorpCardByIdx(' + idx + ')">삭제</button>' +
+            '</div>';
+        }});
+        listEl.innerHTML = rows;
+      }}
+      return pol;
+    }}
+
+    async function openCorpCardModal() {{
+      document.getElementById('corp-card-modal-backdrop').classList.add('open');
+      await refreshCorpCardPolicyState();
+    }}
+
+    function closeCorpCardModal() {{
+      document.getElementById('corp-card-modal-backdrop').classList.remove('open');
+    }}
+
+    function onCorpCardBackdropClick(ev) {{
+      if (ev.target && ev.target.id === 'corp-card-modal-backdrop') {{
+        closeCorpCardModal();
+      }}
+    }}
+
+    async function saveCorpCardPolicySettings() {{
+      const st = document.getElementById('corp-policy-status');
+      const bodyObj = {{
+        corp_only_mode: document.getElementById('corp-only-mode-chk').checked,
+        strict_registered_only: document.getElementById('corp-strict-registered-chk').checked,
+        block_unmatched_email_orders: document.getElementById('corp-block-unmatched-email-chk').checked,
+        auto_register_on_statement_upload: document.getElementById('corp-auto-reg-upload-chk').checked
+      }};
+      const res = await fetch('/api/v1/system/corp-card-policy', {{
+        method: 'POST',
+        headers: API_HEADERS,
+        body: JSON.stringify(bodyObj)
+      }});
+      if (res.ok) {{
+        st.textContent = '✅ 법인카드 전용 모드 정책이 저장되었습니다.';
+        setTimeout(() => {{ window.location.reload(); }}, 700);
+      }}
+    }}
+
+    async function registerNewCorpCard() {{
+      const st = document.getElementById('corp-policy-status');
+      const iss = document.getElementById('corp-card-issuer').value;
+      const last4 = (document.getElementById('corp-card-last4').value || '').trim();
+      let label = (document.getElementById('corp-card-label').value || '').trim();
+      if (!last4) {{
+        st.style.color = '#b91c1c';
+        st.textContent = '⚠️ 법인카드 끝 4자리 번호를 입력해 주세요.';
+        return;
+      }}
+      if (!label) {{
+        const prefix = CORP_ISSUER_PREFIX_MAP[iss] || '법인카드';
+        label = `${{prefix}}(${{last4}})`;
+      }}
+      const res = await fetch('/api/v1/system/corp-card-policy', {{
+        method: 'POST',
+        headers: API_HEADERS,
+        body: JSON.stringify({{
+          issuer: iss,
+          card_last4: last4,
+          label: label
+        }})
+      }});
+      if (res.ok) {{
+        document.getElementById('corp-card-last4').value = '';
+        document.getElementById('corp-card-label').value = '';
+        st.style.color = '#0f766e';
+        st.textContent = `✅ 법인카드 [${{label}}] 등록 완료!`;
+        await refreshCorpCardPolicyState();
+      }}
+    }}
+
+    let cachedRegisteredCorpCards = [];
+    async function deleteRegisteredCorpCardByIdx(idx) {{
+      const entry = cachedRegisteredCorpCards[idx];
+      if (!entry || !entry.card_last4) return;
+      await deleteRegisteredCorpCard(entry.card_last4);
+    }}
+
+    async function deleteRegisteredCorpCard(cardLast4) {{
+      const res = await fetch('/api/v1/system/corp-cards/' + encodeURIComponent(cardLast4), {{
+        method: 'DELETE',
+        headers: API_HEADERS
+      }});
+      if (res.ok) {{
+        await refreshCorpCardPolicyState();
+      }}
+    }}
+
+    function uploadCorpStatementFile(inputEl) {{
+      if (!inputEl.files || !inputEl.files[0]) return;
+      const file = inputEl.files[0];
+      const portal = document.getElementById('corp-upload-portal').value || 'HOMETAX';
+      const reader = new FileReader();
+      reader.onload = async function(ev) {{
+        const dataUrl = String(ev.target.result || '');
+        const b64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+        await fetch('/api/v1/scraper/ingest', {{
+          method: 'POST',
+          headers: API_HEADERS,
+          body: JSON.stringify({{
+            portal: portal,
+            content_b64: b64,
+            auto_generate_slips: true
+          }})
+        }});
+        window.location.href = '/dashboard?year_month=ALL';
+      }};
+      reader.readAsDataURL(file);
+    }}
   </script>
 </body>
 </html>"""

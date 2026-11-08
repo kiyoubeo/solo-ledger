@@ -1070,6 +1070,132 @@ def test_receipt_and_statement_titles_omit_verbose_suffixes(client):
     assert "<h1>거 래 명 세 서</h1>" in stmt_html
 
 
+def test_corporate_card_dedicated_mode_policy_and_personal_card_blocking(client):
+    """Verify corporate card dedicated mode blocks personal cards and unmatched email orders."""
+    # 1. Enable corp_only_mode and register a corporate card (우리법인 4321)
+    pol_res = client.post(
+        "/api/v1/system/corp-card-policy",
+        headers={"X-API-Key": "test-secret-key"},
+        json={
+            "corp_only_mode": True,
+            "strict_registered_only": True,
+            "block_unmatched_email_orders": True,
+            "auto_register_on_statement_upload": True,
+            "issuer": "WOORI",
+            "card_last4": "4321",
+            "label": "우리법인(4321)",
+        },
+    )
+    assert pol_res.status_code == 200
+    pol_data = pol_res.json()
+    assert pol_data["corp_only_mode"] is True
+    assert any(c["card_last4"] == "4321" for c in pol_data["registered_corp_cards"])
+
+    # 2. Verify personal card SMS (8691, 6534) are blocked while registered corp card (4321) is imported
+    mock_adb_stdout = (
+        "Row: 0 _id=9001, address=15889955, date=1730541000000, body=[Web발신]\n"
+        "우리법인(4321)승인\n김*범님\n55,000원 일시불\n11/02 14:10\n교보문고 광화문점\n"
+        "Row: 1 _id=9002, address=15881688, date=1730541060000, body=[Web발신]\n"
+        "KB국민카드 8691승인\n김*범님\n12,170원 일시불\n11/02 14:11\n쿠팡(쿠페이)\n"
+        "Row: 2 _id=9003, address=15889955, date=1730541120000, body=[Web발신]\n"
+        "우리(6534)승인\n김*범님\n23,050원 일시불\n11/02 14:12\n주식회사 카카오페이\n"
+    )
+    imp_res = client.post(
+        "/api/v1/system/import-phone-sms",
+        headers={"X-API-Key": "test-secret-key"},
+        json={"limit": 10, "raw_adb_output": mock_adb_stdout},
+    )
+    assert imp_res.status_code == 200
+    imp_body = imp_res.json()
+    assert imp_body["inserted_count"] == 1
+    assert imp_body["skipped_personal_cards"] == 2
+
+    # 3. Verify SMS webhook and Push webhook also block personal cards in corp_only_mode
+    sms_blocked = client.post(
+        "/api/v1/webhooks/sms",
+        headers={"X-API-Key": "test-secret-key"},
+        json={
+            "raw_message": "[Web발신] 삼성8508승인 김*범 33,000원 일시불 11/03 10:00 스타벅스",
+            "received_at": "2026-11-03T10:00:05",
+        },
+    )
+    assert sms_blocked.status_code == 200
+    assert sms_blocked.json()["status"] == "ignored"
+
+    push_blocked = client.post(
+        "/api/v1/webhooks/push",
+        headers={"X-API-Key": "test-secret-key"},
+        json={
+            "package_name": "com.wooricard.smartapp",
+            "title": "우리카드 승인",
+            "body": "우리(6534)승인 19,000원 일시불 11/03 11:00 이마트24",
+            "received_at": "2026-11-03T11:00:05",
+        },
+    )
+    assert push_blocked.status_code == 200
+    assert push_blocked.json()["status"] == "ignored"
+
+    # 4. Verify statement upload blocks personal cards (8691) and auto-registers new corporate card (7788)
+    mixed_stmt_csv = (
+        "승인일시,카드번호,승인번호,가맹점사업자등록번호,가맹점명,공급가액,부가세,합계금액\n"
+        "2026-11-04 12:00:00,7788,99001122,201-81-21515,스타벅스 역삼점,10000,1000,11000\n"
+        "2026-11-04 12:30:00,8691,99001133,120-88-00767,쿠팡(개인카드),20000,2000,22000\n"
+    )
+    stmt_res = client.post(
+        "/api/v1/scraper/ingest",
+        headers={"X-API-Key": "test-secret-key"},
+        json={"portal": "SHINHAN_CARD", "raw_content": mixed_stmt_csv, "auto_generate_slips": True},
+    )
+    assert stmt_res.status_code == 200
+    stmt_body = stmt_res.json()
+    assert stmt_body["scraped_rows_count"] == 1
+    assert stmt_body["skipped_personal_count"] == 1
+
+    # Check that 7788 was auto-registered with SHINHAN_CARD prefix
+    pol_after = client.get("/api/v1/system/corp-card-policy").json()
+    reg_map = {c["card_last4"]: c["label"] for c in pol_after["registered_corp_cards"]}
+    assert "7788" in reg_map
+    assert reg_map["7788"] == "신한법인(7788)"
+
+    # 5. Verify unmatched personal shopping email does NOT auto-create EMAIL_ORDER row
+    unmatched_eml = (
+        "Subject: [쿠팡] 주문이 완료되었습니다\n\n"
+        "주문일 2026-11-05\n"
+        "상품명 개인용 운동화\n"
+        "총 결제금액 89,000원\n"
+    )
+    eml_res = client.post(
+        "/api/v1/scraper/email-webhook",
+        headers={"X-API-Key": "test-secret-key"},
+        json={"raw_content": unmatched_eml, "auto_create_tx": True},
+    )
+    assert eml_res.status_code == 200
+    assert eml_res.json()["matched_count"] == 0
+
+    # Verify total ledger count is still 2 (4321 교보문고 + 7788 스타벅스)
+    tx_list = client.get(
+        "/api/v1/transactions",
+        headers={"X-API-Key": "test-secret-key"},
+    ).json()
+    assert tx_list["count"] == 2
+    assert {t["card_last4"] for t in tx_list["items"]} == {"4321", "7788"}
+
+    # 6. Verify dashboard renders Corporate Card Dedicated Mode banner & custom label
+    dash_html = client.get("/dashboard?year_month=ALL").text
+    assert "법인카드 전용 모드" in dash_html
+    assert "우리법인(4321)" in dash_html
+    assert "신한법인(7788)" in dash_html
+
+    # 7. Verify deleting a registered corporate card
+    del_res = client.delete(
+        "/api/v1/system/corp-cards/7788",
+        headers={"X-API-Key": "test-secret-key"},
+    )
+    assert del_res.status_code == 200
+    assert all(c["card_last4"] != "7788" for c in del_res.json()["registered_corp_cards"])
+
+
+
 
 
 

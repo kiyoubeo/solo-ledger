@@ -71,10 +71,16 @@ from sololedger.scraper_service import (
     ingest_scraped_payload,
 )
 from sololedger.sms_parser import (
-    CARD_LABEL_MAP,
+    CORP_CARD_ISSUER_PREFIX,
     format_card_label,
+    get_effective_card_label_map,
+    is_allowed_corporate_card,
+    load_corp_card_policy,
     parse_korean_card_sms,
+    register_corp_card,
+    remove_corp_card,
     sanitize_card_folder_name,
+    save_corp_card_policy,
 )
 from sololedger.tax_engine import calculate_supply_and_vat, evaluate_tax_rules
 from sololedger.telegram_bot import handle_telegram_update
@@ -251,13 +257,15 @@ async def mobile_auth_login_endpoint(payload: MobileLoginRequest):
     if not _is_credential_valid(cred):
         raise HTTPException(status_code=401, detail="비밀번호 또는 API 키가 일치하지 않습니다.")
     token = _create_session_token()
+    policy = load_corp_card_policy()
     return {
         "status": "authenticated",
         "token": token,
         "version": __version__,
         "device_name": payload.device_name or "Android",
         "require_auth": settings.require_auth,
-        "card_labels": CARD_LABEL_MAP,
+        "card_labels": get_effective_card_label_map(),
+        "corp_only_mode": bool(policy.get("corp_only_mode", False)),
     }
 
 
@@ -362,6 +370,13 @@ async def receive_card_sms_webhook(
     except ValueError as e:
         return {"status": "ignored", "reason": str(e)}
 
+    if not is_allowed_corporate_card(parsed.card_last4, raw_text=payload.raw_message):
+        return {
+            "status": "ignored",
+            "reason": "Blocked personal or unregistered card in corporate card mode.",
+            "card_last4": parsed.card_last4,
+        }
+
     init_db()
     conn = get_connection()
     cursor = conn.cursor()
@@ -451,6 +466,14 @@ async def receive_card_app_push_webhook(
         )
     except ValueError as e:
         return {"status": "ignored", "reason": str(e), "package_name": payload.package_name}
+
+    if not is_allowed_corporate_card(parsed.card_last4, raw_text=combined_text):
+        return {
+            "status": "ignored",
+            "reason": "Blocked personal or unregistered card in corporate card mode.",
+            "card_last4": parsed.card_last4,
+            "package_name": payload.package_name,
+        }
 
     init_db()
     conn = get_connection()
@@ -1223,6 +1246,72 @@ async def reapply_rules_endpoint(
         return outcome
     finally:
         conn.close()
+
+
+@app.get("/api/v1/system/corp-card-policy")
+async def get_corp_card_policy_endpoint():
+    """Return active corporate card dedicated mode policy and registered corporate cards."""
+    _verify_read_access()
+    policy = load_corp_card_policy()
+    return {
+        **policy,
+        "issuer_presets": CORP_CARD_ISSUER_PREFIX,
+    }
+
+
+@app.post("/api/v1/system/corp-card-policy")
+async def update_corp_card_policy_endpoint(
+    payload: Dict[str, Any] = Body(default_factory=dict),
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Update corporate card mode settings and optionally register a corporate card."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    updates: Dict[str, Any] = {}
+    for bool_key in (
+        "corp_only_mode",
+        "strict_registered_only",
+        "block_unmatched_email_orders",
+        "auto_register_on_statement_upload",
+    ):
+        if bool_key in payload:
+            updates[bool_key] = bool(payload[bool_key])
+    if "blocked_personal_cards" in payload and isinstance(payload["blocked_personal_cards"], list):
+        updates["blocked_personal_cards"] = payload["blocked_personal_cards"]
+
+    policy = save_corp_card_policy(updates) if updates else load_corp_card_policy()
+    if payload.get("card_last4"):
+        try:
+            policy = register_corp_card(
+                card_last4=str(payload["card_last4"]),
+                issuer=str(payload.get("issuer") or "CORP"),
+                label=str(payload.get("label") or ""),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "status": "updated",
+        **policy,
+        "issuer_presets": CORP_CARD_ISSUER_PREFIX,
+    }
+
+
+@app.delete("/api/v1/system/corp-cards/{card_last4}")
+async def delete_corp_card_endpoint(
+    card_last4: str,
+    add_to_blocked: bool = Query(default=False),
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Remove a registered corporate card from the allowlist."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    policy = remove_corp_card(card_last4, add_to_blocked=bool(add_to_blocked))
+    return {
+        "status": "removed",
+        **policy,
+        "issuer_presets": CORP_CARD_ISSUER_PREFIX,
+    }
 
 
 @app.get("/api/v1/scraper/targets")

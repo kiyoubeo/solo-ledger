@@ -162,15 +162,16 @@ def register_corp_card(
     issuer: str = "CORP",
     enabled: bool = True,
     archive_dir: Optional[Path] = None,
+    label: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Register or update a corporate card in corp_card_policy.json and unblock it if needed."""
     code = str(card_last4 or "").strip()
     if not code or code == "0000":
         return load_corp_card_policy(archive_dir)
 
-    issuer_key = str(issuer or "CORP").strip().upper()
+    issuer_key = re.sub(r"_CARD$", "", str(issuer or "CORP").strip().upper())
     prefix = CORP_CARD_ISSUER_PREFIX.get(issuer_key, "법인카드")
-    resolved_label = (card_label or "").strip()
+    resolved_label = (card_label or label or "").strip()
     if not resolved_label:
         existing_lbl = CARD_LABEL_MAP.get(code, "")
         if "법인" in existing_lbl:
@@ -185,6 +186,7 @@ def register_corp_card(
     for entry in cards:
         if str(entry.get("card_last4") or "").strip() == code:
             entry["card_label"] = resolved_label
+            entry["label"] = resolved_label
             entry["issuer"] = issuer_key
             entry["enabled"] = bool(enabled)
             entry["updated_at"] = now_str
@@ -195,6 +197,7 @@ def register_corp_card(
             {
                 "card_last4": code,
                 "card_label": resolved_label,
+                "label": resolved_label,
                 "issuer": issuer_key,
                 "enabled": bool(enabled),
                 "registered_at": now_str,
