@@ -65,3 +65,4 @@
 | 2026-11-05 | .gitignore, docs/DEVELOPMENT_PLAN.md, logs/last_verification.json, logs/verification_history.jsonl (+11 files) | [feat] 순수 Android 전용 앱(v1.1.0) 구축 및 원격 세무증빙 ZIP 다운로드·모바일 인증·우리카드 푸시 API 추가 |
 | 2026-11-08 | .gitignore, logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/importers.py (+3 files) | [feat] 법인카드 전용 필터링 정책(corp_card_policy) 및 개인카드 분리 백업·차단 기능 추가 |
 | 2026-11-08 | logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/dashboard.py (+2 files) | [feat] 개인카드 데이터 백업·초기화 및 법인카드 전용 테스트 모드(개인카드·미매칭 메일 차단 및 법인카드 등록 관리) 전환 |
+| 2026-11-09 | logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/exporters.py, src/sololedger/importers.py (+6 files) | [feat] 2026년 1분기 홈택스 사업용신용카드(333건) 정밀 파싱·업태업종 세무분류 고도화 및 원장·매출전표·세무패키지 반영 |

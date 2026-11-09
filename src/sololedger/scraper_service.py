@@ -2312,11 +2312,21 @@ def ingest_scraped_payload(
             and corp_policy.get("auto_register_on_statement_upload", True)
             and it.card_last4 != "0000"
         ):
-            issuer_code = portal_key if portal_key not in ("HOMETAX", "CARDSALES") else "CORP"
+            issuer_code = (
+                portal_key
+                if portal_key not in ("HOMETAX", "CARDSALES")
+                else (it.card_issuer or "CORP")
+            )
             register_corp_card(it.card_last4, issuer=issuer_code, archive_dir=archive_dir)
         items.append(it)
 
-    results = [reconcile_single_item(cursor, item) for item in items]
+    used_tx_ids: set[int] = set()
+    results: List[Dict[str, Any]] = []
+    for item in items:
+        r_single = reconcile_single_item(cursor, item, exclude_tx_ids=used_tx_ids)
+        if r_single.get("tx_id") is not None:
+            used_tx_ids.add(int(r_single["tx_id"]))
+        results.append(r_single)
     stage_counts: Dict[str, int] = {}
     for r in results:
         st = r["match_stage"]

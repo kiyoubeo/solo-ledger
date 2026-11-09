@@ -41,13 +41,20 @@ class ReconcileItem(BaseModel):
     """Single row from Hometax / card issuer purchase history or OCR result."""
 
     card_last4: str = "0000"
+    card_issuer: Optional[str] = None
     approval_no: Optional[str] = None
     transacted_at: str
     merchant_name: str
     biz_reg_no: Optional[str] = None
     total_amount: int
+    supply_value: Optional[int] = None
+    vat_amount: Optional[int] = None
     tax_type_code: str = "GENERAL"
     biz_status: str = "ACTIVE"
+    biz_category: Optional[str] = None
+    biz_item: Optional[str] = None
+    hometax_deduct_decision: Optional[str] = None
+    hometax_remark: Optional[str] = None
     reconcile_source: str = "HOMETAX_VERIFIED"
     is_cancel: bool = False
 

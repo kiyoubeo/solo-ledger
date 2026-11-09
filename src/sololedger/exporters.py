@@ -152,6 +152,7 @@ def generate_tax_accountant_pack(
 
     bundled_receipts_count = 0
     seen_flat_receipts = set()
+    seen_card_receipts = set()
     with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(csv_filename, csv_bytes)
         for c_last4, c_rows in card_rows_map.items():
@@ -173,7 +174,10 @@ def generate_tax_accountant_pack(
                     seen_flat_receipts.add(arch_name)
                     bundled_receipts_count += 1
                 c_folder = sanitize_card_folder_name(c_last4)
-                zf.write(candidate, arcname=f"receipts_by_card/{c_folder}/{arch_name}")
+                card_arcname = f"receipts_by_card/{c_folder}/{arch_name}"
+                if card_arcname not in seen_card_receipts:
+                    zf.write(candidate, arcname=card_arcname)
+                    seen_card_receipts.add(card_arcname)
 
     if exported_tx_ids:
         placeholders = ",".join("?" for _ in exported_tx_ids)

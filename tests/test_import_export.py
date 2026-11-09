@@ -187,3 +187,59 @@ def test_export_tax_pack_csv_and_zip_and_prevent_duplicate_export(client):
     )
     assert r_exp2.status_code == 200
     assert r_exp2.json()["exported_count"] == 0
+
+
+def test_hometax_tax_deduction_statement_xls_features(db_conn):
+    """Verify Hometax 사업용신용카드_세액공제내역 exact supply/vat, industry classification,
+    remark (간이불공제/면세불공제), same-day duplicates, and negative offset rows."""
+    cur = db_conn.cursor()
+    hometax_csv = (
+        "거래일자,카드번호,카드사,가맹점사업자번호,가맹점명,가맹점유형,업태,업종,공급가액,세액,봉사료,합계,공제여부결정,비고\n"
+        "2026-02-14,5275-8500-0548-3081,주식회사 우리카드,5448500399,"
+        "롯데쇼핑（주） 롯데몰 동부산점,일반과세자,소매업,백화점,15455,1545,0,17000,공제,\n"
+        "2026-02-14,5275-8500-0548-3081,주식회사 우리카드,5448500399,"
+        "롯데쇼핑（주） 롯데몰 동부산점,일반과세자,소매업,백화점,15455,1545,0,17000,공제,\n"
+        "2026-02-15,5275-8500-0275-1175,주식회사 우리카드,6178114021,"
+        "(주)신세계,일반과세자,소매업,백화점,3227273,322727,0,3550000,공제,\n"
+        "2026-02-15,5275-8500-0275-1175,주식회사 우리카드,6178114021,"
+        "(주)신세계,일반과세자,소매업,백화점,-3227273,-322727,0,-3550000,공제,\n"
+        "2026-03-23,5275-8500-0566-7014,주식회사 우리카드,6052180758,"
+        "부산항만산업선박급유소,일반과세자,도매 및 소매업,차량용 주유소 운영업,46818,4682,0,51500,공제,\n"
+        "2026-03-24,5275-8500-0566-7014,주식회사 우리카드,5040691000,"
+        "다미뜰,일반과세자,숙박 및 음식점업,한식 일반 음식점업,18182,1818,0,20000,불공제,간이불공제\n"
+    )
+    outcome = import_and_reconcile_hometax_csv(cur, hometax_csv)
+    assert outcome["total_rows"] == 6
+
+    cur.execute(
+        """
+        SELECT COUNT(*) AS cnt,
+               COALESCE(SUM(total_amount), 0) AS total_amt,
+               COALESCE(SUM(supply_value), 0) AS supply_amt,
+               COALESCE(SUM(vat_amount), 0) AS vat_amt
+        FROM card_transactions
+        WHERE reconcile_status != 'CANCELED'
+        """
+    )
+    agg = cur.fetchone()
+    assert agg["cnt"] == 6
+    # 17000 + 17000 + 3550000 - 3550000 + 51500 + 20000 = 105,500
+    assert agg["total_amt"] == 105500
+
+    # Check gas station classified via 업종='차량용 주유소 운영업' -> 822 차량유지비
+    cur.execute(
+        "SELECT account_code, vat_deduction_type FROM card_transactions "
+        "WHERE raw_merchant_name = '부산항만산업선박급유소'"
+    )
+    gas_row = cur.fetchone()
+    assert gas_row["account_code"] == "822"
+    assert gas_row["vat_deduction_type"] == "NON_DEDUCTIBLE"
+
+    # Check 간이불공제 remark respected even when 가맹점유형 is 일반과세자 -> 811 복리후생비, NON_DEDUCTIBLE
+    cur.execute(
+        "SELECT account_code, vat_deduction_type FROM card_transactions WHERE raw_merchant_name = '다미뜰'"
+    )
+    dami_row = cur.fetchone()
+    assert dami_row["account_code"] == "811"
+    assert dami_row["vat_deduction_type"] == "NON_DEDUCTIBLE"
+

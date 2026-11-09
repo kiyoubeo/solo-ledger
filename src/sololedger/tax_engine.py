@@ -73,17 +73,37 @@ _BUILTIN_INSURANCE_RE = re.compile(
 )
 _BUILTIN_TRAVEL_RE = re.compile(
     r"(항공|고속버스|시외버스|공항버스|시티투어|카카오T대리|대리운전|운송사업조합|해운조합|여객선|"
+    r"한국철도공사|주식회사\s*에스알|개인택시|"
     r"와이페이모어|놀유니버스|야놀자|인터파크|하나투어|모두투어|아고다|트립닷컴|마이리얼트립)",
+    re.IGNORECASE,
+)
+_BUILTIN_PG_RE = re.compile(
+    r"(엔에이치엔케이씨피|NHNKCP|한국정보통신|스마트로|케이에스넷|KSNET|나이스페이)",
+    re.IGNORECASE,
+)
+_BUILTIN_VEHICLE_EXTRA_RE = re.compile(
+    r"(샤인에너비스|영원석유|삼성에너지|제트라인모터스|아마노코리아)",
+    re.IGNORECASE,
+)
+_BUILTIN_ENTERTAINMENT_RE = re.compile(
+    r"(몽키뮤직타운|유흥주점|단란주점)",
     re.IGNORECASE,
 )
 _BUILTIN_SERVICE_FEE_RE = re.compile(
     r"(알림서비스|연회비|문자서비스|인증수수료|티머니|이비카드|후불교통|스카이라이프|케이티에이치|"
-    r"HCN|소프트먼트|일등코리아|멤버십|네이버플러스|일상케어|안심케어|나이스_마이홈)",
+    r"HCN|소프트먼트|일등코리아|멤버십|네이버플러스|일상케어|안심케어|나이스_마이홈|"
+    r"주식회사\s*우리카드|\(주\)\s*다날|우정사업본부|대신택배|개미중기|지에스건설|주식회사\s*송핫|"
+    r"럭키도배건축기술학원|서울특별시|예봄교회)",
     re.IGNORECASE,
 )
 _BUILTIN_RESTAURANT_RE = re.compile(
-    r"(대게|횟집|해물|초밥|스시|식당|맛집|이마트24|GS25|지에스\(GS\)25|롯데리아|카페인클럽|"
-    r"쿠팡이츠|지코바|떡볶이|엘리시안|KFC|꼬막|고칸|감자탕|김가네|바나타이거|소하계|아이스크림|은행골|호코)",
+    r"(대게|횟집|해물|초밥|스시|식당|맛집|이마트24|GS25|지에스\(GS\)25|지에스25|롯데리아|카페인클럽|"
+    r"쿠팡이츠|지코바|떡볶이|엘리시안|KFC|꼬막|고칸|감자탕|김가네|바나타이거|소하계|아이스크림|은행골|호코|"
+    r"골목집|밀촌손칼국수|칼국수|보쌈|부대찌개|김치찌개|왕갈비탕|곰탕|순대|깍두기|냉면|쌀국수|만두|쭈꾸미|"
+    r"수육|낙지|닭갈비|대패|고등어|아웃백|파리바게트|파리바게뜨|르봉뺑|롯데지알에스|비케이알|"
+    r"봉구비어|토모리|모리본|백일도|도톰|면곡당|청담이상|히자시|희돈애락|쿠시카츠|레트리|주휴소|"
+    r"모던중식|에프지케이|백소정|빠빼루|전주옥|피맥하우스|프렌즈\s*앤\s*야드|페페|토곡팡|삼다진족|"
+    r"아모르데이|봉샌드|온정|청과\s*오보소|동화쌀|슬기로운\s*농산생활|착한정육점)",
     re.IGNORECASE,
 )
 _BUILTIN_TOLL_RE = re.compile(
@@ -96,13 +116,113 @@ _BUILTIN_BOOKSTORE_RE = re.compile(
 )
 _BUILTIN_OFFLINE_MART_RE = re.compile(
     r"(다이소|아성다이소|이마트|홈플러스|롯데마트|롯데쇼핑|신세계|아울렛|삼성닷컴|엠스토아|제로백|"
-    r"코스트코|트레이더스|하나로마트|케이마트|휴마트|할인마트|홈마트)",
+    r"코스트코|트레이더스|하나로마트|케이마트|휴마트|할인마트|홈마트|이케아코리아|한화커넥트|현대백화점|"
+    r"더현대서울|삼성전자판매|유진홈센터|ACE\s*Hardware|던에드워드페인트|성심철물건재|크린대장|"
+    r"비에스케이코퍼레이션|씨제이올리브영|빅바이트컴퍼니|딥스테이션|코레일유통|휴앤디|애플아울렛|스마트홈)",
     re.IGNORECASE,
 )
 
 
+def _classify_by_hometax_industry(
+    biz_category: Optional[str], biz_item: Optional[str]
+) -> Optional[Dict[str, Any]]:
+    """Fallback classification using Hometax 업태 (biz_category) and 업종 (biz_item)."""
+    cat = (biz_category or "").strip()
+    item = (biz_item or "").strip()
+    combined = f"{cat} {item}".strip()
+    if not combined:
+        return None
+
+    if re.search(r"(유흥주점|단란주점)", combined):
+        return {
+            "account_code": "813",
+            "account_name": "기업업무추진비",
+            "vat_deduction_type": "NON_DEDUCTIBLE",
+            "non_deduct_reason": "ENTERTAINMENT",
+            "is_vehicle_expense": False,
+            "require_memo_prompt": True,
+        }
+    if re.search(r"(철도운송|여객운송|일반택시|고급택시|항공운송)", combined):
+        return {
+            "account_code": "812",
+            "account_name": "여비교통비",
+            "vat_deduction_type": "NON_DEDUCTIBLE",
+            "non_deduct_reason": "PASSENGER_TRANSPORT",
+            "is_vehicle_expense": False,
+            "require_memo_prompt": False,
+        }
+    if re.search(r"(보증보험|손해보험|생명보험|보험업)", combined):
+        return {
+            "account_code": "821",
+            "account_name": "보험료",
+            "vat_deduction_type": "EXEMPT",
+            "non_deduct_reason": "SIMPLIFIED_TAX",
+            "is_vehicle_expense": False,
+            "require_memo_prompt": False,
+        }
+    if re.search(r"(주유소|석유류|기체연료|전문정비업|자동차정비)", combined):
+        return {
+            "account_code": "822",
+            "account_name": "차량유지비",
+            "vat_deduction_type": "NON_DEDUCTIBLE",
+            "non_deduct_reason": "PASSENGER_CAR",
+            "is_vehicle_expense": True,
+            "require_memo_prompt": False,
+        }
+    if re.search(r"(전자지급결제대행|전자금융업|부가통신|인터넷및컴퓨터운영)", combined):
+        return {
+            "account_code": "830",
+            "account_name": "소모품비",
+            "vat_deduction_type": "DEDUCTIBLE",
+            "non_deduct_reason": None,
+            "is_vehicle_expense": False,
+            "require_memo_prompt": True,
+        }
+    if re.search(
+        r"(음식|한식|일식|중식|양식|경양식|분식|치킨|카페|커피|제과|주점|편의점|식품접객|휴게음식|고속도로휴게소|식육|청과|양곡|음ㆍ식료품)",
+        combined,
+    ):
+        return {
+            "account_code": "811",
+            "account_name": "복리후생비",
+            "vat_deduction_type": "DEDUCTIBLE",
+            "non_deduct_reason": None,
+            "is_vehicle_expense": False,
+            "require_memo_prompt": False,
+        }
+    if re.search(
+        r"(백화점|슈퍼마켓|대형할인점|마트|철물|기계공구|페인트|전자제품|화장품|스포츠용품|무역|상품종합중개|종합\s*소매|식잡|트랩)",
+        combined,
+    ):
+        return {
+            "account_code": "830",
+            "account_name": "소모품비",
+            "vat_deduction_type": "DEDUCTIBLE",
+            "non_deduct_reason": None,
+            "is_vehicle_expense": False,
+            "require_memo_prompt": False,
+        }
+    if re.search(
+        r"(신용카드|할부금융|방문소포|화물|건설|건축공사|임대|교육서비스|기술서비스|소프트웨어|데이터베이스)",
+        combined,
+    ):
+        return {
+            "account_code": "831",
+            "account_name": "지급수수료",
+            "vat_deduction_type": "DEDUCTIBLE",
+            "non_deduct_reason": None,
+            "is_vehicle_expense": False,
+            "require_memo_prompt": False,
+        }
+    return None
+
+
 def evaluate_tax_rules(
-    cursor: sqlite3.Cursor, merchant_name: str, biz_reg_no: Optional[str] = None
+    cursor: sqlite3.Cursor,
+    merchant_name: str,
+    biz_reg_no: Optional[str] = None,
+    biz_category: Optional[str] = None,
+    biz_item: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Evaluate merchant_name against active tax_classification_rules and cached merchant data."""
     m_txt = merchant_name or ""
@@ -116,6 +236,46 @@ def evaluate_tax_rules(
             "require_memo_prompt": False,
         }
         return _apply_cached_merchant_overrides(cursor, base_ins, merchant_name, biz_reg_no)
+    if _BUILTIN_ENTERTAINMENT_RE.search(m_txt):
+        base_ent = {
+            "account_code": "813",
+            "account_name": "기업업무추진비",
+            "vat_deduction_type": "NON_DEDUCTIBLE",
+            "non_deduct_reason": "ENTERTAINMENT",
+            "is_vehicle_expense": False,
+            "require_memo_prompt": True,
+        }
+        return _apply_cached_merchant_overrides(cursor, base_ent, merchant_name, biz_reg_no)
+    if _BUILTIN_TRAVEL_RE.search(m_txt):
+        base_trv = {
+            "account_code": "812",
+            "account_name": "여비교통비",
+            "vat_deduction_type": "NON_DEDUCTIBLE",
+            "non_deduct_reason": "PASSENGER_TRANSPORT",
+            "is_vehicle_expense": False,
+            "require_memo_prompt": False,
+        }
+        return _apply_cached_merchant_overrides(cursor, base_trv, merchant_name, biz_reg_no)
+    if _BUILTIN_PG_RE.search(m_txt):
+        base_pg = {
+            "account_code": "830",
+            "account_name": "소모품비",
+            "vat_deduction_type": "DEDUCTIBLE",
+            "non_deduct_reason": None,
+            "is_vehicle_expense": False,
+            "require_memo_prompt": True,
+        }
+        return _apply_cached_merchant_overrides(cursor, base_pg, merchant_name, biz_reg_no)
+    if _BUILTIN_VEHICLE_EXTRA_RE.search(m_txt):
+        base_veh = {
+            "account_code": "822",
+            "account_name": "차량유지비",
+            "vat_deduction_type": "NON_DEDUCTIBLE",
+            "non_deduct_reason": "PASSENGER_CAR",
+            "is_vehicle_expense": True,
+            "require_memo_prompt": False,
+        }
+        return _apply_cached_merchant_overrides(cursor, base_veh, merchant_name, biz_reg_no)
     if _BUILTIN_BOOKSTORE_RE.search(m_txt):
         base_book = {
             "account_code": "826",
@@ -257,6 +417,8 @@ def evaluate_tax_rules(
             "is_vehicle_expense": False,
             "require_memo_prompt": False,
         }
+    elif matched_result is None:
+        matched_result = _classify_by_hometax_industry(biz_category, biz_item)
 
     if matched_result is None:
         matched_result = {

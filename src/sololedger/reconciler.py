@@ -2,7 +2,7 @@
 
 import sqlite3
 from datetime import datetime, timedelta
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from sololedger.models import ReconcileItem
 from sololedger.tax_engine import (
@@ -10,6 +10,17 @@ from sololedger.tax_engine import (
     evaluate_tax_rules,
     generate_default_memo,
 )
+
+
+def _resolve_supply_and_vat(item: ReconcileItem, vat_deduction_type: str) -> tuple[int, int]:
+    """Use explicit Hometax supply_value/vat_amount when provided and valid, else calculate."""
+    if (
+        item.supply_value is not None
+        and item.vat_amount is not None
+        and (item.supply_value + item.vat_amount == item.total_amount)
+    ):
+        return item.supply_value, item.vat_amount
+    return calculate_supply_and_vat(item.total_amount, vat_deduction_type)
 
 
 def upsert_merchant(cursor: sqlite3.Cursor, item: ReconcileItem) -> None:
@@ -35,13 +46,18 @@ def upsert_merchant(cursor: sqlite3.Cursor, item: ReconcileItem) -> None:
     )
 
 
-def reconcile_single_item(cursor: sqlite3.Cursor, item: ReconcileItem) -> Dict[str, Any]:
+def reconcile_single_item(
+    cursor: sqlite3.Cursor,
+    item: ReconcileItem,
+    exclude_tx_ids: Optional[set[int]] = None,
+) -> Dict[str, Any]:
     """Reconcile an incoming Hometax / OCR item using the 3-stage matching algorithm:
 
     1. Stage 1 (Exact Approval Number + Amount match, or Approval Number match for FX settlement)
     2. Stage 2 (Exact Amount + Timestamp within ±10 minutes on SMS_ONLY record)
     3. Stage 3 (Force Insert new ledger record if no existing match found)
     """
+    excluded = exclude_tx_ids or set()
     clean_biz_no = item.biz_reg_no.replace("-", "").strip() if item.biz_reg_no else None
     if clean_biz_no:
         item.biz_reg_no = clean_biz_no
@@ -60,23 +76,23 @@ def reconcile_single_item(cursor: sqlite3.Cursor, item: ReconcileItem) -> Dict[s
             """
             SELECT tx_id FROM card_transactions
             WHERE approval_no = ? AND ABS(total_amount) = ABS(?)
-            ORDER BY tx_id ASC LIMIT 1
+            ORDER BY tx_id ASC
             """,
             (item.approval_no, item.total_amount),
         )
-        row = cursor.fetchone()
-        if row is None:
+        rows = [r[0] for r in cursor.fetchall() if r[0] not in excluded]
+        if not rows:
             cursor.execute(
                 """
                 SELECT tx_id FROM card_transactions
                 WHERE approval_no = ?
-                ORDER BY tx_id ASC LIMIT 1
+                ORDER BY tx_id ASC
                 """,
                 (item.approval_no,),
             )
-            row = cursor.fetchone()
-        if row:
-            matched_tx_id = row[0]
+            rows = [r[0] for r in cursor.fetchall() if r[0] not in excluded]
+        if rows:
+            matched_tx_id = rows[0]
             match_stage = "STAGE_1_APPROVAL_NO"
 
     # Stage 2: Total amount + transacted_at within ±10 minutes (SMS_ONLY, EMAIL_ORDER, or CANCELED)
@@ -98,7 +114,6 @@ def reconcile_single_item(cursor: sqlite3.Cursor, item: ReconcileItem) -> Dict[s
                   AND reconcile_status IN ({placeholders})
                   AND transacted_at BETWEEN ? AND ?
                 ORDER BY ABS(strftime('%s', transacted_at) - strftime('%s', ?)) ASC
-                LIMIT 1
                 """,
                 (
                     item.total_amount,
@@ -108,14 +123,14 @@ def reconcile_single_item(cursor: sqlite3.Cursor, item: ReconcileItem) -> Dict[s
                     dt.strftime("%Y-%m-%d %H:%M:%S"),
                 ),
             )
-            row = cursor.fetchone()
-            if row:
-                matched_tx_id = row[0]
+            rows = [r[0] for r in cursor.fetchall() if r[0] not in excluded]
+            if rows:
+                matched_tx_id = rows[0]
                 match_stage = "STAGE_2_AMOUNT_TIME_WINDOW"
         except ValueError:
             pass
 
-    # Stage 2b: Same-day fallback for billing statements without approval_no (e.g. Hyundai Card .xls)
+    # Stage 2b: Same-day fallback for billing statements without approval_no (e.g. Hyundai Card / Hometax .xls)
     if (
         matched_tx_id is None
         and not item.approval_no
@@ -128,10 +143,9 @@ def reconcile_single_item(cursor: sqlite3.Cursor, item: ReconcileItem) -> Dict[s
             SELECT tx_id FROM card_transactions
             WHERE SUBSTR(transacted_at, 1, 10) = ?
               AND (card_last4 = ? OR reconcile_status = 'EMAIL_ORDER')
-              AND ABS(total_amount) = ABS(?)
+              AND total_amount = ?
               AND (reconcile_status IN ('SMS_ONLY', 'EMAIL_ORDER') OR raw_merchant_name = ?)
             ORDER BY CASE WHEN card_last4 = ? THEN 0 ELSE 1 END ASC, tx_id ASC
-            LIMIT 1
             """,
             (
                 date_prefix,
@@ -141,9 +155,9 @@ def reconcile_single_item(cursor: sqlite3.Cursor, item: ReconcileItem) -> Dict[s
                 item.card_last4,
             ),
         )
-        row = cursor.fetchone()
-        if row:
-            matched_tx_id = row[0]
+        rows = [r[0] for r in cursor.fetchall() if r[0] not in excluded]
+        if rows:
+            matched_tx_id = rows[0]
             match_stage = "STAGE_2_AMOUNT_TIME_WINDOW"
 
     target_status = "CANCELED" if item.is_cancel else item.reconcile_source
@@ -184,7 +198,13 @@ def reconcile_single_item(cursor: sqlite3.Cursor, item: ReconcileItem) -> Dict[s
             if "보험" in item.merchant_name or old_code == "999":
                 new_merchant = item.merchant_name
 
-        re_eval = evaluate_tax_rules(cursor, new_merchant, clean_biz_no)
+        re_eval = evaluate_tax_rules(
+            cursor,
+            new_merchant,
+            clean_biz_no,
+            biz_category=item.biz_category,
+            biz_item=item.biz_item,
+        )
         if is_statement_sync and (
             old_code == "999"
             or (new_merchant != old_merchant and re_eval["account_code"] != "999")
@@ -200,7 +220,7 @@ def reconcile_single_item(cursor: sqlite3.Cursor, item: ReconcileItem) -> Dict[s
             )
 
         if item.tax_type_code == "EXEMPT":
-            supply_val, vat_val = calculate_supply_and_vat(item.total_amount, "EXEMPT")
+            supply_val, vat_val = _resolve_supply_and_vat(item, "EXEMPT")
             cursor.execute(
                 """
                 UPDATE card_transactions
@@ -236,7 +256,7 @@ def reconcile_single_item(cursor: sqlite3.Cursor, item: ReconcileItem) -> Dict[s
                 ),
             )
         elif nts_non_deductible:
-            supply_val, vat_val = calculate_supply_and_vat(item.total_amount, "NON_DEDUCTIBLE")
+            supply_val, vat_val = _resolve_supply_and_vat(item, "NON_DEDUCTIBLE")
             cursor.execute(
                 """
                 UPDATE card_transactions
@@ -272,7 +292,7 @@ def reconcile_single_item(cursor: sqlite3.Cursor, item: ReconcileItem) -> Dict[s
                 ),
             )
         else:
-            supply_val, vat_val = calculate_supply_and_vat(item.total_amount, old_vat)
+            supply_val, vat_val = _resolve_supply_and_vat(item, old_vat)
             cursor.execute(
                 """
                 UPDATE card_transactions
@@ -317,11 +337,18 @@ def reconcile_single_item(cursor: sqlite3.Cursor, item: ReconcileItem) -> Dict[s
         }
 
     # Stage 3: Force insert new transaction record
-    rule_result = evaluate_tax_rules(cursor, item.merchant_name, clean_biz_no)
+    rule_result = evaluate_tax_rules(
+        cursor,
+        item.merchant_name,
+        clean_biz_no,
+        biz_category=item.biz_category,
+        biz_item=item.biz_item,
+    )
     vat_ded_type = rule_result["vat_deduction_type"]
     non_ded_reason = rule_result["non_deduct_reason"]
     if item.tax_type_code == "EXEMPT":
         vat_ded_type = "EXEMPT"
+        non_ded_reason = non_ded_reason or "SIMPLIFIED_TAX"
     elif nts_non_deductible:
         vat_ded_type = "NON_DEDUCTIBLE"
         non_ded_reason = non_ded_reason or "SIMPLIFIED_TAX"
@@ -335,7 +362,7 @@ def reconcile_single_item(cursor: sqlite3.Cursor, item: ReconcileItem) -> Dict[s
         if item.reconcile_source != "OCR_MATCHED"
         else None
     )
-    supply_val, vat_val = calculate_supply_and_vat(item.total_amount, vat_ded_type)
+    supply_val, vat_val = _resolve_supply_and_vat(item, vat_ded_type)
     cursor.execute(
         """
         INSERT INTO card_transactions (

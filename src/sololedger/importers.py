@@ -371,20 +371,46 @@ def _extract_card_last4(raw_card: str) -> str:
     return "0000"
 
 
-def _map_tax_type_and_status(raw_tax_type: str) -> tuple[str, str]:
+def _detect_issuer_code(raw_issuer: str) -> str:
+    txt = str(raw_issuer or "").strip()
+    if "우리" in txt:
+        return "WOORI"
+    if "신한" in txt:
+        return "SHINHAN"
+    if "국민" in txt or "KB" in txt.upper():
+        return "KB"
+    if "하나" in txt:
+        return "HANA"
+    if "현대" in txt:
+        return "HYUNDAI"
+    if "삼성" in txt:
+        return "SAMSUNG"
+    if "롯데" in txt:
+        return "LOTTE"
+    if "기업" in txt or "IBK" in txt.upper():
+        return "IBK"
+    if "농협" in txt or "NH" in txt.upper():
+        return "NH"
+    if "비씨" in txt or "BC" in txt.upper():
+        return "BC"
+    return "CORP"
+
+
+def _map_tax_type_and_status(raw_tax_type: str, remark: str = "") -> tuple[str, str]:
     txt = str(raw_tax_type or "").strip()
+    rmk = str(remark or "").strip()
     upper = txt.upper()
     if upper in ("GENERAL", "SIMPLIFIED", "EXEMPT", "UNREGISTERED"):
         return upper, "ACTIVE"
-    if "폐업" in txt:
+    if "폐업" in txt or "폐업" in rmk:
         return "SIMPLIFIED", "CLOSED"
-    if "휴업" in txt:
+    if "휴업" in txt or "휴업" in rmk:
         return "SIMPLIFIED", "SUSPENDED"
-    if "간이" in txt or "특례" in txt:
+    if "간이" in txt or "특례" in txt or "간이" in rmk:
         return "SIMPLIFIED", "ACTIVE"
-    if "면세" in txt or "비영리" in txt:
+    if "면세" in txt or "비영리" in txt or "면세" in rmk:
         return "EXEMPT", "ACTIVE"
-    if "미등록" in txt:
+    if "미등록" in txt or "미등록" in rmk:
         return "UNREGISTERED", "CLOSED"
     return "GENERAL", "ACTIVE"
 
@@ -456,6 +482,8 @@ def parse_hometax_csv(csv_text: str) -> List[ReconcileItem]:
         card_last4 = _extract_card_last4(
             _pick_col(row, ["카드번호", "카드뒷자리", "이용카드", "card_last4"], "0000")
         )
+        raw_issuer = _pick_col(row, ["카드사", "발급사", "card_issuer"])
+        card_issuer = _detect_issuer_code(raw_issuer) if raw_issuer else None
         approval_no = _pick_col(row, ["승인번호", "approval_no"]) or None
         merchant_name = _pick_col(
             row,
@@ -465,6 +493,11 @@ def parse_hometax_csv(csv_text: str) -> List[ReconcileItem]:
         biz_reg_no = (
             re.sub(r"\D", "", _pick_col(row, ["사업자등록번호", "사업자번호", "biz_reg_no"])) or None
         )
+
+        supply_raw = _pick_col(row, ["공급가액", "supply_value"])
+        vat_raw = _pick_col(row, ["부가세", "세액", "vat_amount"])
+        parsed_supply = _parse_int_amount(supply_raw) if supply_raw else None
+        parsed_vat = _parse_int_amount(vat_raw) if vat_raw else None
 
         total_str = _pick_col(
             row,
@@ -482,40 +515,59 @@ def parse_hometax_csv(csv_text: str) -> List[ReconcileItem]:
         if total_str:
             total_amount = _parse_int_amount(total_str)
         else:
-            supply = _parse_int_amount(_pick_col(row, ["공급가액", "supply_value"]))
-            vat = _parse_int_amount(_pick_col(row, ["부가세", "세액", "vat_amount"]))
-            total_amount = supply + vat
+            total_amount = (parsed_supply or 0) + (parsed_vat or 0)
+
+        biz_category = _pick_col(row, ["업태", "biz_category"]) or None
+        biz_item = _pick_col(row, ["업종", "종목", "biz_item"]) or None
+        hometax_decision = _pick_col(row, ["공제여부결정", "공제여부"]) or None
+        hometax_remark = _pick_col(row, ["비고", "불공제사유"]) or None
 
         cancel_amt = abs(_parse_int_amount(_pick_col(row, ["취소금액", "cancel_amount"])))
         cancel_hint = _pick_col(row, ["취소여부", "거래구분", "상태", "결제예정일", "is_cancel"])
         if 0 < cancel_amt < abs(total_amount):
             total_amount = abs(total_amount) - cancel_amt
             is_cancel = False
+            parsed_supply = None
+            parsed_vat = None
         else:
-            is_cancel = (
+            has_explicit_cancel = (
                 ("취소" in cancel_hint)
                 or (cancel_hint.lower() in ("true", "y", "cancel", "canceled"))
-                or (total_amount < 0)
                 or (cancel_amt > 0 and cancel_amt >= abs(total_amount))
             )
+            if hometax_decision and not has_explicit_cancel:
+                is_cancel = False
+            else:
+                is_cancel = has_explicit_cancel or (total_amount < 0)
             if is_cancel and total_amount > 0:
                 total_amount = -total_amount
+                if parsed_supply is not None and parsed_supply > 0:
+                    parsed_supply = -parsed_supply
+                if parsed_vat is not None and parsed_vat > 0:
+                    parsed_vat = -parsed_vat
 
         tax_type_raw = _pick_col(
             row, ["과세유형", "가맹점유형", "사업자유형", "tax_type_code"], "일반과세자"
         )
-        tax_type_code, biz_status = _map_tax_type_and_status(tax_type_raw)
+        tax_type_code, biz_status = _map_tax_type_and_status(tax_type_raw, hometax_remark or "")
 
         items.append(
             ReconcileItem(
                 card_last4=card_last4,
+                card_issuer=card_issuer,
                 approval_no=approval_no,
                 transacted_at=transacted_at,
                 merchant_name=merchant_name,
                 biz_reg_no=biz_reg_no,
                 total_amount=total_amount,
+                supply_value=parsed_supply,
+                vat_amount=parsed_vat,
                 tax_type_code=tax_type_code,
                 biz_status=biz_status,
+                biz_category=biz_category,
+                biz_item=biz_item,
+                hometax_deduct_decision=hometax_decision,
+                hometax_remark=hometax_remark,
                 reconcile_source="CANCELED" if is_cancel else "HOMETAX_VERIFIED",
                 is_cancel=is_cancel,
             )
@@ -541,10 +593,16 @@ def import_and_reconcile_hometax_csv(
             and policy.get("auto_register_on_statement_upload", True)
             and it.card_last4 != "0000"
         ):
-            register_corp_card(it.card_last4, issuer="CORP")
+            register_corp_card(it.card_last4, issuer=it.card_issuer or "CORP")
         items.append(it)
 
-    results = [reconcile_single_item(cursor, item) for item in items]
+    used_tx_ids: set[int] = set()
+    results: List[Dict[str, Any]] = []
+    for item in items:
+        res = reconcile_single_item(cursor, item, exclude_tx_ids=used_tx_ids)
+        if res.get("tx_id") is not None:
+            used_tx_ids.add(int(res["tx_id"]))
+        results.append(res)
 
     stage_counts: Dict[str, int] = {}
     for r in results:
