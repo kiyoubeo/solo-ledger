@@ -274,10 +274,12 @@ def build_dashboard_summary(
     card_last4: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    account_code: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build aggregated dashboard metrics, per-card breakdown, pending action items, and vehicle limit."""
     now = datetime.now()
     target_card = (card_last4 or "ALL").strip()
+    target_account = (account_code or "ALL").strip()
 
     cursor.execute(
         """
@@ -444,18 +446,17 @@ def build_dashboard_summary(
     )
 
     if target_card and target_card != "ALL":
-        rows = [r for r in all_period_rows if str(r.get("card_last4") or "0000") == target_card]
+        card_rows = [
+            r for r in all_period_rows if str(r.get("card_last4") or "0000") == target_card
+        ]
     else:
-        rows = all_period_rows
+        card_rows = all_period_rows
 
-    total_expenditure = 0
-    deductible_vat = 0
-    non_deductible_vat = 0
-    non_deductible_total = 0
-    pending_items: List[Dict[str, Any]] = []
     acc_stats: Dict[str, Dict[str, Any]] = {}
+    account_transactions: Dict[str, List[Dict[str, Any]]] = {}
+    card_total_expenditure = 0
 
-    for r in rows:
+    for r in card_rows:
         amt = int(r["total_amount"])
         sup = int(r["supply_value"])
         vat = int(r["vat_amount"])
@@ -478,29 +479,49 @@ def build_dashboard_summary(
         a_entry["tx_count"] += 1
         a_entry["total_expenditure"] += amt
         a_entry["supply_value"] += sup
-
-        total_expenditure += amt
+        card_total_expenditure += amt
         if r["vat_deduction_type"] == "DEDUCTIBLE":
-            deductible_vat += vat
             a_entry["deductible_vat"] += vat
         elif r["vat_deduction_type"] == "NON_DEDUCTIBLE":
-            non_deductible_vat += vat
-            non_deductible_total += amt
             a_entry["non_deductible_total"] += amt
-
-        memo = (r.get("counterparty_info") or "").strip()
-        if r["account_code"] == "999" or not memo:
-            pending_items.append(r)
+        account_transactions.setdefault(a_code, []).append(r)
 
     for a_entry in acc_stats.values():
-        if total_expenditure > 0:
-            a_entry["ratio_pct"] = round(a_entry["total_expenditure"] * 100.0 / total_expenditure, 1)
+        if card_total_expenditure > 0:
+            a_entry["ratio_pct"] = round(
+                a_entry["total_expenditure"] * 100.0 / card_total_expenditure, 1
+            )
 
     account_breakdown = sorted(
         acc_stats.values(),
         key=lambda x: (x["total_expenditure"], x["tx_count"]),
         reverse=True,
     )
+
+    if target_account and target_account != "ALL":
+        rows = [r for r in card_rows if str(r.get("account_code") or "999") == target_account]
+    else:
+        rows = card_rows
+
+    total_expenditure = 0
+    deductible_vat = 0
+    non_deductible_vat = 0
+    non_deductible_total = 0
+    pending_items: List[Dict[str, Any]] = []
+
+    for r in rows:
+        amt = int(r["total_amount"])
+        vat = int(r["vat_amount"])
+        total_expenditure += amt
+        if r["vat_deduction_type"] == "DEDUCTIBLE":
+            deductible_vat += vat
+        elif r["vat_deduction_type"] == "NON_DEDUCTIBLE":
+            non_deductible_vat += vat
+            non_deductible_total += amt
+
+        memo = (r.get("counterparty_info") or "").strip()
+        if r["account_code"] == "999" or not memo:
+            pending_items.append(r)
 
     vehicle_summary = get_vehicle_expense_summary(cursor, year=target_year)
 
@@ -514,10 +535,12 @@ def build_dashboard_summary(
         "min_tx_date": min_tx_date,
         "max_tx_date": max_tx_date,
         "card_last4": target_card,
+        "account_code": target_account,
         "available_months": available_months,
         "monthly_periods": monthly_periods,
         "card_breakdown": card_breakdown,
         "account_breakdown": account_breakdown,
+        "account_transactions": account_transactions,
         "year": target_year,
         "total_tx_count": len(rows),
         "total_expenditure": total_expenditure,
@@ -754,6 +777,7 @@ def render_dashboard_html(
     card_last4: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    account_code: Optional[str] = None,
 ) -> str:
     """Render server-side HTML5 management dashboard for SoloLedger."""
     summary = build_dashboard_summary(
@@ -763,6 +787,7 @@ def render_dashboard_html(
         card_last4=card_last4,
         start_date=start_date,
         end_date=end_date,
+        account_code=account_code,
     )
     veh = summary["vehicle_limit"]
     gauge_pct = min(100.0, float(veh["usage_ratio_pct"]))
@@ -770,6 +795,7 @@ def render_dashboard_html(
     e_date = html.escape(str(summary["end_date"]))
     min_d = html.escape(str(summary["min_tx_date"]))
     max_d = html.escape(str(summary["max_tx_date"]))
+    active_acc_code = str(summary.get("account_code") or "ALL")
 
     card_options_html = []
     c_all_sel = "selected" if summary["card_last4"] == "ALL" else ""
@@ -780,6 +806,18 @@ def render_dashboard_html(
         sel = "selected" if summary["card_last4"] == cb["card_last4"] else ""
         card_options_html.append(f"<option value='{c_val}' {sel}>{c_lbl}</option>")
     card_select_html = "".join(card_options_html)
+
+    account_options_html = []
+    a_all_sel = "selected" if active_acc_code == "ALL" else ""
+    account_options_html.append(f"<option value='ALL' {a_all_sel}>전체 계정 (ALL)</option>")
+    for ab in summary.get("account_breakdown", []):
+        a_val = html.escape(str(ab["account_code"]))
+        a_opt_lbl = html.escape(
+            f"{ab['account_code']} {ab['account_name']} ({ab['tx_count']}건)"
+        )
+        sel = "selected" if active_acc_code == str(ab["account_code"]) else ""
+        account_options_html.append(f"<option value='{a_val}' {sel}>{a_opt_lbl}</option>")
+    account_select_html = "".join(account_options_html)
 
     month_options_html = ["<option value=''>-- 달별 선택 --</option>"]
     month_chips_list = []
@@ -832,17 +870,135 @@ def render_dashboard_html(
     )
 
     acc_breakdown_rows = []
+    acc_tx_map = summary.get("account_transactions", {})
     for ab in summary.get("account_breakdown", []):
+        a_code_raw = str(ab["account_code"])
+        a_code_esc = html.escape(a_code_raw)
         a_lbl = html.escape(f"{ab['account_code']} {ab['account_name']}")
+        is_acc_open = active_acc_code == a_code_raw
+        row_cls = "acc-summary-row active" if is_acc_open else "acc-summary-row"
+        arrow_txt = "▼" if is_acc_open else "▶"
+        badge_txt = "목록 닫기" if is_acc_open else "분류 목록 보기"
+        detail_disp = "table-row" if is_acc_open else "none"
+
+        acc_tx_items = acc_tx_map.get(a_code_raw, [])
+        acc_detail_rows_html = []
+        for atx in acc_tx_items:
+            atx_id = atx["tx_id"]
+            ac_lbl = html.escape(
+                str(atx.get("card_label") or format_card_label(atx["card_last4"]))
+            )
+            a_merch = html.escape(str(atx["raw_merchant_name"]))
+            a_amt = f"{int(atx['total_amount']):,}원"
+            a_sup = f"{int(atx['supply_value']):,}원"
+            a_vat = f"{int(atx['vat_amount']):,}원"
+            a_ded = html.escape(str(atx["vat_deduction_type"]))
+            a_memo = html.escape(str(atx.get("counterparty_info") or ""))
+            a_raw_arch = str(atx.get("archived_file_name") or "")
+            a_has_stmt = a_raw_arch.startswith("거래명세서_")
+            a_arch_str = html.escape(a_raw_arch or "-")
+            a_dt = html.escape(str(atx["transacted_at"]))
+            a_stmt_badge = (
+                "<span style='background:#dcfce7; color:#166534; padding:2px 6px; "
+                "border-radius:4px; font-weight:700; font-size:11px;'>📄명세서 완료</span>"
+                if a_has_stmt
+                else "[📄명세서]"
+            )
+            a_dt_link = (
+                f"<a href='javascript:void(0)' class='tx-date-link' "
+                f"onclick='openReceiptModal({atx_id})' "
+                f"title='클릭하여 영수증/매출전표 팝업 보기'>{a_dt} 🧾</a>"
+                f" <a href='javascript:void(0)' class='tx-date-link' "
+                f"style='color:#0f766e; font-size:12px; text-decoration:none;' "
+                f"onclick='openStatementModal({atx_id})' "
+                f"title='클릭하여 거래명세서 보기/발급'>{a_stmt_badge}</a>"
+            )
+            a_opts = []
+            cur_ac = str(atx["account_code"])
+            for ck, cv in ACCOUNT_CODE_CATALOG.items():
+                sel_attr = "selected" if ck == cur_ac else ""
+                a_opts.append(f"<option value='{ck}' {sel_attr}>{ck} {html.escape(cv)}</option>")
+            a_select = (
+                f"<select id='acc-list-code-{atx_id}' style='font-size:12px; padding:3px 6px;'>"
+                f"{''.join(a_opts)}</select>"
+            )
+            acc_detail_rows_html.append(
+                f"<tr>"
+                f"<td>#{atx_id}</td>"
+                f"<td>{a_dt_link}</td>"
+                f"<td><span class='badge card'>{ac_lbl}</span></td>"
+                f"<td><strong>{a_merch}</strong></td>"
+                f"<td class='num'><strong>{a_amt}</strong></td>"
+                f"<td class='num'>{a_sup}</td>"
+                f"<td class='num'>{a_vat}</td>"
+                f"<td>{a_ded}</td>"
+                f"<td><input type='text' id='acc-list-memo-{atx_id}' value='{a_memo}' "
+                f"placeholder='품목 또는 참석자 소명' style='width:100%; min-width:140px; "
+                f"box-sizing:border-box; font-size:12px;' /></td>"
+                f"<td style='white-space:nowrap;'>{a_select}"
+                f"<button style='padding:4px 8px; font-size:12px;' "
+                f"onclick='saveAccountListTx({atx_id})'>저장</button></td>"
+                f"<td style='font-size:11px; color:#475569;'>{a_arch_str}</td>"
+                f"</tr>"
+            )
+        acc_detail_tbody_str = (
+            "\n".join(acc_detail_rows_html)
+            if acc_detail_rows_html
+            else "<tr><td colspan='11' class='empty'>분류된 전표 내역이 없습니다.</td></tr>"
+        )
+
         acc_breakdown_rows.append(
-            f"<tr>"
-            f"<td><strong>{a_lbl}</strong></td>"
-            f"<td class='num'>{ab['tx_count']}건</td>"
+            f"<tr id='acc-row-{a_code_esc}' class='{row_cls}' "
+            f"onclick=\"toggleAccountDetail('{a_code_esc}')\" "
+            f"title='{a_lbl} 분류 전표 목록({ab['tx_count']}건) 보기/닫기'>"
+            f"<td>"
+            f"<a href='javascript:void(0)' class='acc-subject-link' "
+            f"onclick=\"event.stopPropagation(); toggleAccountDetail('{a_code_esc}')\">"
+            f"<span id='acc-arrow-{a_code_esc}' class='acc-arrow'>{arrow_txt}</span>"
+            f"<strong>{a_lbl}</strong>"
+            f"<span id='acc-badge-{a_code_esc}' class='acc-view-badge no-print'>"
+            f"{badge_txt}</span>"
+            f"</a>"
+            f"</td>"
+            f"<td class='num'><strong>{ab['tx_count']}건</strong></td>"
             f"<td class='num'><strong>{ab['total_expenditure']:,}원</strong></td>"
             f"<td class='num'>{ab['supply_value']:,}원</td>"
             f"<td class='num'>{ab['deductible_vat']:,}원</td>"
             f"<td class='num'>{ab['non_deductible_total']:,}원</td>"
             f"<td class='num'>{ab['ratio_pct']}%</td>"
+            f"</tr>"
+            f"<tr id='acc-detail-{a_code_esc}' class='acc-detail-row' "
+            f"style='display:{detail_disp};'>"
+            f"<td colspan='7' style='padding:0; background:#f8fafc; "
+            f"border-bottom:2px solid #cbd5e1;'>"
+            f"<div class='acc-detail-panel'>"
+            f"<div class='acc-detail-header'>"
+            f"<div>📂 <strong>[{a_lbl}] 분류 전표 목록</strong> "
+            f"<span style='color:#475569; font-size:12px; margin-left:6px;'>"
+            f"총 <strong>{ab['tx_count']}건</strong> · "
+            f"지출합계 <strong>{ab['total_expenditure']:,}원</strong> · "
+            f"공급가액 {ab['supply_value']:,}원 · "
+            f"공제부가세 {ab['deductible_vat']:,}원</span></div>"
+            f"<div class='no-print' style='display:flex; gap:6px; align-items:center;'>"
+            f"<button class='secondary' style='padding:4px 10px; font-size:12px;' "
+            f"onclick=\"filterByAccount('{a_code_esc}')\">🔎 이 계정만 단독 조회</button>"
+            f"<button class='secondary' style='padding:4px 10px; font-size:12px;' "
+            f"onclick=\"toggleAccountDetail('{a_code_esc}')\">✕ 목록 접기</button>"
+            f"</div>"
+            f"</div>"
+            f"<div class='acc-detail-table-wrap'>"
+            f"<table class='acc-detail-table'>"
+            f"<thead><tr>"
+            f"<th>전표번호</th><th>거래일시 (영수증/명세서)</th><th>카드구분</th>"
+            f"<th>가맹점명</th><th>합계금액</th><th>공급가액</th><th>부가세</th>"
+            f"<th>공제구분</th><th>적요 / 품목 소명</th><th>계정 재분류 · 저장</th>"
+            f"<th>증빙파일명</th>"
+            f"</tr></thead>"
+            f"<tbody>{acc_detail_tbody_str}</tbody>"
+            f"</table>"
+            f"</div>"
+            f"</div>"
+            f"</td>"
             f"</tr>"
         )
     acc_breakdown_tbody = (
@@ -900,6 +1056,7 @@ def render_dashboard_html(
         merchant = html.escape(str(tx["raw_merchant_name"]))
         amt_str = f"{int(tx['total_amount']):,}원"
         vat_str = f"{int(tx['vat_amount']):,}원"
+        tx_acc_code = html.escape(str(tx["account_code"]))
         acc_str = html.escape(f"{tx['account_code']} {tx['account_name']}")
         ded_str = html.escape(str(tx["vat_deduction_type"]))
         memo_str = html.escape(str(tx.get("counterparty_info") or "-"))
@@ -922,16 +1079,22 @@ def render_dashboard_html(
             f"style='color:#0f766e; font-size:12px; text-decoration:none;' "
             f"onclick='openStatementModal({tx_id})' title='클릭하여 거래명세서 보기/발급'>{stmt_badge}</a>"
         )
+        acc_cell_link = (
+            f"<a href='javascript:void(0)' class='tx-date-link' "
+            f"style='color:#0f172a; text-decoration:none; border-bottom:1px dashed #64748b;' "
+            f"onclick=\"focusAccountSummary('{tx_acc_code}')\" "
+            f"title='클릭하여 {acc_str} 분류 목록 보기'>{acc_str}</a>"
+        )
         has_stmt_flag = "1" if has_stmt else "0"
         tx_rows_html.append(
-            f"<tr data-has-stmt='{has_stmt_flag}'>"
+            f"<tr data-has-stmt='{has_stmt_flag}' data-account-code='{tx_acc_code}'>"
             f"<td>#{tx_id}</td>"
             f"<td>{dt_link}</td>"
             f"<td><span class='badge card'>{c_lbl}</span></td>"
             f"<td>{merchant}</td>"
             f"<td class='num'>{amt_str}</td>"
             f"<td class='num'>{vat_str}</td>"
-            f"<td>{acc_str}</td>"
+            f"<td>{acc_cell_link}</td>"
             f"<td>{ded_str}</td>"
             f"<td>{memo_str}</td>"
             f"<td>{arch_str}</td>"
@@ -1046,6 +1209,27 @@ def render_dashboard_html(
     a.tx-date-link {{ color: #1d4ed8; font-weight: 600; text-decoration: underline;
                       text-underline-offset: 3px; cursor: pointer; }}
     a.tx-date-link:hover {{ color: #1e3a8a; background: #eff6ff; border-radius: 4px; }}
+    tr.acc-summary-row {{ cursor: pointer; transition: background 0.15s ease; }}
+    tr.acc-summary-row:hover {{ background: #eff6ff; }}
+    tr.acc-summary-row.active {{ background: #dbeafe; }}
+    a.acc-subject-link {{ display: inline-flex; align-items: center; gap: 6px;
+                          color: #0f172a; text-decoration: none; font-weight: 700; }}
+    a.acc-subject-link:hover strong {{ color: #1d4ed8; text-decoration: underline; }}
+    .acc-arrow {{ display: inline-block; width: 14px; font-size: 11px; color: #2563eb; }}
+    .acc-view-badge {{ background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe;
+                       padding: 1px 7px; border-radius: 999px; font-size: 11px;
+                       font-weight: 600; margin-left: 4px; }}
+    tr.acc-summary-row.active .acc-view-badge {{ background: #1d4ed8; color: #ffffff;
+                                                 border-color: #1d4ed8; }}
+    .acc-detail-panel {{ padding: 12px 14px; background: #f8fafc;
+                         border-left: 4px solid #2563eb; }}
+    .acc-detail-header {{ display: flex; justify-content: space-between; align-items: center;
+                          flex-wrap: wrap; gap: 8px; margin-bottom: 8px; font-size: 13px; }}
+    .acc-detail-table-wrap {{ max-height: 440px; overflow-y: auto; background: #ffffff;
+                              border: 1px solid #cbd5e1; border-radius: 8px; }}
+    .acc-detail-table th {{ position: sticky; top: 0; background: #eff6ff;
+                            color: #1e3a8a; z-index: 1; font-size: 12px; }}
+    .acc-detail-table td {{ font-size: 12px; padding: 7px 8px; }}
     .modal-backdrop {{ display: none; position: fixed; inset: 0; background: rgba(15, 23, 42, 0.58);
                        z-index: 9999; align-items: center; justify-content: center; padding: 16px; }}
     .modal-backdrop.open {{ display: flex; }}
@@ -1155,6 +1339,13 @@ def render_dashboard_html(
             {card_select_html}
           </select>
         </div>
+        <div class="filter-divider"></div>
+        <div class="filter-group">
+          <span class="filter-label">📂 계정과목:</span>
+          <select id="account-filter" onchange="applyFilters()">
+            {account_select_html}
+          </select>
+        </div>
       </div>
 
       <div class="filter-row" style="border-top: 1px dashed #e2e8f0; padding-top: 8px;">
@@ -1196,12 +1387,26 @@ def render_dashboard_html(
     </div>
   </section>
 
-  <section class="section">
-    <h2>계정과목별 지출 및 부가세 요약표 ({len(summary.get('account_breakdown', []))}개 계정)</h2>
+  <section class="section" id="account-summary-section">
+    <div style="display:flex; justify-content:space-between; align-items:center;
+                flex-wrap:wrap; gap:8px; margin-bottom:10px;">
+      <h2 style="margin:0;">
+        계정과목별 지출 및 부가세 요약표 ({len(summary.get('account_breakdown', []))}개 계정)
+        <span style="font-size:12px; font-weight:500; color:#475569; margin-left:8px;">
+          💡 계정과목을 클릭하면 해당 계정의 분류된 전표 목록을 바로 볼 수 있습니다.
+        </span>
+      </h2>
+      <div class="no-print" style="display:flex; gap:6px; align-items:center;">
+        <button class="secondary" style="padding:4px 10px; font-size:12px;"
+                onclick="toggleAllAccountDetails(true)">▼ 전체 계정 목록 펼치기</button>
+        <button class="secondary" style="padding:4px 10px; font-size:12px;"
+                onclick="toggleAllAccountDetails(false)">▲ 전체 접기</button>
+      </div>
+    </div>
     <table>
       <thead>
         <tr>
-          <th>계정과목 (코드·명칭)</th><th>거래 건수</th><th>지출 합계</th>
+          <th>계정과목 (코드·명칭 · 클릭 시 분류 목록 표시)</th><th>거래 건수</th><th>지출 합계</th>
           <th>공급가액</th><th>공제 가능 부가세</th><th>불공제 합계</th><th>지출 비중</th>
         </tr>
       </thead>
@@ -1251,11 +1456,19 @@ def render_dashboard_html(
     </table>
   </section>
 
-  <section class="section">
+  <section class="section" id="main-ledger-section">
     <div style="display:flex; justify-content:space-between; align-items:center;
                 flex-wrap:wrap; gap:8px; margin-bottom:10px;">
-      <h2 style="margin:0;">조회 기간 법인카드 원장 ({s_date} ~ {e_date}, 총 {summary['total_tx_count']}건)</h2>
+      <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+        <h2 style="margin:0;">조회 기간 법인카드 원장 ({s_date} ~ {e_date}, 총 {summary['total_tx_count']}건)</h2>
+        <span id="ledger-account-filter-badge" class="badge card no-print"
+              style="display:none; background:#dbeafe; color:#1e3a8a; padding:4px 10px;"></span>
+      </div>
       <div class="no-print" style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+        <button id="btn-clear-acc-filter" class="secondary" style="display:none;"
+                onclick="clearLedgerAccountFilter()">
+          📋 전체 계정 전표 다시 보기
+        </button>
         <button id="btn-filter-stmt-only" class="secondary"
                 onclick="toggleStatementRowsFilter({stmt_tx_count})">
           📄 거래명세서 발급 전표만 보기 ({stmt_tx_count}건)
@@ -2043,18 +2256,118 @@ def render_dashboard_html(
       const s = document.getElementById('start-date').value;
       const e = document.getElementById('end-date').value;
       const card = document.getElementById('card-filter').value;
+      const accEl = document.getElementById('account-filter');
+      const acc = accEl ? accEl.value : 'ALL';
       const q = '?start_date=' + encodeURIComponent(s)
               + '&end_date=' + encodeURIComponent(e)
-              + '&card_last4=' + encodeURIComponent(card);
+              + '&card_last4=' + encodeURIComponent(card)
+              + '&account_code=' + encodeURIComponent(acc);
       window.location.href = '/dashboard' + q;
     }}
     function filterByCard(cardCode) {{
       const s = document.getElementById('start-date').value;
       const e = document.getElementById('end-date').value;
+      const accEl = document.getElementById('account-filter');
+      const acc = accEl ? accEl.value : 'ALL';
       const q = '?start_date=' + encodeURIComponent(s)
               + '&end_date=' + encodeURIComponent(e)
-              + '&card_last4=' + encodeURIComponent(cardCode);
+              + '&card_last4=' + encodeURIComponent(cardCode)
+              + '&account_code=' + encodeURIComponent(acc);
       window.location.href = '/dashboard' + q;
+    }}
+    function filterByAccount(accCode) {{
+      const s = document.getElementById('start-date').value;
+      const e = document.getElementById('end-date').value;
+      const card = document.getElementById('card-filter').value;
+      const q = '?start_date=' + encodeURIComponent(s)
+              + '&end_date=' + encodeURIComponent(e)
+              + '&card_last4=' + encodeURIComponent(card)
+              + '&account_code=' + encodeURIComponent(accCode || 'ALL');
+      window.location.href = '/dashboard' + q;
+    }}
+    let activeLedgerAccountFilter = '';
+    function toggleAccountDetail(accCode) {{
+      const detailRow = document.getElementById('acc-detail-' + accCode);
+      const summaryRow = document.getElementById('acc-row-' + accCode);
+      const arrowEl = document.getElementById('acc-arrow-' + accCode);
+      const badgeEl = document.getElementById('acc-badge-' + accCode);
+      if (!detailRow) return;
+      const isHidden = detailRow.style.display === 'none' || !detailRow.style.display;
+      if (isHidden) {{
+        detailRow.style.display = 'table-row';
+        if (summaryRow) summaryRow.classList.add('active');
+        if (arrowEl) arrowEl.textContent = '▼';
+        if (badgeEl) badgeEl.textContent = '목록 닫기';
+        activeLedgerAccountFilter = String(accCode);
+      }} else {{
+        detailRow.style.display = 'none';
+        if (summaryRow) summaryRow.classList.remove('active');
+        if (arrowEl) arrowEl.textContent = '▶';
+        if (badgeEl) badgeEl.textContent = '분류 목록 보기';
+        if (activeLedgerAccountFilter === String(accCode)) {{
+          activeLedgerAccountFilter = '';
+        }}
+      }}
+      applyMainLedgerRowVisibility();
+    }}
+    function toggleAllAccountDetails(openAll) {{
+      const detailRows = document.querySelectorAll('tr.acc-detail-row');
+      detailRows.forEach((dr) => {{
+        const code = String(dr.id || '').replace('acc-detail-', '');
+        const summaryRow = document.getElementById('acc-row-' + code);
+        const arrowEl = document.getElementById('acc-arrow-' + code);
+        const badgeEl = document.getElementById('acc-badge-' + code);
+        dr.style.display = openAll ? 'table-row' : 'none';
+        if (summaryRow) {{
+          if (openAll) summaryRow.classList.add('active');
+          else summaryRow.classList.remove('active');
+        }}
+        if (arrowEl) arrowEl.textContent = openAll ? '▼' : '▶';
+        if (badgeEl) badgeEl.textContent = openAll ? '목록 닫기' : '분류 목록 보기';
+      }});
+      if (!openAll) {{
+        activeLedgerAccountFilter = '';
+        applyMainLedgerRowVisibility();
+      }}
+    }}
+    function focusAccountSummary(accCode) {{
+      const detailRow = document.getElementById('acc-detail-' + accCode);
+      const summaryRow = document.getElementById('acc-row-' + accCode);
+      if (detailRow && (detailRow.style.display === 'none' || !detailRow.style.display)) {{
+        toggleAccountDetail(accCode);
+      }} else {{
+        activeLedgerAccountFilter = String(accCode);
+        applyMainLedgerRowVisibility();
+      }}
+      if (summaryRow && summaryRow.scrollIntoView) {{
+        summaryRow.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+      }}
+    }}
+    function clearLedgerAccountFilter() {{
+      activeLedgerAccountFilter = '';
+      applyMainLedgerRowVisibility();
+      const accEl = document.getElementById('account-filter');
+      if (accEl && accEl.value !== 'ALL') {{
+        accEl.value = 'ALL';
+        applyFilters();
+      }}
+    }}
+    async function saveAccountListTx(txId) {{
+      const memoInput = document.getElementById('acc-list-memo-' + txId);
+      const accSelect = document.getElementById('acc-list-code-' + txId);
+      const bodyObj = {{}};
+      if (memoInput) {{
+        bodyObj.counterparty_info = memoInput.value;
+      }}
+      if (accSelect && accSelect.value) {{
+        bodyObj.account_code = accSelect.value;
+      }}
+      await fetch('/api/v1/transactions/' + txId, {{
+        method: 'PATCH',
+        headers: API_HEADERS,
+        body: JSON.stringify(bodyObj)
+      }});
+      window.location.reload();
     }}
     function selectMonthRange(val) {{
       if (!val || !val.includes('|')) return;
@@ -2412,17 +2725,39 @@ def render_dashboard_html(
       box.innerHTML = htmlRows;
     }}
     let stmtFilterOnly = false;
-    function toggleStatementRowsFilter(stmtCnt) {{
-      stmtFilterOnly = !stmtFilterOnly;
+    function applyMainLedgerRowVisibility() {{
       const tbody = document.getElementById('main-ledger-tbody');
-      const btn = document.getElementById('btn-filter-stmt-only');
+      const badgeEl = document.getElementById('ledger-account-filter-badge');
+      const clearBtn = document.getElementById('btn-clear-acc-filter');
+      let matchAccCount = 0;
       if (tbody) {{
         const rows = tbody.querySelectorAll('tr[data-has-stmt]');
         rows.forEach((tr) => {{
           const hasStmt = tr.getAttribute('data-has-stmt') === '1';
-          tr.style.display = (!stmtFilterOnly || hasStmt) ? '' : 'none';
+          const rowAcc = tr.getAttribute('data-account-code') || '';
+          const stmtOk = !stmtFilterOnly || hasStmt;
+          const accOk = !activeLedgerAccountFilter || rowAcc === activeLedgerAccountFilter;
+          const visible = stmtOk && accOk;
+          tr.style.display = visible ? '' : 'none';
+          if (accOk) matchAccCount += 1;
         }});
       }}
+      if (badgeEl && clearBtn) {{
+        if (activeLedgerAccountFilter) {{
+          badgeEl.style.display = 'inline-block';
+          badgeEl.textContent = '📂 계정 필터: ' + activeLedgerAccountFilter + ' (' + matchAccCount + '건)';
+          clearBtn.style.display = 'inline-block';
+        }} else {{
+          badgeEl.style.display = 'none';
+          badgeEl.textContent = '';
+          clearBtn.style.display = 'none';
+        }}
+      }}
+    }}
+    function toggleStatementRowsFilter(stmtCnt) {{
+      stmtFilterOnly = !stmtFilterOnly;
+      applyMainLedgerRowVisibility();
+      const btn = document.getElementById('btn-filter-stmt-only');
       if (btn) {{
         btn.className = stmtFilterOnly ? '' : 'secondary';
         btn.textContent = stmtFilterOnly

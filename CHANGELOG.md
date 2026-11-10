@@ -56,3 +56,4 @@
 | 2026-11-09 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/exporters.py, src/sololedger/importers.py (+6 files)` | 2026년 1분기 홈택스 사업용신용카드(333건) 정밀 파싱·업태업종 세무분류 고도화 및 원장·매출전표·세무패키지 반영 | `PASSED` |
 | 2026-11-10 | `chore` | `.gitignore, logs/last_verification.json, logs/verification_history.jsonl` | 로컬 법인 세무신고서 및 사업자등록증 보관 폴더(company/) .gitignore 추가 | `PASSED` |
 | 2026-11-10 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/dashboard.py, src/sololedger/merchant_service.py (+4 files)` | 주식회사 디자인도하다(인테리어·내장목공사 및 디자인업) 맞춤 공사원가 계정코드(501·511) 및 자동 소명 적요 규칙 적용 | `PASSED` |
+| 2026-11-10 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/dashboard.py (+1 files)` | 대시보드 계정과목 요약표 클릭 시 분류된 전표 목록 펼침 및 필터 기능 추가 | `PASSED` |

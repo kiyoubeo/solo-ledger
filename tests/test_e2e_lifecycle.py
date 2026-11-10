@@ -154,6 +154,24 @@ def test_full_sololedger_lifecycle_e2e(client):
     assert dash_html.status_code == 200
     assert "SoloLedger 경비·세무증빙 대시보드" in dash_html.text
     assert "알수없는문구점" in dash_html.text
+    assert "toggleAccountDetail('830')" in dash_html.text
+    assert "acc-detail-830" in dash_html.text
+
+    # Verify account_code filtering & auto-expanded classified list on /dashboard and summary API
+    acc_sum = client.get(
+        "/api/v1/dashboard/summary?year_month=202610&year=2026&account_code=830",
+        headers=headers,
+    )
+    assert acc_sum.status_code == 200
+    acc_sum_data = acc_sum.json()
+    assert acc_sum_data["account_code"] == "830"
+    assert acc_sum_data["total_tx_count"] == 1
+    assert acc_sum_data["total_expenditure"] == 45000
+    assert len(acc_sum_data["account_transactions"]["830"]) == 1
+
+    acc_dash_html = client.get("/dashboard?year_month=202610&year=2026&account_code=830")
+    assert acc_dash_html.status_code == 200
+    assert "id='acc-row-830' class='acc-summary-row active'" in acc_dash_html.text
 
     # 7. Inline Patch of Unclassified Transaction via PATCH /api/v1/transactions/{tx_id}
     unclassified_tx = [

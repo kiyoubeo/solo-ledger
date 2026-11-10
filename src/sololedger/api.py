@@ -1112,6 +1112,7 @@ async def dashboard_summary_endpoint(
     card_last4: Optional[str] = Query(default=None),
     start_date: Optional[str] = Query(default=None),
     end_date: Optional[str] = Query(default=None),
+    account_code: Optional[str] = Query(default=None),
     x_api_key: Optional[str] = Header(default=None),
     sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
 ):
@@ -1128,6 +1129,7 @@ async def dashboard_summary_endpoint(
             card_last4=card_last4,
             start_date=start_date,
             end_date=end_date,
+            account_code=account_code,
         )
     finally:
         conn.close()
@@ -1584,6 +1586,7 @@ async def render_dashboard_page(
     card_last4: Optional[str] = Query(default=None),
     start_date: Optional[str] = Query(default=None),
     end_date: Optional[str] = Query(default=None),
+    account_code: Optional[str] = Query(default=None),
 ):
     """Render the lightweight HTML5 management dashboard."""
     if settings.require_auth and not _has_valid_auth():
@@ -1599,6 +1602,7 @@ async def render_dashboard_page(
             card_last4=card_last4,
             start_date=start_date,
             end_date=end_date,
+            account_code=account_code,
         )
         return HTMLResponse(content=html_doc)
     finally:
