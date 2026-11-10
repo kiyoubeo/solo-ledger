@@ -66,3 +66,4 @@
 | 2026-11-08 | .gitignore, logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/importers.py (+3 files) | [feat] 법인카드 전용 필터링 정책(corp_card_policy) 및 개인카드 분리 백업·차단 기능 추가 |
 | 2026-11-08 | logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/dashboard.py (+2 files) | [feat] 개인카드 데이터 백업·초기화 및 법인카드 전용 테스트 모드(개인카드·미매칭 메일 차단 및 법인카드 등록 관리) 전환 |
 | 2026-11-09 | logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/exporters.py, src/sololedger/importers.py (+6 files) | [feat] 2026년 1분기 홈택스 사업용신용카드(333건) 정밀 파싱·업태업종 세무분류 고도화 및 원장·매출전표·세무패키지 반영 |
+| 2026-11-10 | .gitignore, logs/last_verification.json, logs/verification_history.jsonl | [chore] 로컬 법인 세무신고서 및 사업자등록증 보관 폴더(company/) .gitignore 추가 |

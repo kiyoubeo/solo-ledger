@@ -19,6 +19,7 @@ archive/
 archive_test/
 archive_personal_backup/
 references/
+company/
 
 # Environment variables & secrets
 .env
