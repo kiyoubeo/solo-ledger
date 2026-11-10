@@ -261,6 +261,11 @@ def _row_dict_to_reconcile_item(
     if biz_reg_no and len(biz_reg_no) != 10:
         biz_reg_no = None
 
+    supply_raw = _pick_col(row, ["공급가액", "공급가", "supply_value", "splyamt"])
+    vat_raw = _pick_col(row, ["부가세", "부가가치세", "세액", "vat_amount", "vatamt"])
+    parsed_supply = _parse_int_amount(supply_raw) if supply_raw else None
+    parsed_vat = _parse_int_amount(vat_raw) if vat_raw else None
+
     total_str = _pick_col(
         row,
         [
@@ -279,16 +284,15 @@ def _row_dict_to_reconcile_item(
     if total_str:
         total_amount = _parse_int_amount(total_str)
     else:
-        supply = _parse_int_amount(
-            _pick_col(row, ["공급가액", "공급가", "supply_value", "splyamt"])
-        )
-        vat = _parse_int_amount(
-            _pick_col(row, ["부가세", "부가가치세", "세액", "vat_amount", "vatamt"])
-        )
-        total_amount = supply + vat
+        total_amount = (parsed_supply or 0) + (parsed_vat or 0)
 
     if total_amount == 0:
         return None
+
+    biz_category = _pick_col(row, ["업태", "biz_category"]) or None
+    biz_item = _pick_col(row, ["업종", "종목", "biz_item"]) or None
+    hometax_decision = _pick_col(row, ["공제여부결정", "공제여부"]) or None
+    hometax_remark = _pick_col(row, ["비고", "불공제사유"]) or None
 
     cancel_amt = abs(
         _parse_int_amount(_pick_col(row, ["취소금액", "취소원금", "cancel_amount", "cnclamt"]))
@@ -300,22 +304,31 @@ def _row_dict_to_reconcile_item(
     if 0 < cancel_amt < abs(total_amount):
         total_amount = abs(total_amount) - cancel_amt
         is_cancel = False
+        parsed_supply = None
+        parsed_vat = None
     else:
-        is_cancel = (
+        has_explicit_cancel = (
             ("취소" in cancel_hint)
             or (cancel_hint.lower() in ("true", "y", "cancel", "canceled"))
-            or (total_amount < 0)
             or (cancel_amt > 0 and cancel_amt >= abs(total_amount))
         )
+        if hometax_decision and not has_explicit_cancel:
+            is_cancel = False
+        else:
+            is_cancel = has_explicit_cancel or (total_amount < 0)
         if is_cancel and total_amount > 0:
             total_amount = -total_amount
+            if parsed_supply is not None and parsed_supply > 0:
+                parsed_supply = -parsed_supply
+            if parsed_vat is not None and parsed_vat > 0:
+                parsed_vat = -parsed_vat
 
     tax_type_raw = _pick_col(
         row,
         ["과세유형", "가맹점유형", "사업자유형", "공제여부", "업종", "tax_type_code", "taxtype"],
         "일반과세자",
     )
-    tax_type_code, biz_status = _map_tax_type_and_status(tax_type_raw)
+    tax_type_code, biz_status = _map_tax_type_and_status(tax_type_raw, hometax_remark or "")
 
     return ReconcileItem(
         card_last4=card_last4,
@@ -324,8 +337,14 @@ def _row_dict_to_reconcile_item(
         merchant_name=merchant_name,
         biz_reg_no=biz_reg_no,
         total_amount=total_amount,
+        supply_value=parsed_supply,
+        vat_amount=parsed_vat,
         tax_type_code=tax_type_code,
         biz_status=biz_status,
+        biz_category=biz_category,
+        biz_item=biz_item,
+        hometax_deduct_decision=hometax_decision,
+        hometax_remark=hometax_remark,
         reconcile_source="CANCELED" if is_cancel else "HOMETAX_VERIFIED",
         is_cancel=is_cancel,
     )

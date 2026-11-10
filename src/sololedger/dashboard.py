@@ -26,6 +26,8 @@ from sololedger.telegram_bot import _refresh_receipt_archived_filename
 from sololedger.vehicle_tracker import get_vehicle_expense_summary
 
 ACCOUNT_CODE_CATALOG: Dict[str, str] = {
+    "501": "원재료비",
+    "511": "외주용역비",
     "811": "복리후생비",
     "812": "여비교통비",
     "813": "기업업무추진비",
@@ -172,6 +174,7 @@ def reapply_tax_rules_to_ledger(cursor: sqlite3.Cursor) -> Dict[str, Any]:
     cursor.execute(
         """
         SELECT tx_id, raw_merchant_name, biz_reg_no, total_amount,
+               supply_value, vat_amount, reconcile_status,
                account_code, account_name, vat_deduction_type, counterparty_info
         FROM card_transactions
         WHERE reconcile_status != 'CANCELED'
@@ -180,6 +183,11 @@ def reapply_tax_rules_to_ledger(cursor: sqlite3.Cursor) -> Dict[str, Any]:
     rows = cursor.fetchall()
     reclassified_count = 0
     auto_memo_filled_count = 0
+    legacy_generic_memos = {
+        "사무실 소모품 및 생활잡화 구입",
+        "업무용 IT구독·통신·교통 수수료",
+        "대표자(임직원) 식대 및 복리후생",
+    }
 
     for r in rows:
         tx_id = int(r["tx_id"])
@@ -189,20 +197,31 @@ def reapply_tax_rules_to_ledger(cursor: sqlite3.Cursor) -> Dict[str, Any]:
 
         rule_eval = evaluate_tax_rules(cursor, m_name, r["biz_reg_no"])
         new_code = cur_code
-        if cur_code == "999" and rule_eval["account_code"] != "999":
+        should_reclassify = (cur_code == "999" and rule_eval["account_code"] != "999") or (
+            cur_code in ("830", "831") and rule_eval["account_code"] in ("501", "511")
+        )
+        if should_reclassify:
             new_code = rule_eval["account_code"]
             new_name = rule_eval["account_name"]
-            new_vat_type = rule_eval["vat_deduction_type"]
+            new_vat_type = (
+                r["vat_deduction_type"]
+                if r["reconcile_status"] == "HOMETAX_VERIFIED"
+                and r["vat_deduction_type"] in ("EXEMPT", "NON_DEDUCTIBLE")
+                else rule_eval["vat_deduction_type"]
+            )
             new_reason = rule_eval["non_deduct_reason"]
             is_veh = 1 if rule_eval["is_vehicle_expense"] else 0
-            sup, vat = calculate_supply_and_vat(int(r["total_amount"]), new_vat_type)
+            if r["reconcile_status"] == "HOMETAX_VERIFIED":
+                sup, vat = int(r["supply_value"]), int(r["vat_amount"])
+            else:
+                sup, vat = calculate_supply_and_vat(int(r["total_amount"]), new_vat_type)
             cursor.execute(
                 """
                 UPDATE card_transactions
                 SET account_code = ?,
                     account_name = ?,
                     vat_deduction_type = ?,
-                    non_deduct_reason = ?,
+                    non_deduct_reason = COALESCE(non_deduct_reason, ?),
                     is_vehicle_expense = ?,
                     supply_value = ?,
                     vat_amount = ?,
@@ -213,10 +232,10 @@ def reapply_tax_rules_to_ledger(cursor: sqlite3.Cursor) -> Dict[str, Any]:
             )
             reclassified_count += 1
 
-        if not cur_memo:
+        if not cur_memo or cur_memo in legacy_generic_memos or should_reclassify:
             req_prompt = bool(rule_eval.get("require_memo_prompt", False))
             auto_memo = generate_default_memo(new_code, m_name, req_prompt)
-            if auto_memo:
+            if auto_memo and auto_memo != cur_memo:
                 cursor.execute(
                     """
                     UPDATE card_transactions

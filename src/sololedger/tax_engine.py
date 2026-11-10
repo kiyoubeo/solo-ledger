@@ -89,11 +89,22 @@ _BUILTIN_ENTERTAINMENT_RE = re.compile(
     r"(몽키뮤직타운|유흥주점|단란주점)",
     re.IGNORECASE,
 )
+_BUILTIN_SITE_MATERIAL_RE = re.compile(
+    r"(던에드워드페인트|페인트|성심철물건재|철물|건재|유진홈센터|ACE\s*Hardware|하드웨어|"
+    r"이케아코리아|이케아|IKEA|스마트홈|크린대장|휴앤디|목재|합판|석고보드|타일|벽지|장판|"
+    r"인테리어필름|시트지|조명|타카)",
+    re.IGNORECASE,
+)
+_BUILTIN_SITE_SUBCONTRACT_RE = re.compile(
+    r"(개미중기|중기|크레인|사다리차|스카이차|지에스건설|럭키도배건축기술학원|도배.*학원|"
+    r"건축기술|대신택배|경동택배|건영택배|화물운송|용달)",
+    re.IGNORECASE,
+)
 _BUILTIN_SERVICE_FEE_RE = re.compile(
     r"(알림서비스|연회비|문자서비스|인증수수료|티머니|이비카드|후불교통|스카이라이프|케이티에이치|"
     r"HCN|소프트먼트|일등코리아|멤버십|네이버플러스|일상케어|안심케어|나이스_마이홈|"
-    r"주식회사\s*우리카드|\(주\)\s*다날|우정사업본부|대신택배|개미중기|지에스건설|주식회사\s*송핫|"
-    r"럭키도배건축기술학원|서울특별시|예봄교회)",
+    r"주식회사\s*우리카드|\(주\)\s*다날|우정사업본부|주식회사\s*송핫|"
+    r"서울특별시|예봄교회)",
     re.IGNORECASE,
 )
 _BUILTIN_RESTAURANT_RE = re.compile(
@@ -116,9 +127,9 @@ _BUILTIN_BOOKSTORE_RE = re.compile(
 )
 _BUILTIN_OFFLINE_MART_RE = re.compile(
     r"(다이소|아성다이소|이마트|홈플러스|롯데마트|롯데쇼핑|신세계|아울렛|삼성닷컴|엠스토아|제로백|"
-    r"코스트코|트레이더스|하나로마트|케이마트|휴마트|할인마트|홈마트|이케아코리아|한화커넥트|현대백화점|"
-    r"더현대서울|삼성전자판매|유진홈센터|ACE\s*Hardware|던에드워드페인트|성심철물건재|크린대장|"
-    r"비에스케이코퍼레이션|씨제이올리브영|빅바이트컴퍼니|딥스테이션|코레일유통|휴앤디|애플아울렛|스마트홈)",
+    r"코스트코|트레이더스|하나로마트|케이마트|휴마트|할인마트|홈마트|한화커넥트|현대백화점|"
+    r"더현대서울|삼성전자판매|비에스케이코퍼레이션|씨제이올리브영|빅바이트컴퍼니|딥스테이션|"
+    r"코레일유통|애플아울렛)",
     re.IGNORECASE,
 )
 
@@ -169,6 +180,30 @@ def _classify_by_hometax_industry(
             "is_vehicle_expense": True,
             "require_memo_prompt": False,
         }
+    if re.search(
+        r"(철물|기계공구|페인트|건재|목재|합판|벽지|장판|타일|건축자재|실내장식자재|조명장치)",
+        combined,
+    ):
+        return {
+            "account_code": "501",
+            "account_name": "원재료비",
+            "vat_deduction_type": "DEDUCTIBLE",
+            "non_deduct_reason": None,
+            "is_vehicle_expense": False,
+            "require_memo_prompt": False,
+        }
+    if re.search(
+        r"(중기|건설|건축공사|도배|실내장식|내장목공|화물운송|용달)",
+        combined,
+    ):
+        return {
+            "account_code": "511",
+            "account_name": "외주용역비",
+            "vat_deduction_type": "DEDUCTIBLE",
+            "non_deduct_reason": None,
+            "is_vehicle_expense": False,
+            "require_memo_prompt": False,
+        }
     if re.search(r"(전자지급결제대행|전자금융업|부가통신|인터넷및컴퓨터운영)", combined):
         return {
             "account_code": "830",
@@ -191,7 +226,7 @@ def _classify_by_hometax_industry(
             "require_memo_prompt": False,
         }
     if re.search(
-        r"(백화점|슈퍼마켓|대형할인점|마트|철물|기계공구|페인트|전자제품|화장품|스포츠용품|무역|상품종합중개|종합\s*소매|식잡|트랩)",
+        r"(백화점|슈퍼마켓|대형할인점|마트|전자제품|화장품|스포츠용품|무역|상품종합중개|종합\s*소매|식잡|트랩)",
         combined,
     ):
         return {
@@ -203,7 +238,7 @@ def _classify_by_hometax_industry(
             "require_memo_prompt": False,
         }
     if re.search(
-        r"(신용카드|할부금융|방문소포|화물|건설|건축공사|임대|교육서비스|기술서비스|소프트웨어|데이터베이스)",
+        r"(신용카드|할부금융|방문소포|임대|교육서비스|기술서비스|소프트웨어|데이터베이스)",
         combined,
     ):
         return {
@@ -286,6 +321,26 @@ def evaluate_tax_rules(
             "require_memo_prompt": False,
         }
         return _apply_cached_merchant_overrides(cursor, base_book, merchant_name, biz_reg_no)
+    if _BUILTIN_SITE_MATERIAL_RE.search(m_txt):
+        base_mat = {
+            "account_code": "501",
+            "account_name": "원재료비",
+            "vat_deduction_type": "DEDUCTIBLE",
+            "non_deduct_reason": None,
+            "is_vehicle_expense": False,
+            "require_memo_prompt": False,
+        }
+        return _apply_cached_merchant_overrides(cursor, base_mat, merchant_name, biz_reg_no)
+    if _BUILTIN_SITE_SUBCONTRACT_RE.search(m_txt):
+        base_sub = {
+            "account_code": "511",
+            "account_name": "외주용역비",
+            "vat_deduction_type": "DEDUCTIBLE",
+            "non_deduct_reason": None,
+            "is_vehicle_expense": False,
+            "require_memo_prompt": False,
+        }
+        return _apply_cached_merchant_overrides(cursor, base_sub, merchant_name, biz_reg_no)
     if _BUILTIN_SERVICE_FEE_RE.search(m_txt):
         base_fee = {
             "account_code": "831",
@@ -449,6 +504,20 @@ def generate_default_memo(
         return None
 
     m_name = (merchant_name or "").strip()
+    if account_code == "501":
+        if any(k in m_name for k in ("이케아", "IKEA", "휴앤디", "스마트홈")):
+            return "인테리어·공간디자인 현장 가구·조명·스타일링 자재 구입"
+        if any(k in m_name for k in ("크린대장", "청소")):
+            return "인테리어 현장 준공·마감 청소자재 구입"
+        return "내장목공사·인테리어 현장 자재 및 공구 구입"
+    if account_code == "511":
+        if any(k in m_name for k in ("중기", "크레인", "사다리", "스카이")):
+            return "인테리어·목공사 현장 중기·장비 임대료"
+        if any(k in m_name for k in ("택배", "화물", "용달")):
+            return "현장 시공자재 및 디자인 샘플 화물 운송료"
+        if any(k in m_name for k in ("학원", "기술")):
+            return "도배·내장목공사 시공 기술연수 및 외주용역"
+        return "인테리어·내장목공사 현장 시공 외주용역비"
     if account_code == "822":
         if "하이패스" in m_name or "터널/도로" in m_name or "유료도로" in m_name:
             return "하이패스 통행료"
@@ -460,7 +529,7 @@ def generate_default_memo(
             return "업무용승용차 정비·유지"
         return "업무용승용차 주유비"
     if account_code == "811":
-        return "대표자(임직원) 식대 및 복리후생"
+        return "현장 시공·디자인 업무 식대 및 복리후생"
     if account_code == "812":
         if "항공" in m_name:
             return "출장·여비 항공권 발권"
@@ -477,7 +546,31 @@ def generate_default_memo(
     if account_code == "826":
         return "업무용 도서 구입 및 인쇄"
     if account_code == "830":
-        return "사무실 소모품 및 생활잡화 구입"
+        if any(
+            k in m_name
+            for k in ("신세계", "현대백화점", "더현대", "롯데쇼핑", "한화커넥트", "애플아울렛")
+        ):
+            return "공간디자인·인테리어 현장 스타일링 소품 및 샘플 구입"
+        if any(k in m_name for k in ("삼성전자", "하이마트", "일렉트로")):
+            return "디자인·현장 업무용 IT 주변기기 및 소모품 구입"
+        if any(
+            k in m_name
+            for k in (
+                "다이소",
+                "이마트",
+                "하나로마트",
+                "할인마트",
+                "홈플러스",
+                "롯데마트",
+                "코스트코",
+                "올리브영",
+                "비에스케이",
+                "빅바이트",
+                "딥스테이션",
+            )
+        ):
+            return "현장 시공 부자재·마감용품 및 사무실 소모품 구입"
+        return "디자인·현장 소모품 및 사무용품 구입"
     if account_code == "831":
         if "티머니" in m_name or "이비카드" in m_name:
             return "대중교통(버스·지하철) 교통카드 이용"
