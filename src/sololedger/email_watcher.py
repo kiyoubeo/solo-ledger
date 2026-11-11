@@ -351,7 +351,7 @@ def load_email_watcher_config(archive_dir: Optional[Path] = None) -> Dict[str, A
         "accounts": [],
         "auto_poll_enabled": False,
         "poll_interval_sec": 120,
-        "lookback_days": 60,
+        "lookback_days": 365,
         "last_sync_at": None,
         "last_sync_status": "idle",
         "last_sync_message": "아직 이메일 동기화가 실행되지 않았습니다.",
@@ -388,7 +388,7 @@ def load_email_watcher_config(archive_dir: Optional[Path] = None) -> Dict[str, A
 def _merge_recent_matched_items(
     existing: List[Dict[str, Any]],
     incoming: List[Dict[str, Any]],
-    limit: int = 150,
+    limit: int = 500,
 ) -> List[Dict[str, Any]]:
     by_tx: Dict[int, Dict[str, Any]] = {}
     for item in existing or []:
@@ -396,7 +396,12 @@ def _merge_recent_matched_items(
             by_tx[int(item["tx_id"])] = dict(item)
     for item in incoming or []:
         if isinstance(item, dict) and item.get("tx_id") is not None:
-            by_tx[int(item["tx_id"])] = dict(item)
+            tid = int(item["tx_id"])
+            prev = by_tx.get(tid)
+            merged_item = dict(item)
+            if prev and prev.get("is_created"):
+                merged_item["is_created"] = True
+            by_tx[tid] = merged_item
     merged = sorted(
         by_tx.values(),
         key=lambda x: (str(x.get("transacted_at") or ""), int(x.get("tx_id") or 0)),
@@ -407,11 +412,14 @@ def _merge_recent_matched_items(
 
 def _write_config(cfg: Dict[str, Any], archive_dir: Optional[Path] = None) -> Dict[str, Any]:
     cfg["poll_interval_sec"] = max(30, int(cfg.get("poll_interval_sec") or 120))
-    cfg["lookback_days"] = max(1, min(365, int(cfg.get("lookback_days") or 60)))
-    if isinstance(cfg.get("processed_ids"), list) and len(cfg["processed_ids"]) > 3000:
-        cfg["processed_ids"] = cfg["processed_ids"][-3000:]
+    cfg["lookback_days"] = max(1, min(1095, int(cfg.get("lookback_days") or 365)))
+    if isinstance(cfg.get("processed_ids"), list):
+        dedup_ids = list(dict.fromkeys(str(x) for x in cfg["processed_ids"] if x))
+        if len(dedup_ids) > 50000:
+            dedup_ids = dedup_ids[-50000:]
+        cfg["processed_ids"] = dedup_ids
     if isinstance(cfg.get("recent_matched_items"), list):
-        cfg["recent_matched_items"] = cfg["recent_matched_items"][:150]
+        cfg["recent_matched_items"] = cfg["recent_matched_items"][:500]
 
     accounts = cfg.get("accounts") or []
     if accounts:
@@ -522,7 +530,7 @@ def delete_email_account_entry(
 
 def list_statement_matched_transactions(
     cursor: sqlite3.Cursor,
-    limit: int = 150,
+    limit: int = 500,
 ) -> List[Dict[str, Any]]:
     """Query live ledger transactions that have generated Transaction Statements (거래명세서)."""
     cursor.execute(
@@ -609,7 +617,7 @@ def get_public_email_watcher_config(
     pub["app_password"] = "********" if any_pw else ""
     pub["presets"] = IMAP_PROVIDER_PRESETS
     if cursor is not None:
-        live_items = list_statement_matched_transactions(cursor, limit=150)
+        live_items = list_statement_matched_transactions(cursor, limit=500)
         pub["recent_matched_items"] = live_items
     else:
         pub["recent_matched_items"] = list(cfg.get("recent_matched_items") or [])
@@ -1756,18 +1764,43 @@ def ingest_email_order_payload(
     }
 
 
+def _extract_fetch_msg_token(
+    fetch_list: List[Any],
+    idx: int,
+    use_uid: bool,
+    default_tok: bytes,
+) -> bytes:
+    """Extract UID (when use_uid=True) or sequence number from an IMAP FETCH response tuple."""
+    item = fetch_list[idx]
+    meta_line = item[0] if (isinstance(item, tuple) and isinstance(item[0], bytes)) else b""
+    if use_uid:
+        m_u = re.search(rb"\bUID\s+(\d+)\b", meta_line, flags=re.I)
+        if m_u:
+            return m_u.group(1)
+        if idx + 1 < len(fetch_list) and isinstance(fetch_list[idx + 1], bytes):
+            m_u2 = re.search(rb"\bUID\s+(\d+)\b", fetch_list[idx + 1], flags=re.I)
+            if m_u2:
+                return m_u2.group(1)
+    m_seq = re.match(rb"^(\d+)\b", meta_line.strip())
+    return m_seq.group(1) if m_seq else default_tok
+
+
 def sync_imap_order_emails(
     cursor: sqlite3.Cursor,
     archive_dir: Optional[Path] = None,
-    max_messages: int = 600,
+    max_messages: int = 0,
     force_rescan: bool = False,
     account_id: Optional[str] = None,
     recent_rescan_days: int = 0,
+    lookback_days: Optional[int] = None,
+    include_toss_scroll: bool = True,
+    verify_toss_slips: bool = True,
 ) -> Dict[str, Any]:
-    """Connect to all enabled IMAP accounts (or a single account_id), fetch orders, and reconcile."""
+    """Paginate-scroll enabled IMAP accounts across lookback_days (default 365d), enrich Toss slips, and reconcile."""
     cfg = load_email_watcher_config(archive_dir)
     accounts: List[Dict[str, Any]] = list(cfg.get("accounts") or [])
-    lookback_days = int(cfg.get("lookback_days") or 60)
+    raw_lb = lookback_days if lookback_days is not None else (cfg.get("lookback_days") or 365)
+    eff_lookback_days = max(1, min(1095, int(raw_lb)))
     processed_ids: set[str] = set() if force_rescan else set(cfg.get("processed_ids") or [])
 
     if account_id:
@@ -1786,6 +1819,8 @@ def sync_imap_order_emails(
         return {
             "status": "not_configured",
             "message": "활성화된 이메일 계정(주소 및 IMAP 앱 비밀번호)을 먼저 등록해 주세요.",
+            "lookback_days": eff_lookback_days,
+            "scrolled_pages": 0,
             "scanned_accounts": 0,
             "scanned_emails": 0,
             "parsed_orders_count": 0,
@@ -1797,14 +1832,20 @@ def sync_imap_order_emails(
             "account_results": [],
         }
 
-    since_dt = (datetime.now() - timedelta(days=lookback_days)).strftime("%d-%b-%Y")
+    since_ymd = (datetime.now() - timedelta(days=eff_lookback_days)).strftime("%Y-%m-%d")
+    since_dt = _format_imap_date_token(since_ymd, 0)
     recent_since_dt = (
-        (datetime.now() - timedelta(days=recent_rescan_days)).strftime("%d-%b-%Y")
+        _format_imap_date_token(
+            (datetime.now() - timedelta(days=recent_rescan_days)).strftime("%Y-%m-%d"),
+            0,
+        )
         if recent_rescan_days > 0 and not force_rescan
         else ""
     )
     total_scanned_emails = 0
+    total_scrolled_pages = 0
     all_orders: List[Dict[str, Any]] = []
+    raw_toss_records: List[Dict[str, Any]] = []
     canceled_apps: set[str] = set()
     new_processed: List[str] = list(processed_ids)
     account_results: List[Dict[str, Any]] = []
@@ -1820,108 +1861,182 @@ def sync_imap_order_emails(
         mailbox = str(acc.get("mailbox") or "INBOX").strip() or "INBOX"
         acc_scanned = 0
         acc_checked_count = 0
+        acc_pages = 0
         acc_orders: List[Dict[str, Any]] = []
+        acc_toss_records: List[Dict[str, Any]] = []
         acc_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         try:
-            imap = imaplib.IMAP4_SSL(host, port, timeout=25.0)
+            imap = imaplib.IMAP4_SSL(host, port, timeout=30.0)
             try:
                 imap.login(user, password)
-                imap.select(mailbox, readonly=True)
-                typ, data = imap.search(None, f"(SINCE {since_dt})")
-                if typ != "OK" or not data or not data[0]:
-                    msg_nums: List[bytes] = []
-                else:
-                    msg_nums = data[0].split()
+                use_uid = hasattr(imap, "uid")
+                mailboxes = _discover_imap_scroll_mailboxes(imap, mailbox)
+                seen_acc_msg_keys: set[str] = set()
 
-                always_rescan_nums: set[bytes] = set()
-                if recent_since_dt:
-                    typ_r, data_r = imap.search(None, f"(SINCE {recent_since_dt})")
-                    if typ_r == "OK" and data_r and data_r[0]:
-                        always_rescan_nums = set(data_r[0].split())
-
-                recent_nums = list(reversed(msg_nums[-max_messages:]))
-                acc_checked_count = len(recent_nums)
-                pending_nums: List[bytes] = []
-                for num in recent_nums:
-                    uid_key = f"{user}:{mailbox}:{num.decode('ascii', errors='ignore')}"
-                    if (
-                        not force_rescan
-                        and num not in always_rescan_nums
-                        and uid_key in processed_ids
-                    ):
+                for mbox in mailboxes:
+                    sel_name = f'"{mbox}"' if (" " in mbox and not mbox.startswith('"')) else mbox
+                    typ_sel, _ = imap.select(sel_name, readonly=True)
+                    if typ_sel != "OK":
                         continue
-                    pending_nums.append(num)
 
-                # Batch-fetch headers in chunks of 100 for fast scanning
-                candidate_bodies: List[tuple[bytes, str, str, bool]] = []
-                for b_start in range(0, len(pending_nums), 100):
-                    chunk = pending_nums[b_start : b_start + 100]
-                    seq_set = b",".join(chunk)
-                    typ_h, hdr_data = imap.fetch(
-                        seq_set,
-                        "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE MESSAGE-ID)])",
-                    )
-                    if typ_h != "OK" or not hdr_data:
+                    if use_uid:
+                        typ, data = imap.uid("SEARCH", None, "SINCE", since_dt)
+                    else:
+                        typ, data = imap.search(None, f"(SINCE {since_dt})")
+                    if typ != "OK" or not data or not data[0]:
+                        msg_nums: List[bytes] = []
+                    else:
+                        msg_nums = data[0].split()
+                    if not msg_nums:
                         continue
-                    for item in hdr_data:
-                        if not (isinstance(item, tuple) and len(item) >= 2):
-                            continue
-                        meta_line = item[0] if isinstance(item[0], bytes) else b""
-                        m_seq = re.match(rb"^(\d+)\b", meta_line.strip())
-                        num_b = m_seq.group(1) if m_seq else chunk[0]
-                        uid_key = f"{user}:{mailbox}:{num_b.decode('ascii', errors='ignore')}"
-                        hdr_msg = email.message_from_bytes(item[1])
-                        subj = _decode_mime_header(hdr_msg.get("Subject"))
-                        sender = _decode_mime_header(hdr_msg.get("From"))
-                        raw_mid = str(hdr_msg.get("Message-ID") or "").strip()
-                        msg_id = f"{user}:{raw_mid}" if raw_mid else uid_key
-                        is_always = force_rescan or (num_b in always_rescan_nums)
-                        if not is_always and msg_id in processed_ids:
-                            continue
-                        if _CANCELED_EMAIL_SUBJECT_RE.search(subj):
-                            candidate_bodies.append((num_b, msg_id, uid_key, True))
-                            continue
-                        if _IGNORE_EMAIL_SUBJECT_RE.search(subj) or not _ORDER_EMAIL_SUBJECT_RE.search(
-                            f"{subj} {sender}"
-                        ):
-                            new_processed.append(msg_id)
-                            new_processed.append(uid_key)
-                            continue
-                        candidate_bodies.append((num_b, msg_id, uid_key, False))
 
-                for b_start in range(0, len(candidate_bodies), 25):
-                    chunk_cands = candidate_bodies[b_start : b_start + 25]
-                    by_seq = {num_b: (m_id, u_id, is_c) for num_b, m_id, u_id, is_c in chunk_cands}
-                    seq_set = b",".join(num_b for num_b, _, _, _ in chunk_cands)
-                    typ_b, body_data = imap.fetch(seq_set, "(BODY.PEEK[])")
-                    if typ_b != "OK" or not body_data:
-                        continue
-                    for item in body_data:
-                        if not (
-                            isinstance(item, tuple)
-                            and len(item) >= 2
-                            and isinstance(item[1], bytes)
-                        ):
-                            continue
-                        meta_b = item[0] if isinstance(item[0], bytes) else b""
-                        m_seq = re.match(rb"^(\d+)\b", meta_b.strip())
-                        seq_k = m_seq.group(1) if m_seq else chunk_cands[0][0]
-                        raw_eml = item[1]
-                        if not raw_eml:
-                            continue
-
-                        is_cancel_msg = by_seq[seq_k][2] if seq_k in by_seq else False
-                        if is_cancel_msg:
-                            canceled_apps.update(_extract_cancel_approval_nos_from_eml(raw_eml))
+                    always_rescan_nums: set[bytes] = set()
+                    if recent_since_dt:
+                        if use_uid:
+                            typ_r, data_r = imap.uid("SEARCH", None, "SINCE", recent_since_dt)
                         else:
-                            acc_scanned += 1
-                            extracted = parse_raw_email_bytes_or_text(raw_eml)
-                            acc_orders.extend(extracted)
-                        if seq_k in by_seq:
-                            m_id, u_id, _ = by_seq[seq_k]
-                            new_processed.append(m_id)
-                            new_processed.append(u_id)
+                            typ_r, data_r = imap.search(None, f"(SINCE {recent_since_dt})")
+                        if typ_r == "OK" and data_r and data_r[0]:
+                            always_rescan_nums = set(data_r[0].split())
+
+                    recent_nums = (
+                        list(reversed(msg_nums[-max_messages:]))
+                        if max_messages and max_messages > 0
+                        else list(reversed(msg_nums))
+                    )
+                    acc_checked_count += len(recent_nums)
+                    key_prefix = f"{user}:{mbox}:uid:" if use_uid else f"{user}:{mbox}:"
+                    pending_nums: List[bytes] = []
+                    for num in recent_nums:
+                        uid_key = f"{key_prefix}{num.decode('ascii', errors='ignore')}"
+                        if (
+                            not force_rescan
+                            and num not in always_rescan_nums
+                            and uid_key in processed_ids
+                        ):
+                            continue
+                        pending_nums.append(num)
+
+                    # Paginate header fetches in chunks of 200 across the entire lookback period
+                    candidate_bodies: List[tuple[bytes, str, str, bool]] = []
+                    for b_start in range(0, len(pending_nums), 200):
+                        chunk = pending_nums[b_start : b_start + 200]
+                        seq_set = b",".join(chunk)
+                        hdr_query = "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE MESSAGE-ID)])"
+                        acc_pages += 1
+                        total_scrolled_pages += 1
+                        if use_uid:
+                            typ_h, hdr_data = imap.uid("FETCH", seq_set, hdr_query)
+                        else:
+                            typ_h, hdr_data = imap.fetch(seq_set, hdr_query)
+                        if typ_h != "OK" or not hdr_data:
+                            continue
+                        for idx, item in enumerate(hdr_data):
+                            if not (
+                                isinstance(item, tuple)
+                                and len(item) >= 2
+                                and isinstance(item[1], bytes)
+                            ):
+                                continue
+                            num_b = _extract_fetch_msg_token(hdr_data, idx, use_uid, chunk[0])
+                            uid_key = f"{key_prefix}{num_b.decode('ascii', errors='ignore')}"
+                            hdr_msg = email.message_from_bytes(item[1])
+                            subj = _decode_mime_header(hdr_msg.get("Subject"))
+                            sender = _decode_mime_header(hdr_msg.get("From"))
+                            raw_mid = str(hdr_msg.get("Message-ID") or "").strip()
+                            msg_id = f"{user}:{raw_mid}" if raw_mid else uid_key
+
+                            if msg_id in seen_acc_msg_keys:
+                                new_processed.append(uid_key)
+                                continue
+
+                            is_always = force_rescan or (num_b in always_rescan_nums)
+                            if not is_always and msg_id in processed_ids:
+                                seen_acc_msg_keys.add(msg_id)
+                                new_processed.append(uid_key)
+                                continue
+
+                            if include_toss_scroll and is_toss_payments_email(sender, subj):
+                                seen_acc_msg_keys.add(msg_id)
+                                candidate_bodies.append((num_b, msg_id, uid_key, False))
+                                continue
+                            if _CANCELED_EMAIL_SUBJECT_RE.search(subj):
+                                seen_acc_msg_keys.add(msg_id)
+                                candidate_bodies.append((num_b, msg_id, uid_key, True))
+                                continue
+                            if _IGNORE_EMAIL_SUBJECT_RE.search(subj) or not _ORDER_EMAIL_SUBJECT_RE.search(
+                                f"{subj} {sender}"
+                            ):
+                                seen_acc_msg_keys.add(msg_id)
+                                new_processed.append(msg_id)
+                                new_processed.append(uid_key)
+                                continue
+                            seen_acc_msg_keys.add(msg_id)
+                            candidate_bodies.append((num_b, msg_id, uid_key, False))
+
+                    # Paginate full-body fetches in chunks of 25
+                    for b_start in range(0, len(candidate_bodies), 25):
+                        chunk_cands = candidate_bodies[b_start : b_start + 25]
+                        by_seq = {num_b: (m_id, u_id, is_c) for num_b, m_id, u_id, is_c in chunk_cands}
+                        by_mid = {m_id: (m_id, u_id, is_c) for _, m_id, u_id, is_c in chunk_cands}
+                        seq_set = b",".join(num_b for num_b, _, _, _ in chunk_cands)
+                        acc_pages += 1
+                        total_scrolled_pages += 1
+                        if use_uid:
+                            typ_b, body_data = imap.uid("FETCH", seq_set, "(BODY.PEEK[])")
+                        else:
+                            typ_b, body_data = imap.fetch(seq_set, "(BODY.PEEK[])")
+                        if typ_b != "OK" or not body_data:
+                            continue
+                        for idx, item in enumerate(body_data):
+                            if not (
+                                isinstance(item, tuple)
+                                and len(item) >= 2
+                                and isinstance(item[1], bytes)
+                            ):
+                                continue
+                            seq_k = _extract_fetch_msg_token(body_data, idx, use_uid, chunk_cands[0][0])
+                            raw_eml = item[1]
+                            if not raw_eml:
+                                continue
+
+                            parts = _extract_eml_parts(raw_eml)
+                            cand_meta = by_seq.get(seq_k)
+                            if cand_meta is None and parts["message_id"]:
+                                cand_meta = by_mid.get(f"{user}:{parts['message_id']}")
+
+                            if include_toss_scroll and is_toss_payments_email(
+                                parts["sender"],
+                                parts["subject"],
+                                parts["body_html"],
+                                parts["body_text"],
+                            ):
+                                parsed_toss = parse_toss_payments_email(
+                                    subject=parts["subject"],
+                                    sender=parts["sender"],
+                                    date_str=parts["date_str"],
+                                    body_text=parts["body_text"],
+                                    body_html=parts["body_html"],
+                                )
+                                if parsed_toss:
+                                    parsed_toss["recipient_email"] = user
+                                    acc_toss_records.append(parsed_toss)
+                                    if parsed_toss.get("event_type") == "PAYMENT":
+                                        acc_scanned += 1
+                            else:
+                                is_cancel_msg = cand_meta[2] if cand_meta else False
+                                if is_cancel_msg:
+                                    canceled_apps.update(_extract_cancel_approval_nos_from_eml(raw_eml))
+                                else:
+                                    acc_scanned += 1
+                                    extracted = parse_raw_email_bytes_or_text(raw_eml)
+                                    acc_orders.extend(extracted)
+
+                            if cand_meta is not None:
+                                m_id, u_id, _ = cand_meta
+                                new_processed.append(m_id)
+                                new_processed.append(u_id)
             finally:
                 try:
                     imap.logout()
@@ -1929,23 +2044,29 @@ def sync_imap_order_emails(
                     pass
 
             acc_merged = _merge_companion_email_orders(acc_orders)
+            acc_toss_pay_cnt = sum(1 for r in acc_toss_records if r.get("event_type") == "PAYMENT")
+            acc_total_parsed = len(acc_merged) + acc_toss_pay_cnt
             success_accounts += 1
             total_scanned_emails += acc_scanned
             all_orders.extend(acc_orders)
+            raw_toss_records.extend(acc_toss_records)
             acc["last_sync_at"] = acc_now
             acc["last_status"] = "synced"
+            toss_note = f" (토스 {len(acc_toss_records)}통 포함)" if acc_toss_records else ""
             acc["last_message"] = (
-                f"메일함 {acc_checked_count}통 확인 · 주문메일 {acc_scanned}통 분석 · "
-                f"주문 {len(acc_merged)}건 추출"
+                f"최근 {eff_lookback_days}일 메일함 {acc_checked_count}통 스크롤 · "
+                f"주문메일 {acc_scanned}통 분석{toss_note} · 주문 {acc_total_parsed}건 추출"
             )
             account_results.append(
                 {
                     "account_id": aid,
                     "email_address": user,
                     "status": "synced",
+                    "scrolled_pages": acc_pages,
                     "checked_mailbox_count": acc_checked_count,
                     "scanned_emails": acc_scanned,
-                    "parsed_orders_count": len(acc_merged),
+                    "parsed_orders_count": acc_total_parsed,
+                    "parsed_toss_count": len(acc_toss_records),
                     "message": acc["last_message"],
                 }
             )
@@ -1972,6 +2093,7 @@ def sync_imap_order_emails(
                     "account_id": aid,
                     "email_address": user,
                     "status": "error",
+                    "scrolled_pages": acc_pages,
                     "scanned_emails": acc_scanned,
                     "parsed_orders_count": 0,
                     "message": err_txt,
@@ -1993,6 +2115,8 @@ def sync_imap_order_emails(
         return {
             "status": "error",
             "message": f"IMAP 연결 실패: {err_summary}",
+            "lookback_days": eff_lookback_days,
+            "scrolled_pages": total_scrolled_pages,
             "scanned_accounts": len(valid_targets),
             "scanned_emails": total_scanned_emails,
             "parsed_orders_count": 0,
@@ -2004,6 +2128,30 @@ def sync_imap_order_emails(
             "account_results": account_results,
         }
 
+    # 1. Precision-process Toss Payments records first (SalesSlip verification + corp/personal card separation)
+    toss_summary: Dict[str, Any] = {
+        "parsed_toss_count": 0,
+        "verified_slips_count": 0,
+        "corp_total_count": 0,
+        "corp_matched_existing_count": 0,
+        "corp_created_count": 0,
+        "skipped_personal_count": 0,
+        "skipped_canceled_count": 0,
+        "created_tx_ids": [],
+        "newly_stated_tx_ids": [],
+        "updated_tx_ids": [],
+        "items": [],
+    }
+    if raw_toss_records:
+        toss_summary = _process_toss_records_batch(
+            cursor,
+            raw_toss_records,
+            verify_receipt_slip=verify_toss_slips,
+            auto_create_corp_tx=True,
+            archive_dir=archive_dir,
+        )
+
+    # 2. Reconcile general e-commerce & PG order emails (Coupang, NaverPay, Inicis, KCP, EasyPay, etc.)
     if canceled_apps:
         placeholders = ",".join("?" for _ in canceled_apps)
         cursor.execute(
@@ -2030,23 +2178,58 @@ def sync_imap_order_emails(
         orders_list=merged_orders,
         auto_create_after_date=latest_stmt_dt,
     )
-    matched = int(rec_res.get("matched_count") or 0)
-    created_cnt = int(rec_res.get("created_count") or 0)
-    newly_stated_cnt = int(rec_res.get("newly_stated_count") or 0)
-    matched_items = rec_res.get("matched_items") or []
+
+    # 3. Combine unique reconciled transaction counts across Toss + general e-commerce pipelines
+    combined_updated_ids = list(
+        dict.fromkeys(
+            [*(toss_summary.get("updated_tx_ids") or []), *(rec_res.get("updated_tx_ids") or [])]
+        )
+    )
+    combined_created_ids = list(
+        dict.fromkeys(
+            [*(toss_summary.get("created_tx_ids") or []), *(rec_res.get("created_tx_ids") or [])]
+        )
+    )
+    combined_newly_stated_ids = list(
+        dict.fromkeys(
+            [
+                *(toss_summary.get("newly_stated_tx_ids") or []),
+                *(rec_res.get("newly_stated_tx_ids") or []),
+            ]
+        )
+    )
+    matched = len(combined_updated_ids)
+    created_cnt = len(combined_created_ids)
+    newly_stated_cnt = len(combined_newly_stated_ids)
+    total_parsed_orders = len(merged_orders) + sum(
+        1 for r in raw_toss_records if r.get("event_type") == "PAYMENT"
+    )
+
+    matched_items = _merge_recent_matched_items(
+        toss_summary.get("items") or [],
+        rec_res.get("matched_items") or [],
+    )
     merged_history = _merge_recent_matched_items(
         cfg.get("recent_matched_items") or [],
         matched_items,
     )
+
     if created_cnt > 0:
         summary_msg = (
-            f"계정 {success_accounts}/{len(valid_targets)}개 · 주문메일 {total_scanned_emails}통 분석 · "
-            f"주문 {len(merged_orders)}건 확인 · 전표 {matched}건 반영 (신규 전표 {created_cnt}건 자동생성)"
+            f"최근 {eff_lookback_days}일 통합 스크롤 (계정 {success_accounts}/{len(valid_targets)}개) · "
+            f"주문메일 {total_scanned_emails}통 분석 · 주문 {total_parsed_orders}건 확인 · "
+            f"전표 {matched}건 반영 (신규 전표 {created_cnt}건 자동생성)"
         )
     else:
         summary_msg = (
-            f"계정 {success_accounts}/{len(valid_targets)}개 · 주문메일 {total_scanned_emails}통 분석 · "
-            f"주문 {len(merged_orders)}건 확인 · 전표 {matched}건 거래명세서 반영 완료"
+            f"최근 {eff_lookback_days}일 통합 스크롤 (계정 {success_accounts}/{len(valid_targets)}개) · "
+            f"주문메일 {total_scanned_emails}통 분석 · 주문 {total_parsed_orders}건 확인 · "
+            f"전표 {matched}건 거래명세서 반영 완료"
+        )
+    if raw_toss_records:
+        summary_msg += (
+            f" [토스 법인카드 {toss_summary['corp_total_count']}건 반영 · "
+            f"개인카드 {toss_summary['skipped_personal_count']}건 제외]"
         )
     if error_messages:
         summary_msg += f" (일부 계정 오류 {len(error_messages)}건)"
@@ -2067,17 +2250,28 @@ def sync_imap_order_emails(
         "status": "synced",
         "message": summary_msg,
         "last_sync_at": now_str,
+        "lookback_days": eff_lookback_days,
+        "scrolled_pages": total_scrolled_pages,
         "scanned_accounts": success_accounts,
         "scanned_emails": total_scanned_emails,
-        "parsed_orders_count": len(merged_orders),
+        "parsed_orders_count": total_parsed_orders,
         "matched_count": matched,
         "created_count": created_cnt,
         "newly_stated_count": newly_stated_cnt,
-        "created_tx_ids": rec_res.get("created_tx_ids") or [],
-        "newly_stated_tx_ids": rec_res.get("newly_stated_tx_ids") or [],
-        "updated_tx_ids": rec_res.get("updated_tx_ids") or [],
+        "created_tx_ids": combined_created_ids,
+        "newly_stated_tx_ids": combined_newly_stated_ids,
+        "updated_tx_ids": combined_updated_ids,
         "matched_items": matched_items,
         "generated_statements_count": matched,
+        "toss_scroll_summary": {
+            "parsed_toss_count": toss_summary["parsed_toss_count"],
+            "verified_slips_count": toss_summary["verified_slips_count"],
+            "corp_total_count": toss_summary["corp_total_count"],
+            "corp_matched_existing_count": toss_summary["corp_matched_existing_count"],
+            "corp_created_count": toss_summary["corp_created_count"],
+            "skipped_personal_count": toss_summary["skipped_personal_count"],
+            "skipped_canceled_count": toss_summary["skipped_canceled_count"],
+        },
         "account_results": account_results,
     }
 
@@ -2480,6 +2674,7 @@ def _reconcile_or_create_corp_toss_record(
     used_tx_ids: set[int],
     auto_create_corp_tx: bool = True,
     archive_dir: Optional[Path] = None,
+    run_ledger_slip_gen: bool = True,
 ) -> Optional[Dict[str, Any]]:
     """Reconcile a verified corporate Toss Payments record with card_transactions and build slips."""
     amount = int(record.get("billed_amount") or record.get("effective_amount") or record.get("paid_amount") or 0)
@@ -2561,6 +2756,7 @@ def _reconcile_or_create_corp_toss_record(
 
     action = "MATCHED"
     mp_seller = ""
+    biz_changed = False
     if tx_row is None:
         if not auto_create_corp_tx:
             return None
@@ -2619,6 +2815,7 @@ def _reconcile_or_create_corp_toss_record(
         next_biz = ex_biz
         if clean_biz and (not ex_biz or ex_biz == "4118601799"):
             next_biz = clean_biz
+        biz_changed = next_biz != ex_biz
         if "토스" in ex_merch and merch_name and "토스" not in merch_name:
             mp_seller = (
                 f"{merch_name} ({format_biz_reg_no_display(clean_biz)})"
@@ -2650,12 +2847,60 @@ def _reconcile_or_create_corp_toss_record(
         if ("토스" in tx_merch_now and merch_name and merch_name not in item_name)
         else (f"[토스페이먼츠] {item_name}" if "토스페이먼츠" not in item_name else item_name)
     )
+
+    # Preserve multi-item statement if already populated by a companion shopping-mall email
+    cursor.execute(
+        """
+        SELECT archived_file_name, line_items_json, raw_ocr_response
+        FROM receipt_ocr_metadata
+        WHERE tx_id = ? AND source_channel = 'STATEMENT'
+        ORDER BY receipt_id DESC LIMIT 1
+        """,
+        (tx_id,),
+    )
+    prev_stmt = cursor.fetchone()
+    prev_memo = str(tx_row["counterparty_info"] or "").strip()
+    prev_mp_seller = ""
+    prev_parsed_lines: Optional[List[Dict[str, Any]]] = None
+    if prev_stmt:
+        if prev_stmt["line_items_json"]:
+            try:
+                p_li = json.loads(str(prev_stmt["line_items_json"]))
+                if isinstance(p_li, list):
+                    prev_parsed_lines = p_li
+            except Exception:
+                pass
+        if prev_stmt["raw_ocr_response"]:
+            try:
+                p_ocr = json.loads(str(prev_stmt["raw_ocr_response"]))
+                if isinstance(p_ocr, dict):
+                    prev_mp_seller = str(p_ocr.get("marketplace_seller") or "").strip()
+            except Exception:
+                pass
+
+    target_line_items: List[Dict[str, Any]] = [
+        {"item": item_name, "qty": 1, "price": amount, "seller": merch_name}
+    ]
+    target_memo = memo_item[:200]
+    if prev_stmt and prev_parsed_lines and len(prev_parsed_lines) >= 2:
+        target_line_items = prev_parsed_lines
+        if prev_memo:
+            target_memo = prev_memo[:200]
+
+    is_newly_stated = bool(
+        action == "CREATED"
+        or prev_stmt is None
+        or prev_memo != target_memo
+        or (mp_seller and mp_seller != prev_mp_seller)
+        or biz_changed
+    )
+
     stmt_res = generate_electronic_statement_for_tx(
         cursor,
         tx_id=tx_id,
-        item_name=memo_item[:200],
-        line_items=[{"item": item_name, "qty": 1, "price": amount, "seller": merch_name}],
-        marketplace_seller=mp_seller or None,
+        item_name=target_memo,
+        line_items=target_line_items,
+        marketplace_seller=(mp_seller or prev_mp_seller) or None,
         archive_dir=archive_dir,
     )
 
@@ -2681,12 +2926,14 @@ def _reconcile_or_create_corp_toss_record(
         cursor.execute("SELECT * FROM card_transactions WHERE tx_id = ?", (tx_id,))
         latest_tx = dict(cursor.fetchone())
 
-    generate_electronic_slips_for_ledger(cursor, archive_dir=archive_dir)
+    if run_ledger_slip_gen:
+        generate_electronic_slips_for_ledger(cursor, archive_dir=archive_dir)
     final_biz = str(latest_tx.get("biz_reg_no") or "").strip()
     return {
         "tx_id": tx_id,
         "action": action,
         "is_created": action == "CREATED",
+        "is_newly_stated": is_newly_stated,
         "transacted_at": str(latest_tx["transacted_at"]),
         "card_last4": str(latest_tx.get("card_last4") or "0000"),
         "card_label": format_card_label(str(latest_tx.get("card_last4") or "0000")),
@@ -2695,9 +2942,9 @@ def _reconcile_or_create_corp_toss_record(
         "order_no": str(record.get("order_no") or ""),
         "raw_merchant_name": str(latest_tx["raw_merchant_name"]),
         "biz_reg_no": format_biz_reg_no_display(final_biz) if final_biz else "",
-        "marketplace_seller": mp_seller,
+        "marketplace_seller": mp_seller or prev_mp_seller,
         "item_name": stmt_res["item_name"],
-        "line_items_count": 1,
+        "line_items_count": len(target_line_items),
         "total_amount": int(latest_tx["total_amount"]),
         "supply_value": int(latest_tx["supply_value"]),
         "vat_amount": int(latest_tx["vat_amount"]),
@@ -2709,6 +2956,215 @@ def _reconcile_or_create_corp_toss_record(
     }
 
 
+def _process_toss_records_batch(
+    cursor: sqlite3.Cursor,
+    raw_toss_records: List[Dict[str, Any]],
+    *,
+    norm_start: str = "",
+    norm_end: str = "",
+    verify_receipt_slip: bool = True,
+    auto_create_corp_tx: bool = True,
+    archive_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Enrich Toss records via SalesSlip API, separate corp vs personal cards, and reconcile."""
+    cursor.execute(
+        """
+        SELECT DISTINCT approval_no FROM card_transactions
+        WHERE approval_no IS NOT NULL AND TRIM(approval_no) != ''
+          AND reconcile_status != 'CANCELED'
+        """
+    )
+    existing_corp_approvals = {str(r[0]).strip() for r in cursor.fetchall() if r[0]}
+
+    verified_slips_cnt = 0
+    slip_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+    for rec in raw_toss_records:
+        r_url = str(rec.get("receipt_url") or "").strip()
+        if not (verify_receipt_slip and r_url):
+            continue
+        if r_url not in slip_cache:
+            slip_cache[r_url] = fetch_toss_sales_slip_metadata(
+                receipt_url=r_url,
+                recipient_email=str(rec.get("recipient_email") or ""),
+                approval_no=str(rec.get("approval_no") or ""),
+                approved_date=str(rec.get("transacted_at") or "")[:10],
+                amount=int(rec.get("paid_amount") or rec.get("effective_amount") or 0),
+            )
+        slip_meta = slip_cache[r_url]
+        if slip_meta:
+            verified_slips_cnt += 1
+            rec["card_name"] = slip_meta.get("card_name") or rec.get("card_issuer")
+            rec["card_number_masked"] = slip_meta.get("card_number_masked") or ""
+            rec["slip_status"] = slip_meta.get("slip_status") or ""
+            rec["is_cancel"] = bool(slip_meta.get("is_cancel"))
+            rec["has_partial_cancel"] = bool(slip_meta.get("has_partial_cancel"))
+            rec["billed_amount"] = slip_meta.get("billed_amount")
+            rec["supply_value"] = slip_meta.get("supply_value")
+            rec["vat_amount"] = slip_meta.get("vat_amount")
+            rec["tax_free_amount"] = slip_meta.get("tax_free_amount")
+            if slip_meta.get("merchant_name"):
+                rec["merchant_name"] = slip_meta["merchant_name"]
+            if slip_meta.get("biz_reg_no"):
+                rec["biz_reg_no"] = slip_meta["biz_reg_no"]
+            if slip_meta.get("auth_number") and not rec.get("approval_no"):
+                rec["approval_no"] = slip_meta["auth_number"]
+            if slip_meta.get("paid_at"):
+                rec["paid_at"] = slip_meta["paid_at"]
+            if slip_meta.get("order_id") and not rec.get("order_no"):
+                rec["order_no"] = slip_meta["order_id"]
+            if slip_meta.get("product_name") and not rec.get("item_name"):
+                rec["item_name"] = slip_meta["product_name"]
+            if slip_meta.get("sales_slip_url"):
+                rec["sales_slip_url"] = slip_meta["sales_slip_url"]
+
+    # Pass 1: Collect canceled approvals & confirmed corporate card numbers across scanned records
+    canceled_approvals: set[str] = set()
+    confirmed_corp_cards: set[str] = set()
+    for rec in raw_toss_records:
+        app_no = str(rec.get("approval_no") or "").strip()
+        ev = str(rec.get("event_type") or "")
+        s_stat = str(rec.get("slip_status") or "")
+        billed = rec.get("billed_amount")
+        if (
+            ev == "CANCEL"
+            or rec.get("is_cancel")
+            or s_stat == "취소"
+            or (billed is not None and int(billed) == 0)
+        ):
+            if app_no:
+                canceled_approvals.add(app_no)
+
+        c_num = str(rec.get("card_number_masked") or "").strip()
+        if not c_num:
+            continue
+        tail4, bin6 = _extract_card_tail4_and_bin6(c_num)
+        if tail4 and is_blocked_personal_card_code(tail4, archive_dir=archive_dir):
+            continue
+        if bin6 and any(bin6.startswith(p) for p in _TOSS_PERSONAL_CARD_BIN6_PREFIXES):
+            continue
+        buyer_probe = f"{rec.get('buyer_greeting') or ''} {rec.get('item_name') or ''}"
+        if (
+            (tail4 and match_registered_corp_card_code(tail4, archive_dir=archive_dir))
+            or (app_no and app_no in existing_corp_approvals)
+            or (bin6 and any(bin6.startswith(p) for p in _TOSS_CORP_CARD_BIN6_PREFIXES))
+            or _CORP_BUYER_OR_ITEM_RE.search(buyer_probe)
+        ):
+            confirmed_corp_cards.add(c_num)
+
+    # Mark any previously auto-created rows canceled if full cancellation was discovered
+    if canceled_approvals:
+        ph = ",".join("?" for _ in canceled_approvals)
+        cursor.execute(
+            f"""
+            UPDATE card_transactions
+            SET reconcile_status = 'CANCELED', updated_at = CURRENT_TIMESTAMP
+            WHERE approval_no IN ({ph})
+              AND reconcile_status IN ('EMAIL_ORDER', 'OCR_MATCHED')
+            """,
+            tuple(canceled_approvals),
+        )
+
+    # Pass 2: Deduplicate payment records (oldest-to-newest) and reconcile corporate purchases
+    payment_records = [r for r in reversed(raw_toss_records) if r.get("event_type") == "PAYMENT"]
+    seen_payment_keys: set[str] = set()
+    used_tx_ids: set[int] = set()
+    skipped_personal = 0
+    skipped_canceled = 0
+    matched_existing_cnt = 0
+    created_cnt = 0
+    created_ids: List[int] = []
+    newly_stated_ids: List[int] = []
+    result_items: List[Dict[str, Any]] = []
+
+    for rec in payment_records:
+        dt_str = str(rec.get("paid_at") or rec.get("transacted_at") or "")[:10]
+        if len(norm_start) == 10 and dt_str and dt_str < norm_start:
+            continue
+        if len(norm_end) == 10 and dt_str and dt_str > norm_end:
+            continue
+
+        app_no = str(rec.get("approval_no") or "").strip()
+        ord_no = str(rec.get("order_no") or "").strip()
+        pay_key = app_no or ord_no or f"{dt_str}|{rec.get('paid_amount')}|{rec.get('item_name')}"
+        if pay_key in seen_payment_keys:
+            continue
+        seen_payment_keys.add(pay_key)
+
+        billed = rec.get("billed_amount")
+        if (app_no and app_no in canceled_approvals) or (billed is not None and int(billed) <= 0):
+            skipped_canceled += 1
+            continue
+
+        ownership = classify_toss_card_ownership(
+            rec,
+            confirmed_corp_card_numbers=confirmed_corp_cards,
+            existing_corp_approvals=existing_corp_approvals,
+            archive_dir=archive_dir,
+        )
+        allow_create = auto_create_corp_tx
+        if not ownership["is_corporate"]:
+            # If slip metadata was unreachable (no masked card number), still allow matching
+            # an existing ledger row by (amount, date ±3d) without auto-creating new rows
+            c_masked = str(rec.get("card_number_masked") or "").strip()
+            eff_amt = int(
+                rec.get("billed_amount") or rec.get("effective_amount") or rec.get("paid_amount") or 0
+            )
+            if not c_masked and eff_amt > 0 and len(dt_str) == 10:
+                ownership = {
+                    "is_corporate": True,
+                    "reason": "existing_ledger_fallback",
+                    "card_last4": "0000",
+                    "issuer_code": _infer_corp_issuer_code(
+                        str(rec.get("card_name") or rec.get("card_issuer") or "")
+                    ),
+                    "should_auto_register": False,
+                }
+                allow_create = False
+            else:
+                skipped_personal += 1
+                continue
+
+        outcome = _reconcile_or_create_corp_toss_record(
+            cursor,
+            record=rec,
+            ownership=ownership,
+            used_tx_ids=used_tx_ids,
+            auto_create_corp_tx=allow_create,
+            archive_dir=archive_dir,
+            run_ledger_slip_gen=False,
+        )
+        if outcome:
+            tid = int(outcome["tx_id"])
+            if outcome["action"] == "CREATED":
+                created_cnt += 1
+                created_ids.append(tid)
+            else:
+                matched_existing_cnt += 1
+            if outcome.get("is_newly_stated"):
+                newly_stated_ids.append(tid)
+            result_items.append(outcome)
+        elif ownership.get("reason") == "existing_ledger_fallback":
+            skipped_personal += 1
+
+    if result_items:
+        generate_electronic_slips_for_ledger(cursor, archive_dir=archive_dir)
+
+    result_items.sort(key=lambda x: str(x.get("transacted_at") or ""), reverse=True)
+    return {
+        "parsed_toss_count": len(raw_toss_records),
+        "verified_slips_count": verified_slips_cnt,
+        "corp_total_count": matched_existing_cnt + created_cnt,
+        "corp_matched_existing_count": matched_existing_cnt,
+        "corp_created_count": created_cnt,
+        "skipped_personal_count": skipped_personal,
+        "skipped_canceled_count": skipped_canceled,
+        "created_tx_ids": created_ids,
+        "newly_stated_tx_ids": newly_stated_ids,
+        "updated_tx_ids": [int(x["tx_id"]) for x in result_items],
+        "items": result_items,
+    }
+
+
 def scroll_imap_toss_payments_emails(
     cursor: sqlite3.Cursor,
     archive_dir: Optional[Path] = None,
@@ -2716,7 +3172,7 @@ def scroll_imap_toss_payments_emails(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     page_size: int = 50,
-    max_pages: int = 20,
+    max_pages: int = 50,
     verify_receipt_slip: bool = True,
     auto_create_corp_tx: bool = True,
 ) -> Dict[str, Any]:
@@ -2752,22 +3208,12 @@ def scroll_imap_toss_payments_emails(
         }
 
     eff_page_size = max(10, min(200, int(page_size or 50)))
-    eff_max_pages = max(1, min(100, int(max_pages or 20)))
+    eff_max_pages = max(1, min(200, int(max_pages or 50)))
     norm_start = _normalize_datetime_str(start_date)[:10] if start_date else ""
     norm_end = _normalize_datetime_str(end_date)[:10] if end_date else ""
 
-    cursor.execute(
-        """
-        SELECT DISTINCT approval_no FROM card_transactions
-        WHERE approval_no IS NOT NULL AND TRIM(approval_no) != ''
-          AND reconcile_status != 'CANCELED'
-        """
-    )
-    existing_corp_approvals = {str(r[0]).strip() for r in cursor.fetchall() if r[0]}
-
     total_pages = 0
     total_scanned_msgs = 0
-    verified_slips_cnt = 0
     seen_msg_keys: set[str] = set()
     raw_toss_records: List[Dict[str, Any]] = []
     account_results: List[Dict[str, Any]] = []
@@ -2786,7 +3232,7 @@ def scroll_imap_toss_payments_emails(
         acc_parsed = 0
 
         try:
-            imap = imaplib.IMAP4_SSL(host, port, timeout=25.0)
+            imap = imaplib.IMAP4_SSL(host, port, timeout=30.0)
             try:
                 imap.login(user, password)
                 mailboxes = _discover_imap_scroll_mailboxes(imap, conf_mbox)
@@ -2796,7 +3242,7 @@ def scroll_imap_toss_payments_emails(
                     if typ_sel != "OK":
                         continue
 
-                    search_tokens: List[str] = ['FROM', '"tosspayments"']
+                    search_tokens: List[str] = ["FROM", '"tosspayments"']
                     if len(norm_start) == 10:
                         search_tokens.extend(["SINCE", _format_imap_date_token(norm_start, 0)])
                     if len(norm_end) == 10:
@@ -2906,144 +3352,16 @@ def scroll_imap_toss_payments_emails(
             "account_results": account_results,
         }
 
-    # Enrich records via Toss official receipt slip API (deduplicating slip calls per receipt_url)
-    slip_cache: Dict[str, Optional[Dict[str, Any]]] = {}
-    for rec in raw_toss_records:
-        r_url = str(rec.get("receipt_url") or "").strip()
-        if not (verify_receipt_slip and r_url):
-            continue
-        if r_url not in slip_cache:
-            slip_cache[r_url] = fetch_toss_sales_slip_metadata(
-                receipt_url=r_url,
-                recipient_email=str(rec.get("recipient_email") or ""),
-                approval_no=str(rec.get("approval_no") or ""),
-                approved_date=str(rec.get("transacted_at") or "")[:10],
-                amount=int(rec.get("paid_amount") or rec.get("effective_amount") or 0),
-            )
-        slip_meta = slip_cache[r_url]
-        if slip_meta:
-            verified_slips_cnt += 1
-            rec["card_name"] = slip_meta.get("card_name") or rec.get("card_issuer")
-            rec["card_number_masked"] = slip_meta.get("card_number_masked") or ""
-            rec["slip_status"] = slip_meta.get("slip_status") or ""
-            rec["is_cancel"] = bool(slip_meta.get("is_cancel"))
-            rec["has_partial_cancel"] = bool(slip_meta.get("has_partial_cancel"))
-            rec["billed_amount"] = slip_meta.get("billed_amount")
-            rec["supply_value"] = slip_meta.get("supply_value")
-            rec["vat_amount"] = slip_meta.get("vat_amount")
-            rec["tax_free_amount"] = slip_meta.get("tax_free_amount")
-            if slip_meta.get("merchant_name"):
-                rec["merchant_name"] = slip_meta["merchant_name"]
-            if slip_meta.get("biz_reg_no"):
-                rec["biz_reg_no"] = slip_meta["biz_reg_no"]
-            if slip_meta.get("auth_number") and not rec.get("approval_no"):
-                rec["approval_no"] = slip_meta["auth_number"]
-            if slip_meta.get("paid_at"):
-                rec["paid_at"] = slip_meta["paid_at"]
-            if slip_meta.get("order_id") and not rec.get("order_no"):
-                rec["order_no"] = slip_meta["order_id"]
-            if slip_meta.get("product_name") and not rec.get("item_name"):
-                rec["item_name"] = slip_meta["product_name"]
-            if slip_meta.get("sales_slip_url"):
-                rec["sales_slip_url"] = slip_meta["sales_slip_url"]
-
-    # Pass 1: Collect canceled approvals & confirmed corporate card numbers across the mailbox
-    canceled_approvals: set[str] = set()
-    confirmed_corp_cards: set[str] = set()
-    for rec in raw_toss_records:
-        app_no = str(rec.get("approval_no") or "").strip()
-        ev = str(rec.get("event_type") or "")
-        s_stat = str(rec.get("slip_status") or "")
-        billed = rec.get("billed_amount")
-        if ev == "CANCEL" or rec.get("is_cancel") or s_stat == "취소" or (billed is not None and int(billed) == 0):
-            if app_no:
-                canceled_approvals.add(app_no)
-
-        c_num = str(rec.get("card_number_masked") or "").strip()
-        if not c_num:
-            continue
-        tail4, bin6 = _extract_card_tail4_and_bin6(c_num)
-        if tail4 and is_blocked_personal_card_code(tail4, archive_dir=archive_dir):
-            continue
-        if bin6 and any(bin6.startswith(p) for p in _TOSS_PERSONAL_CARD_BIN6_PREFIXES):
-            continue
-        buyer_probe = f"{rec.get('buyer_greeting') or ''} {rec.get('item_name') or ''}"
-        if (
-            (tail4 and match_registered_corp_card_code(tail4, archive_dir=archive_dir))
-            or (app_no and app_no in existing_corp_approvals)
-            or (bin6 and any(bin6.startswith(p) for p in _TOSS_CORP_CARD_BIN6_PREFIXES))
-            or _CORP_BUYER_OR_ITEM_RE.search(buyer_probe)
-        ):
-            confirmed_corp_cards.add(c_num)
-
-    # Mark any previously auto-created rows canceled if full cancellation was discovered
-    if canceled_approvals:
-        ph = ",".join("?" for _ in canceled_approvals)
-        cursor.execute(
-            f"""
-            UPDATE card_transactions
-            SET reconcile_status = 'CANCELED', updated_at = CURRENT_TIMESTAMP
-            WHERE approval_no IN ({ph})
-              AND reconcile_status IN ('EMAIL_ORDER', 'OCR_MATCHED')
-            """,
-            tuple(canceled_approvals),
-        )
-
-    # Pass 2: Deduplicate payment records (oldest-to-newest) and reconcile corporate purchases
-    payment_records = [r for r in reversed(raw_toss_records) if r.get("event_type") == "PAYMENT"]
-    seen_payment_keys: set[str] = set()
-    used_tx_ids: set[int] = set()
-    skipped_personal = 0
-    skipped_canceled = 0
-    matched_existing_cnt = 0
-    created_cnt = 0
-    result_items: List[Dict[str, Any]] = []
-
-    for rec in payment_records:
-        dt_str = str(rec.get("paid_at") or rec.get("transacted_at") or "")[:10]
-        if len(norm_start) == 10 and dt_str and dt_str < norm_start:
-            continue
-        if len(norm_end) == 10 and dt_str and dt_str > norm_end:
-            continue
-
-        app_no = str(rec.get("approval_no") or "").strip()
-        ord_no = str(rec.get("order_no") or "").strip()
-        pay_key = app_no or ord_no or f"{dt_str}|{rec.get('paid_amount')}|{rec.get('item_name')}"
-        if pay_key in seen_payment_keys:
-            continue
-        seen_payment_keys.add(pay_key)
-
-        billed = rec.get("billed_amount")
-        if (app_no and app_no in canceled_approvals) or (billed is not None and int(billed) <= 0):
-            skipped_canceled += 1
-            continue
-
-        ownership = classify_toss_card_ownership(
-            rec,
-            confirmed_corp_card_numbers=confirmed_corp_cards,
-            existing_corp_approvals=existing_corp_approvals,
-            archive_dir=archive_dir,
-        )
-        if not ownership["is_corporate"]:
-            skipped_personal += 1
-            continue
-
-        outcome = _reconcile_or_create_corp_toss_record(
-            cursor,
-            record=rec,
-            ownership=ownership,
-            used_tx_ids=used_tx_ids,
-            auto_create_corp_tx=auto_create_corp_tx,
-            archive_dir=archive_dir,
-        )
-        if outcome:
-            if outcome["action"] == "CREATED":
-                created_cnt += 1
-            else:
-                matched_existing_cnt += 1
-            result_items.append(outcome)
-
-    result_items.sort(key=lambda x: str(x.get("transacted_at") or ""), reverse=True)
+    batch_res = _process_toss_records_batch(
+        cursor,
+        raw_toss_records,
+        norm_start=norm_start,
+        norm_end=norm_end,
+        verify_receipt_slip=verify_receipt_slip,
+        auto_create_corp_tx=auto_create_corp_tx,
+        archive_dir=archive_dir,
+    )
+    result_items = batch_res["items"]
     if result_items:
         merged_hist = _merge_recent_matched_items(
             cfg.get("recent_matched_items") or [],
@@ -3051,7 +3369,11 @@ def scroll_imap_toss_payments_emails(
         )
         save_email_watcher_config({"recent_matched_items": merged_hist}, archive_dir=archive_dir)
 
-    total_corp = matched_existing_cnt + created_cnt
+    matched_existing_cnt = int(batch_res["corp_matched_existing_count"])
+    created_cnt = int(batch_res["corp_created_count"])
+    skipped_personal = int(batch_res["skipped_personal_count"])
+    skipped_canceled = int(batch_res["skipped_canceled_count"])
+    total_corp = int(batch_res["corp_total_count"])
     summary_msg = (
         f"토스페이먼츠 메일 스크롤링 완료 ({total_pages}페이지 · {total_scanned_msgs}통 탐색 · "
         f"결제메일 {len(raw_toss_records)}건 분석): "
@@ -3067,7 +3389,7 @@ def scroll_imap_toss_payments_emails(
         "scrolled_pages": total_pages,
         "scanned_messages": total_scanned_msgs,
         "parsed_toss_count": len(raw_toss_records),
-        "verified_slips_count": verified_slips_cnt,
+        "verified_slips_count": int(batch_res["verified_slips_count"]),
         "corp_total_count": total_corp,
         "corp_matched_existing_count": matched_existing_cnt,
         "corp_created_count": created_cnt,

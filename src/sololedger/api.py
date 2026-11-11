@@ -103,12 +103,14 @@ async def _background_email_watcher_loop() -> None:
                 continue
             last_run_ts = now_ts
 
+            poll_lb = min(int(cfg.get("lookback_days") or 365), 14)
+
             def _poll_once() -> None:
                 init_db()
                 conn = get_connection()
                 cur = conn.cursor()
                 try:
-                    sync_imap_order_emails(cur)
+                    sync_imap_order_emails(cur, max_messages=300, lookback_days=poll_lb)
                     conn.commit()
                 finally:
                     conn.close()
@@ -1463,12 +1465,19 @@ async def sync_email_orders_endpoint(
     x_api_key: Optional[str] = Header(default=None),
     sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
 ):
-    """Immediately scan all enabled IMAP mailboxes (or one account_id) and reconcile."""
+    """Paginate-scroll enabled IMAP mailboxes across lookback_days (with Toss precision) and reconcile."""
     _verify_api_key(x_api_key, sololedger_api_key)
-    force = bool(payload.get("force_rescan", False)) if isinstance(payload, dict) else False
-    max_msgs = int(payload.get("max_messages", 600)) if isinstance(payload, dict) else 600
-    acc_id = str(payload.get("account_id") or "").strip() if isinstance(payload, dict) else ""
-    rescan_days = int(payload.get("recent_rescan_days", 7)) if isinstance(payload, dict) else 7
+    body = payload if isinstance(payload, dict) else {}
+    force = bool(body.get("force_rescan", False))
+    max_msgs = int(body.get("max_messages", 0))
+    acc_id = str(body.get("account_id") or "").strip()
+    rescan_days = int(body.get("recent_rescan_days", 7))
+    include_toss = bool(body.get("include_toss_scroll", True))
+    verify_slips = bool(body.get("verify_toss_slips", True))
+    req_lookback: Optional[int] = None
+    if body.get("lookback_days") is not None:
+        req_lookback = max(1, min(1095, int(body["lookback_days"])))
+        save_email_watcher_config({"lookback_days": req_lookback})
 
     def _run_sync() -> Dict[str, Any]:
         init_db()
@@ -1481,6 +1490,9 @@ async def sync_email_orders_endpoint(
                 force_rescan=force,
                 account_id=acc_id or None,
                 recent_rescan_days=rescan_days,
+                lookback_days=req_lookback,
+                include_toss_scroll=include_toss,
+                verify_toss_slips=verify_slips,
             )
             conn.commit()
             return res
@@ -1503,7 +1515,7 @@ async def scroll_toss_payments_email_endpoint(
     start_dt = str(body.get("start_date") or "").strip()
     end_dt = str(body.get("end_date") or "").strip()
     page_size = int(body.get("page_size", 50))
-    max_pages = int(body.get("max_pages", 20))
+    max_pages = int(body.get("max_pages", 50))
     verify_slip = bool(body.get("verify_receipt_slip", True))
     auto_create = bool(body.get("auto_create_corp_tx", True))
 

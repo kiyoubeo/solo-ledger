@@ -58,3 +58,4 @@
 | 2026-11-10 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/dashboard.py, src/sololedger/merchant_service.py (+4 files)` | 주식회사 디자인도하다(인테리어·내장목공사 및 디자인업) 맞춤 공사원가 계정코드(501·511) 및 자동 소명 적요 규칙 적용 | `PASSED` |
 | 2026-11-10 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/dashboard.py (+1 files)` | 대시보드 계정과목 요약표 클릭 시 분류된 전표 목록 펼침 및 필터 기능 추가 | `PASSED` |
 | 2026-11-11 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/dashboard.py (+3 files)` | 이메일 내역 법인카드 토스페이먼츠 구매내역 페이지 연속 스크롤링·매출전표 카드번호 검증 및 거래명세서 자동반영 구현 | `PASSED` |
+| 2026-11-11 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/dashboard.py (+2 files)` | 이메일 1년치(365일) 무제한 페이지 스크롤 및 토스페이먼츠 매출전표 정밀정리 통합 | `PASSED` |

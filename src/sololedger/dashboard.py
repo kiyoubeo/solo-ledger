@@ -1600,9 +1600,9 @@ def render_dashboard_html(
            style="margin-bottom:10px; font-size:13px; line-height:1.55;
                   border:2px solid #2563eb; background:#eff6ff;">
         <div style="display:flex; justify-content:space-between; align-items:center;
-                    flex-wrap:wrap; gap:8px; margin-bottom:8px;">
+                    flex-wrap:wrap; gap:8px; margin-bottom:6px;">
           <div style="font-weight:800; color:#1e3a8a; font-size:14px;">
-            📬 연결된 이메일 계정 목록 (네이버 · Gmail · 카카오 · 회사메일 동시 감시)
+            📬 연결된 이메일 계정 목록 (전체 쇼핑몰·PG + 토스페이먼츠 매출전표 통합 스크롤)
           </div>
           <div style="display:flex; gap:6px; flex-wrap:wrap;">
             <button id="btn-email-sync-all" onclick="triggerEmailSyncNow(false, '', this)">
@@ -1612,6 +1612,11 @@ def render_dashboard_html(
               🔄 전체 강제 재매칭
             </button>
           </div>
+        </div>
+        <div style="font-size:12px; color:#334155; margin-bottom:8px;">
+          설정한 <b>스캔 기간(기본 365일)</b> 동안의 전체보관함·받은편지함을 통수 제한 없이
+          페이지 단위로 끝까지 스크롤하여 쿠팡·네이버페이·이니시스·KCP 주문내역과
+          <b>토스페이먼츠 매출전표(법인카드 판별·사업자번호·부가세 검증)</b>를 한 번에 정리합니다.
         </div>
 
         <div id="email-accounts-list"
@@ -1623,10 +1628,16 @@ def render_dashboard_html(
         <div style="display:flex; align-items:center; justify-content:space-between;
                     flex-wrap:wrap; gap:8px; background:#dbeafe; padding:8px 10px;
                     border-radius:6px; font-size:12px;">
-          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+          <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
             <span>스캔 기간(일):</span>
-            <input type="text" id="email-lookback-days" value="60" style="width:54px;" />
-            <span>감지 주기(초):</span>
+            <input type="text" id="email-lookback-days" value="365" style="width:54px;" />
+            <button type="button" class="secondary" style="padding:2px 6px; font-size:11px;"
+                    onclick="setEmailLookbackPreset(60)">60일</button>
+            <button type="button" class="secondary" style="padding:2px 6px; font-size:11px;"
+                    onclick="setEmailLookbackPreset(180)">180일</button>
+            <button type="button" class="secondary" style="padding:2px 6px; font-size:11px; font-weight:700;"
+                    onclick="setEmailLookbackPreset(365)">1년(365일)</button>
+            <span style="margin-left:4px;">감지 주기(초):</span>
             <input type="text" id="email-poll-interval" value="120" style="width:60px;" />
             <label style="font-weight:700; color:#1e40af; cursor:pointer;">
               <input type="checkbox" id="email-auto-poll" /> 실시간 자동 감지 ON
@@ -1641,37 +1652,37 @@ def render_dashboard_html(
              style="margin-top:8px; font-size:12px; font-weight:700; color:#1e40af;"></div>
       </div>
 
-      <div id="toss-scroll-panel" class="slip-box"
-           style="margin-bottom:10px; font-size:13px; line-height:1.55;
-                  border:2px solid #0284c7; background:#f0f9ff;">
-        <div style="display:flex; justify-content:space-between; align-items:center;
-                    flex-wrap:wrap; gap:8px; margin-bottom:6px;">
-          <div style="font-weight:800; color:#0369a1; font-size:13.5px;">
-            🟦 토스페이먼츠(Toss Payments) 법인카드 구매내역 메일 전체 스크롤링
+      <details id="toss-scroll-panel" class="slip-box"
+               style="margin-bottom:10px; font-size:13px; line-height:1.55;
+                      border:1px solid #0284c7; background:#f0f9ff;">
+        <summary style="cursor:pointer; font-weight:800; color:#0369a1; font-size:13px;">
+          🟦 [보조] 토스페이먼츠(Toss Payments) 단독 기간지정 스크롤링 (위 통합 스캔에 이미 자동 포함됨)
+        </summary>
+        <div style="margin-top:8px;">
+          <div style="display:flex; justify-content:space-between; align-items:center;
+                      flex-wrap:wrap; gap:8px; margin-bottom:6px;">
+            <div style="font-size:12px; color:#334155;">
+              특정 시작일~종료일 구간의 토스페이먼츠 메일만 별도로 다시 검증하고 싶을 때 사용하세요.
+            </div>
+            <button id="btn-toss-email-scroll" style="background:#0284c7; font-weight:700;"
+                    onclick="triggerTossEmailScroll(this)">
+              🔍 법인카드 토스페이먼츠 메일 스크롤링 실행
+            </button>
           </div>
-          <button id="btn-toss-email-scroll" style="background:#0284c7; font-weight:700;"
-                  onclick="triggerTossEmailScroll(this)">
-            🔍 법인카드 토스페이먼츠 메일 스크롤링 실행
-          </button>
+          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:12px;">
+            <span>탐색 시작일(선택):</span>
+            <input type="date" id="toss-scroll-start" style="width:136px;" />
+            <span>종료일(선택):</span>
+            <input type="date" id="toss-scroll-end" style="width:136px;" />
+            <span style="color:#64748b; font-size:11px;">(비워두면 메일함 전체 기간 연속 스크롤)</span>
+          </div>
+          <div id="toss-scroll-status"
+               style="margin-top:8px; font-size:12px; font-weight:700; color:#0369a1;"></div>
+          <div id="toss-scroll-results"
+               style="display:none; margin-top:8px; background:#ffffff; border:1px solid #bae6fd;
+                      border-radius:6px; padding:6px; max-height:200px; overflow-y:auto;"></div>
         </div>
-        <div style="font-size:12px; color:#334155; margin-bottom:8px;">
-          연결된 메일함(전체보관함·받은편지함)을 페이지 단위로 연속 스크롤하여 토스페이먼츠 결제 메일과
-          매출전표 카드번호·사업자번호를 검증하고, 개인카드는 자동 제외한 뒤
-          <b>법인카드 구매내역만</b> 전표·거래명세서로 반영합니다.
-        </div>
-        <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:12px;">
-          <span>탐색 시작일(선택):</span>
-          <input type="date" id="toss-scroll-start" style="width:136px;" />
-          <span>종료일(선택):</span>
-          <input type="date" id="toss-scroll-end" style="width:136px;" />
-          <span style="color:#64748b; font-size:11px;">(비워두면 메일함 전체 기간 연속 스크롤)</span>
-        </div>
-        <div id="toss-scroll-status"
-             style="margin-top:8px; font-size:12px; font-weight:700; color:#0369a1;"></div>
-        <div id="toss-scroll-results"
-             style="display:none; margin-top:8px; background:#ffffff; border:1px solid #bae6fd;
-                    border-radius:6px; padding:6px; max-height:200px; overflow-y:auto;"></div>
-      </div>
+      </details>
 
       <div class="slip-box"
            style="margin-bottom:10px; font-size:13px; line-height:1.55;
@@ -2870,13 +2881,17 @@ def render_dashboard_html(
       rows += '</tbody></table>';
       box.innerHTML = rows;
     }}
+    function setEmailLookbackPreset(days) {{
+      const el = document.getElementById('email-lookback-days');
+      if (el) el.value = String(days);
+    }}
     async function refreshEmailWatcherState() {{
       const res = await fetch('/api/v1/scraper/email-config');
       if (!res.ok) return null;
       const cfg = await res.json();
       renderEmailAccountsList(cfg);
       renderEmailMatchedList(cfg);
-      document.getElementById('email-lookback-days').value = cfg.lookback_days || 60;
+      document.getElementById('email-lookback-days').value = cfg.lookback_days || 365;
       document.getElementById('email-poll-interval').value = cfg.poll_interval_sec || 120;
       document.getElementById('email-auto-poll').checked = !!cfg.auto_poll_enabled;
       const st = document.getElementById('email-sync-status');
@@ -2926,7 +2941,7 @@ def render_dashboard_html(
     async function saveGlobalEmailPollSettings() {{
       const st = document.getElementById('email-sync-status');
       const bodyObj = {{
-        lookback_days: parseInt(document.getElementById('email-lookback-days').value || '60', 10),
+        lookback_days: parseInt(document.getElementById('email-lookback-days').value || '365', 10),
         poll_interval_sec: parseInt(document.getElementById('email-poll-interval').value || '120', 10),
         auto_poll_enabled: document.getElementById('email-auto-poll').checked
       }};
@@ -2963,7 +2978,7 @@ def render_dashboard_html(
           imap_port: parseInt(document.getElementById('email-imap-port').value || '993', 10),
           email_address: addr,
           app_password: document.getElementById('email-app-password').value,
-          lookback_days: parseInt(document.getElementById('email-lookback-days').value || '60', 10),
+          lookback_days: parseInt(document.getElementById('email-lookback-days').value || '365', 10),
           poll_interval_sec: parseInt(document.getElementById('email-poll-interval').value || '120', 10),
           auto_poll_enabled: document.getElementById('email-auto-poll').checked,
           sync_now: !!syncNow
@@ -3004,19 +3019,25 @@ def render_dashboard_html(
     async function triggerEmailSyncNow(forceRescan, accountId, btnEl) {{
       const st = document.getElementById('email-sync-status');
       const prevTxt = btnEl ? btnEl.textContent : '';
+      const lbDays = parseInt(document.getElementById('email-lookback-days').value || '365', 10) || 365;
       if (btnEl) {{
         btnEl.disabled = true;
-        btnEl.textContent = '⏳ 스캔 중...';
+        btnEl.textContent = '⏳ 통합 스크롤 중...';
       }}
       st.style.color = '#1e40af';
       st.textContent = accountId
-        ? '⏳ 선택한 이메일 계정에 접속하여 최신 주문·결제 메일을 스캔 중입니다...'
-        : '⏳ 연결된 모든 활성 이메일 계정을 통합 스캔 중입니다...';
+        ? `⏳ 선택한 이메일 계정의 최근 ${{lbDays}}일 주문·결제 및 토스페이먼츠 메일을 통합 스크롤 중입니다...`
+        : `⏳ 연결된 모든 활성 계정의 최근 ${{lbDays}}일 주문·결제 및 토스페이먼츠 메일을 통합 스크롤 중입니다...`;
       try {{
         const res = await fetch('/api/v1/scraper/email-sync', {{
           method: 'POST',
           headers: API_HEADERS,
-          body: JSON.stringify({{ force_rescan: !!forceRescan, account_id: accountId || '' }})
+          body: JSON.stringify({{
+            force_rescan: !!forceRescan,
+            account_id: accountId || '',
+            lookback_days: lbDays,
+            include_toss_scroll: true
+          }})
         }});
         const sr = await res.json();
         await refreshEmailWatcherState();
@@ -3048,8 +3069,11 @@ def render_dashboard_html(
     async function openTossScrollModal() {{
       await openEmailOrderModal();
       const pnl = document.getElementById('toss-scroll-panel');
-      if (pnl && pnl.scrollIntoView) {{
-        pnl.scrollIntoView({{ behavior: 'smooth', block: 'nearest' }});
+      if (pnl) {{
+        pnl.open = true;
+        if (pnl.scrollIntoView) {{
+          pnl.scrollIntoView({{ behavior: 'smooth', block: 'nearest' }});
+        }}
       }}
     }}
     async function triggerTossEmailScroll(btnEl) {{
@@ -3073,7 +3097,7 @@ def render_dashboard_html(
             start_date: sDt || undefined,
             end_date: eDt || undefined,
             page_size: 50,
-            max_pages: 20,
+            max_pages: 50,
             verify_receipt_slip: true,
             auto_create_corp_tx: true
           }})
