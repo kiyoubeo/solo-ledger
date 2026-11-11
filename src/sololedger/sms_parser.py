@@ -247,6 +247,62 @@ def remove_corp_card(
     )
 
 
+def match_card_code_pattern(candidate: str, pattern: str) -> bool:
+    """Return True if a 4-char card tail (e.g. '308*' or '3081') matches pattern."""
+    a = str(candidate or "").strip()
+    b = str(pattern or "").strip()
+    if not a or not b or a == "0000" or b == "0000":
+        return False
+    if a == b:
+        return True
+    if len(a) != 4 or len(b) != 4:
+        return False
+    # Allow 3-digit + 1-wildcard (such as Toss sales-slip '308*') to match 4-digit '3081'
+    a_digits = sum(ch.isdigit() for ch in a)
+    b_digits = sum(ch.isdigit() for ch in b)
+    if not ((a_digits == 4 and b_digits >= 3) or (b_digits == 4 and a_digits >= 3)):
+        return False
+    return all(ca == cb or ca == "*" or cb == "*" for ca, cb in zip(a, b))
+
+
+def match_registered_corp_card_code(
+    card_last4: str,
+    archive_dir: Optional[Path] = None,
+) -> Optional[str]:
+    """Return canonical registered card_last4 if candidate matches an enabled corp card."""
+    key = str(card_last4 or "").strip()
+    if not key or key == "0000":
+        return None
+    policy = load_corp_card_policy(archive_dir)
+    reg_list = [
+        c
+        for c in (policy.get("registered_corp_cards") or [])
+        if isinstance(c, dict) and c.get("enabled", True)
+    ]
+    reg_codes = [str(c.get("card_last4") or "").strip() for c in reg_list if c.get("card_last4")]
+    if key in reg_codes:
+        return key
+    matches = [rc for rc in reg_codes if match_card_code_pattern(key, rc)]
+    if len(matches) == 1:
+        return matches[0]
+    return matches[0] if matches else None
+
+
+def is_blocked_personal_card_code(
+    card_last4: str,
+    archive_dir: Optional[Path] = None,
+) -> bool:
+    """Return True if card_last4 matches any blocked personal card code/pattern."""
+    key = str(card_last4 or "").strip()
+    if not key or key == "0000":
+        return False
+    policy = load_corp_card_policy(archive_dir)
+    blocked_codes = [str(x).strip() for x in (policy.get("blocked_personal_cards") or []) if x]
+    if key in blocked_codes:
+        return True
+    return any(match_card_code_pattern(key, bc) for bc in blocked_codes)
+
+
 def is_allowed_corporate_card(
     card_last4: str,
     raw_text: str = "",
@@ -267,9 +323,9 @@ def is_allowed_corporate_card(
     reg_codes = {str(c.get("card_last4") or "").strip() for c in reg_list if c.get("card_last4")}
     blocked_codes = {str(x).strip() for x in (policy.get("blocked_personal_cards") or []) if x}
 
-    if key in reg_codes:
+    if key in reg_codes or match_registered_corp_card_code(key, archive_dir=archive_dir):
         return True
-    if key in blocked_codes:
+    if key in blocked_codes or is_blocked_personal_card_code(key, archive_dir=archive_dir):
         return False
 
     if is_statement_upload:

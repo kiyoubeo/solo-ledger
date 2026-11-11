@@ -15,6 +15,8 @@ import json
 import os
 import re
 import sqlite3
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta
 from email.header import decode_header
 from pathlib import Path
@@ -27,9 +29,18 @@ from sololedger.scraper_service import (
     extract_coupang_orders_from_content,
     extract_rows_from_html_table,
     format_biz_reg_no_display,
+    generate_electronic_slips_for_ledger,
+    generate_electronic_statement_for_tx,
     reconcile_scraped_ecommerce_orders,
 )
-from sololedger.sms_parser import format_card_label
+from sololedger.sms_parser import (
+    format_card_label,
+    is_blocked_personal_card_code,
+    load_corp_card_policy,
+    match_registered_corp_card_code,
+    register_corp_card,
+)
+from sololedger.tax_engine import calculate_supply_and_vat, evaluate_tax_rules
 
 IMAP_PROVIDER_PRESETS: Dict[str, Dict[str, Any]] = {
     "NAVER": {
@@ -72,14 +83,14 @@ _ORDER_EMAIL_SUBJECT_RE = re.compile(
 )
 
 _CANCELED_EMAIL_SUBJECT_RE = re.compile(
-    r"(부분취소|결제취소|주문취소|승인취소|취소하신\s*내역|취소되었|취소\s*내역|취소\s*안내)",
+    r"(부분취소|결제취소|주문취소|승인취소|취소하신\s*내역|취소한\s*내역|취소되었|취소\s*내역|취소\s*안내)",
     re.IGNORECASE,
 )
 
 _IGNORE_EMAIL_SUBJECT_RE = re.compile(
     r"(\(광고\)|\[광고\]|광고성\s*정보|수신동의|로그인\s*되었|새로운\s*기기|새로운\s*환경|"
     r"약관\s*개정|회원\s*등급|인증서\s*개인정보|부분취소|결제취소|주문취소|승인취소|"
-    r"취소하신\s*내역|취소되었|취소\s*내역|취소\s*안내|혜택이\s*곧\s*종료|비밀번호\s*변경)",
+    r"취소하신\s*내역|취소한\s*내역|취소되었|취소\s*내역|취소\s*안내|혜택이\s*곧\s*종료|비밀번호\s*변경)",
     re.IGNORECASE,
 )
 
@@ -832,6 +843,8 @@ def _extract_coupang_email_orders(
 def _infer_sender_portal(sender: str, subject: str) -> str:
     comb = f"{sender} {subject}".lower()
     for token, canonical in (
+        ("토스페이먼츠", "토스페이먼츠"),
+        ("tosspayments", "토스페이먼츠"),
         ("쿠팡", "쿠팡"),
         ("coupang", "쿠팡"),
         ("네이버", "네이버페이"),
@@ -856,6 +869,247 @@ def _infer_sender_portal(sender: str, subject: str) -> str:
         if token in comb:
             return canonical
     return ""
+
+
+_TOSS_RECEIPT_URL_RE = re.compile(
+    r"https://dashboard\.tosspayments\.com/receipt/(?:redirection|sales-slip)\?[^\"'\s<>]+",
+    re.IGNORECASE,
+)
+
+_TOSS_SUBJECT_BUYER_SELLER_RE = re.compile(
+    r"^\s*(?P<buyer>.+?)님,\s*(?P<seller>.+?)에서\s*"
+    r"(?P<action>부분취소한|취소한|결제한)\s*내역이\s*도착했어요",
+    re.IGNORECASE,
+)
+
+_CORP_BUYER_OR_ITEM_RE = re.compile(
+    r"(주식회사|\(주\)|㈜|\(유\)|유한회사|사단법인|재단법인|협동조합|사업자범용)",
+    re.IGNORECASE,
+)
+
+# Korean Corporate Card BIN prefixes vs Personal Card BIN prefixes on Toss sales slips
+_TOSS_CORP_CARD_BIN6_PREFIXES = (
+    "910020",  # 우리비씨 기업/법인카드
+    "9430",    # BC 기업/법인카드 계열
+    "9411",    # 기업카드 계열
+)
+
+_TOSS_PERSONAL_CARD_BIN6_PREFIXES = (
+    "940915",  # 롯데 개인카드
+    "950001",  # 우리 개인카드
+    "379183",  # 삼성 개인 AMEX
+)
+
+
+def is_toss_payments_email(
+    sender: str,
+    subject: str = "",
+    body_html: str = "",
+    body_text: str = "",
+) -> bool:
+    """Return True if an email originates from or contains a Toss Payments receipt notice."""
+    hdr_comb = f"{sender} {subject}".lower()
+    if "tosspayments" in hdr_comb or "토스페이먼츠" in hdr_comb:
+        return True
+    if body_html and "dashboard.tosspayments.com/receipt/" in body_html.lower():
+        return True
+    body_probe = f"{body_text[:4000]} {body_html[:6000]}"
+    return "토스페이먼츠 주식회사" in body_probe and "411-86-01799" in body_probe
+
+
+def parse_toss_payments_email(
+    subject: str,
+    sender: str = "",
+    date_str: str = "",
+    body_text: str = "",
+    body_html: str = "",
+) -> Optional[Dict[str, Any]]:
+    """Parse a Toss Payments payment / partial-cancel / cancel email into structured fields."""
+    if not is_toss_payments_email(sender, subject, body_html, body_text):
+        return None
+
+    combined_text = body_text or _html_to_structured_text(body_html)
+    if body_html and body_text:
+        html_txt = _html_to_structured_text(body_html)
+        if html_txt not in combined_text:
+            combined_text = f"{combined_text}\n{html_txt}"
+
+    fallback_dt = ""
+    if date_str:
+        try:
+            parsed_dt = email.utils.parsedate_to_datetime(date_str)
+            fallback_dt = parsed_dt.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            norm_fb = _normalize_datetime_str(date_str)
+            if len(norm_fb) >= 10 and norm_fb[:4].isdigit():
+                fallback_dt = norm_fb
+
+    buyer_greeting = ""
+    subj_seller = ""
+    event_type = "PAYMENT"
+    m_subj = _TOSS_SUBJECT_BUYER_SELLER_RE.search(subject or "")
+    if m_subj:
+        buyer_greeting = m_subj.group("buyer").strip()
+        subj_seller = m_subj.group("seller").strip()
+        act = m_subj.group("action")
+        if "부분취소" in act:
+            event_type = "PARTIAL_CANCEL"
+        elif "취소" in act:
+            event_type = "CANCEL"
+    elif subject:
+        if "부분취소" in subject:
+            event_type = "PARTIAL_CANCEL"
+        elif re.search(r"(결제\s*취소|승인\s*취소|취소한\s*내역|취소하신\s*내역)", subject):
+            event_type = "CANCEL"
+
+    def _find_toss_field(labels: tuple[str, ...]) -> str:
+        lbl_pat = "|".join(re.escape(lb) for lb in labels)
+        if body_html:
+            # Match <th>/<td> label cell followed by value cell in Toss HTML email table
+            for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", body_html, flags=re.I | re.S):
+                cells = [
+                    re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", c))).strip()
+                    for c in re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", tr, flags=re.I | re.S)
+                ]
+                cells = [c for c in cells if c]
+                for idx in range(len(cells) - 1):
+                    key_clean = re.sub(r"[\s:：·\-]+", "", cells[idx])
+                    if any(key_clean == re.sub(r"\s+", "", lb) for lb in labels):
+                        val_cand = cells[idx + 1].strip()
+                        if val_cand:
+                            return val_cand
+        # Text line fallback ("구매상품 : ..." or "구매상품\n...")
+        m_inline = re.search(
+            rf"(?:^|\n)\s*(?:{lbl_pat})\s*[:：]\s*([^\n\r]+)",
+            combined_text,
+        )
+        if m_inline:
+            return m_inline.group(1).strip()
+        m_next = re.search(
+            rf"(?:^|\n)\s*(?:{lbl_pat})\s*\n+\s*([^\n\r]+)",
+            combined_text,
+        )
+        if m_next:
+            return m_next.group(1).strip()
+        return ""
+
+    product_name = _find_toss_field(("구매상품", "주문상품", "상품명", "품목명"))
+    raw_paid_amt = _find_toss_field(("결제금액", "총결제금액", "승인금액"))
+    raw_cancel_amt = _find_toss_field(("부분취소금액", "취소금액", "환불금액"))
+    raw_remain_amt = _find_toss_field(("남은결제금액", "취소후잔액", "잔여금액"))
+    pay_method = _find_toss_field(("결제수단", "결제방식"))
+    card_issuer = _find_toss_field(("결제카드", "카드사", "카드종류"))
+    installment = _find_toss_field(("할부기간", "할부개월"))
+    raw_paid_dt = _find_toss_field(("결제일시", "승인일시", "거래일시"))
+    raw_cancel_dt = _find_toss_field(("부분취소일시", "취소일시"))
+    raw_app_no = _find_toss_field(("승인번호", "카드승인번호"))
+    order_no = _find_toss_field(("주문번호", "거래번호"))
+    seller_name = _find_toss_field(("판매자", "가맹점", "상점명", "이용상점")) or subj_seller
+
+    # Ensure PG footer ("토스페이먼츠 주식회사") never overrides the actual seller
+    if seller_name and "토스페이먼츠" in seller_name and subj_seller:
+        seller_name = subj_seller
+
+    paid_amt = _parse_int_amount(raw_paid_amt)
+    cancel_amt = _parse_int_amount(raw_cancel_amt)
+    remain_amt = _parse_int_amount(raw_remain_amt)
+
+    if paid_amt <= 0 and event_type == "PAYMENT":
+        amt_cands = [
+            _parse_int_amount(x)
+            for x in re.findall(r"(\d{1,3}(?:,\d{3})+)\s*원", combined_text)
+        ]
+        valid_cands = [a for a in amt_cands if a >= 100]
+        if valid_cands:
+            paid_amt = valid_cands[0]
+
+    norm_dt = _normalize_datetime_str(raw_paid_dt) if raw_paid_dt else ""
+    if not (len(norm_dt) >= 10 and norm_dt[:4].isdigit()):
+        norm_dt = fallback_dt
+
+    m_app = re.search(r"(\d{6,12})", raw_app_no or "")
+    approval_no = m_app.group(1) if m_app else ""
+
+    receipt_url = ""
+    for src_txt in (body_html, combined_text):
+        if not src_txt:
+            continue
+        m_url = _TOSS_RECEIPT_URL_RE.search(src_txt)
+        if m_url:
+            receipt_url = html.unescape(m_url.group(0)).strip()
+            break
+
+    effective_amt = paid_amt
+    if event_type == "PARTIAL_CANCEL":
+        if remain_amt > 0:
+            effective_amt = remain_amt
+        elif paid_amt > cancel_amt > 0:
+            effective_amt = paid_amt - cancel_amt
+
+    if not norm_dt and not product_name and paid_amt <= 0 and cancel_amt <= 0:
+        return None
+
+    return {
+        "event_type": event_type,
+        "buyer_greeting": buyer_greeting,
+        "merchant_name": seller_name,
+        "item_name": product_name,
+        "paid_amount": paid_amt,
+        "cancel_amount": cancel_amt,
+        "effective_amount": effective_amt,
+        "payment_method": pay_method,
+        "card_issuer": card_issuer,
+        "installment": installment,
+        "transacted_at": norm_dt[:19] if len(norm_dt) >= 19 else norm_dt,
+        "canceled_at": _normalize_datetime_str(raw_cancel_dt) if raw_cancel_dt else "",
+        "approval_no": approval_no,
+        "order_no": order_no,
+        "receipt_url": receipt_url,
+        "subject": subject,
+    }
+
+
+def _extract_toss_payments_email_orders(
+    subject: str,
+    sender: str,
+    date_str: str,
+    body_text: str,
+    body_html: str,
+) -> List[Dict[str, Any]]:
+    """Convert a Toss Payments payment email into SoloLedger's standard order list format."""
+    parsed = parse_toss_payments_email(
+        subject=subject,
+        sender=sender,
+        date_str=date_str,
+        body_text=body_text,
+        body_html=body_html,
+    )
+    if not parsed or parsed["event_type"] != "PAYMENT":
+        return []
+    dt_full = str(parsed.get("transacted_at") or "")
+    amt = int(parsed.get("effective_amount") or parsed.get("paid_amount") or 0)
+    prod = str(parsed.get("item_name") or "").strip()
+    if len(dt_full) < 10 or amt <= 0 or not prod or _is_noise_product_name(prod):
+        return []
+
+    return [
+        {
+            "주문일자": dt_full[:10],
+            "주문일시": dt_full if len(dt_full) >= 16 else f"{dt_full[:10]} 12:00:00",
+            "상품명": prod,
+            "결제금액": amt,
+            "상점명": str(parsed.get("merchant_name") or ""),
+            "발신처": "토스페이먼츠",
+            "승인번호": str(parsed.get("approval_no") or ""),
+            "카드사": str(parsed.get("card_issuer") or ""),
+            "결제수단": str(parsed.get("payment_method") or "신용카드"),
+            "주문번호": str(parsed.get("order_no") or ""),
+            "영수증URL": str(parsed.get("receipt_url") or ""),
+            "구매자힌트": str(parsed.get("buyer_greeting") or ""),
+            "사업자번호": "",
+            "품목내역": [{"item": prod, "qty": 1, "price": amt}],
+        }
+    ]
 
 
 def _extract_kv_pairs_from_html_and_text(
@@ -972,6 +1226,17 @@ def extract_orders_from_email_content(
     cp_email_orders = _extract_coupang_email_orders(combined_text, fallback_dt=fallback_dt)
     if cp_email_orders:
         return cp_email_orders
+
+    # 1b. Dedicated Toss Payments Email parser (separating actual seller from PG footer)
+    toss_email_orders = _extract_toss_payments_email_orders(
+        subject=subject,
+        sender=sender,
+        date_str=date_str,
+        body_text=body_text,
+        body_html=body_html,
+    )
+    if toss_email_orders:
+        return toss_email_orders
 
     # 2. Try structured HTML table / Coupang web order text / JSON extractor
     orders: List[Dict[str, Any]] = []
@@ -1813,5 +2078,1001 @@ def sync_imap_order_emails(
         "updated_tx_ids": rec_res.get("updated_tx_ids") or [],
         "matched_items": matched_items,
         "generated_statements_count": matched,
+        "account_results": account_results,
+    }
+
+
+def _extract_card_tail4_and_bin6(card_number_masked: str) -> tuple[str, str]:
+    """Extract 4-char tail (e.g. '607*' or '1175') and 6-digit BIN from a masked card number."""
+    compact = re.sub(r"[\s\-]+", "", str(card_number_masked or "").strip())
+    if len(compact) < 4:
+        return "", ""
+    tail4 = compact[-4:]
+    bin_digits = re.sub(r"\D", "", compact[:8])
+    bin6 = bin_digits[:6] if len(bin_digits) >= 6 else ""
+    return tail4, bin6
+
+
+def _infer_corp_issuer_code(card_name: str) -> str:
+    txt = str(card_name or "").strip()
+    if "우리" in txt:
+        return "WOORI"
+    if "국민" in txt or "KB" in txt.upper():
+        return "KB"
+    if "신한" in txt:
+        return "SHINHAN"
+    if "하나" in txt:
+        return "HANA"
+    if "삼성" in txt:
+        return "SAMSUNG"
+    if "현대" in txt:
+        return "HYUNDAI"
+    if "롯데" in txt:
+        return "LOTTE"
+    if "농협" in txt or "NH" in txt.upper():
+        return "NH"
+    if "기업" in txt or "IBK" in txt.upper():
+        return "IBK"
+    if "비씨" in txt or "BC" in txt.upper():
+        return "BC"
+    return "CORP"
+
+
+def fetch_toss_sales_slip_metadata(
+    receipt_url: str,
+    recipient_email: str = "",
+    approval_no: str = "",
+    approved_date: str = "",
+    amount: int = 0,
+    timeout: float = 8.0,
+) -> Optional[Dict[str, Any]]:
+    """Resolve a Toss Payments email receipt link into official SalesSlip JSON metadata."""
+    clean_url = html.unescape(str(receipt_url or "").strip())
+    if not clean_url or "tosspayments.com" not in clean_url.lower():
+        return None
+
+    parsed_u = urllib.parse.urlparse(clean_url)
+    qs = urllib.parse.parse_qs(parsed_u.query)
+    raw_tid = (qs.get("transactionId") or [""])[0]
+    if not raw_tid:
+        return None
+
+    slip_tid = ""
+    sales_slip_url = clean_url
+    try:
+        if "/receipt/sales-slip" in parsed_u.path:
+            slip_tid = raw_tid
+        else:
+            redir_api = (
+                "https://homepage-api-gateway.tosspayments.com"
+                "/v3/dashboard/receipts/open/redirection-url?"
+                + urllib.parse.urlencode({"transactionId": raw_tid, "ref": "email"})
+            )
+            req_r = urllib.request.Request(
+                redir_api,
+                headers={
+                    "User-Agent": "Mozilla/5.0",
+                    "X-TossPayments-Referrer": json.dumps({"url": clean_url, "referrer": ""}),
+                },
+            )
+            with urllib.request.urlopen(req_r, timeout=timeout) as resp_r:
+                j_r = json.loads(resp_r.read().decode("utf-8", errors="replace"))
+            next_url = str(((j_r.get("data") or {}).get("url")) or "").strip()
+            if not next_url or "sales-slip" not in next_url:
+                return None
+            sales_slip_url = next_url
+            qs2 = urllib.parse.parse_qs(urllib.parse.urlparse(next_url).query)
+            slip_tid = (qs2.get("transactionId") or [""])[0]
+    except Exception:
+        return None
+
+    if not slip_tid:
+        return None
+
+    candidate_bodies: List[Dict[str, Any]] = []
+    if recipient_email:
+        candidate_bodies.append(
+            {
+                "transactionId": slip_tid,
+                "method": "EMAIL",
+                "email": recipient_email.strip(),
+                "lang": "ko",
+            }
+        )
+    if approval_no and len(approved_date) >= 10 and amount > 0:
+        candidate_bodies.append(
+            {
+                "transactionId": slip_tid,
+                "method": "AUTH_NUMBER_AND_DATE_AND_AMOUNT",
+                "authNumber": approval_no.strip(),
+                "approvedDate": approved_date[:10],
+                "amount": int(amount),
+                "lang": "ko",
+            }
+        )
+    candidate_bodies.append({"transactionId": slip_tid, "lang": "ko"})
+
+    slip_data: Optional[Dict[str, Any]] = None
+    slip_api = "https://homepage-api-gateway.tosspayments.com/v1/homepage/receipts/sales-slip"
+    ref_hdr = json.dumps({"url": sales_slip_url, "referrer": ""})
+
+    for payload_obj in candidate_bodies:
+        try:
+            req_s = urllib.request.Request(
+                slip_api,
+                data=json.dumps(payload_obj).encode("utf-8"),
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": "Mozilla/5.0",
+                    "X-TossPayments-Referrer": ref_hdr,
+                },
+            )
+            with urllib.request.urlopen(req_s, timeout=timeout) as resp_s:
+                j_s = json.loads(resp_s.read().decode("utf-8", errors="replace"))
+            if j_s.get("result") == "SUCCESS" and isinstance(j_s.get("data"), dict):
+                slip_data = j_s["data"]
+                break
+        except Exception:
+            continue
+
+    if not slip_data:
+        return None
+
+    paid_obj = slip_data.get("paid") or {}
+    buyer_obj = slip_data.get("buyer") or {}
+    summary_flags = slip_data.get("summary") or {}
+    amt_summary = (slip_data.get("amount") or {}).get("summary") or {}
+    main_merch = (slip_data.get("merchants") or {}).get("main") or {}
+
+    card_num = str(paid_obj.get("cardNumber") or "").strip()
+    tail4, bin6 = _extract_card_tail4_and_bin6(card_num)
+    raw_biz = re.sub(r"\D", "", str(main_merch.get("businessNumber") or ""))
+    clean_biz = (
+        raw_biz
+        if (len(raw_biz) == 10 and validate_biz_reg_no_checksum(raw_biz) and raw_biz != "4118601799")
+        else ""
+    )
+
+    billed_amt = int(round(float(amt_summary.get("billed") or 0)))
+    paid_amt = int(round(float(amt_summary.get("paid") or 0)))
+    taxable_amt = int(round(float(amt_summary.get("taxable") or 0)))
+    tax_free_amt = int(
+        round(float(amt_summary.get("taxFree") or 0) + float(amt_summary.get("taxExemption") or 0))
+    )
+    vat_amt = int(round(float(amt_summary.get("vat") or 0)))
+    supply_val = taxable_amt + tax_free_amt
+    if billed_amt > 0 and supply_val + vat_amt != billed_amt:
+        supply_val = max(0, billed_amt - vat_amt)
+
+    paid_at_raw = str(paid_obj.get("paidAt") or "").replace("T", " ").strip()
+    paid_at_norm = _normalize_datetime_str(paid_at_raw) if paid_at_raw else ""
+
+    return {
+        "card_name": str(paid_obj.get("cardName") or "").strip(),
+        "card_number_masked": card_num,
+        "card_tail4": tail4,
+        "card_bin6": bin6,
+        "installment": str(paid_obj.get("installment") or "").strip(),
+        "slip_status": str(paid_obj.get("status") or "").strip(),
+        "is_cancel": bool(summary_flags.get("isCancel")),
+        "has_partial_cancel": bool(summary_flags.get("hasPartialCancel")),
+        "auth_number": str(paid_obj.get("authNumber") or "").strip(),
+        "paid_at": paid_at_norm[:19] if len(paid_at_norm) >= 19 else paid_at_norm,
+        "order_id": str(buyer_obj.get("orderId") or "").strip(),
+        "buyer_masked": str(buyer_obj.get("buyer") or "").strip(),
+        "product_name": str(buyer_obj.get("product") or "").strip(),
+        "paid_amount": paid_amt,
+        "billed_amount": billed_amt,
+        "supply_value": supply_val,
+        "vat_amount": vat_amt,
+        "tax_free_amount": tax_free_amt,
+        "merchant_name": str(main_merch.get("companyName") or "").strip(),
+        "biz_reg_no": clean_biz,
+        "representative_name": str(main_merch.get("representativeName") or "").strip(),
+        "merchant_address": str(main_merch.get("companyAddress") or "").strip(),
+        "telephone_number": str(main_merch.get("telephoneNumber") or "").strip(),
+        "sales_slip_url": sales_slip_url,
+    }
+
+
+def classify_toss_card_ownership(
+    record: Dict[str, Any],
+    confirmed_corp_card_numbers: Optional[set[str]] = None,
+    existing_corp_approvals: Optional[set[str]] = None,
+    archive_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Determine whether a Toss Payments record belongs to a corporate card or personal card."""
+    policy = load_corp_card_policy(archive_dir)
+    corp_only = bool(policy.get("corp_only_mode", False))
+    corp_cards = confirmed_corp_card_numbers or set()
+    corp_apps = existing_corp_approvals or set()
+
+    app_no = str(record.get("approval_no") or "").strip()
+    card_num = str(record.get("card_number_masked") or "").strip()
+    tail4, bin6 = _extract_card_tail4_and_bin6(card_num)
+    card_name = str(record.get("card_name") or record.get("card_issuer") or "").strip()
+    issuer_code = _infer_corp_issuer_code(card_name)
+    buyer_txt = f"{record.get('buyer_greeting') or ''} {record.get('item_name') or ''}"
+
+    # 1. Match against registered corporate card list (exact or 3-digit + '*' wildcard)
+    matched_reg = match_registered_corp_card_code(tail4, archive_dir=archive_dir) if tail4 else None
+    if matched_reg:
+        return {
+            "is_corporate": True,
+            "reason": "registered_corp_card",
+            "card_last4": matched_reg,
+            "issuer_code": issuer_code,
+            "should_auto_register": False,
+        }
+
+    # 2. Match against existing ledger approval_no
+    if app_no and app_no in corp_apps:
+        return {
+            "is_corporate": True,
+            "reason": "existing_ledger_approval_match",
+            "card_last4": tail4 or "0000",
+            "issuer_code": issuer_code,
+            "should_auto_register": False,
+        }
+
+    # 3. Block known personal card codes or personal-only card BINs
+    if tail4 and is_blocked_personal_card_code(tail4, archive_dir=archive_dir):
+        return {
+            "is_corporate": False,
+            "reason": "blocked_personal_card",
+            "card_last4": tail4,
+            "issuer_code": issuer_code,
+            "should_auto_register": False,
+        }
+    if bin6 and any(bin6.startswith(p) for p in _TOSS_PERSONAL_CARD_BIN6_PREFIXES):
+        return {
+            "is_corporate": False,
+            "reason": "personal_card_bin",
+            "card_last4": tail4 or "0000",
+            "issuer_code": issuer_code,
+            "should_auto_register": False,
+        }
+
+    # 4. Corporate BIN or cohort-verified corporate card number or corporate buyer evidence
+    has_corp_bin = bool(bin6 and any(bin6.startswith(p) for p in _TOSS_CORP_CARD_BIN6_PREFIXES))
+    in_corp_cohort = bool(card_num and card_num in corp_cards)
+    has_corp_buyer = bool(_CORP_BUYER_OR_ITEM_RE.search(buyer_txt))
+
+    if has_corp_bin or in_corp_cohort or (has_corp_buyer and not bin6):
+        resolved_c4 = tail4 if len(tail4) == 4 else "0000"
+        return {
+            "is_corporate": True,
+            "reason": (
+                "corporate_card_bin"
+                if has_corp_bin
+                else ("corporate_card_cohort" if in_corp_cohort else "corporate_buyer_match")
+            ),
+            "card_last4": resolved_c4,
+            "issuer_code": issuer_code,
+            "should_auto_register": bool(resolved_c4 != "0000"),
+        }
+
+    if not corp_only:
+        return {
+            "is_corporate": True,
+            "reason": "corp_only_disabled",
+            "card_last4": tail4 if len(tail4) == 4 else "0000",
+            "issuer_code": issuer_code,
+            "should_auto_register": False,
+        }
+
+    return {
+        "is_corporate": False,
+        "reason": "unverified_or_personal_card",
+        "card_last4": tail4 or "0000",
+        "issuer_code": issuer_code,
+        "should_auto_register": False,
+    }
+
+
+def _extract_eml_parts(raw_eml: bytes) -> Dict[str, str]:
+    """Decode RFC822 bytes into subject, sender, date_str, message_id, body_text, and body_html."""
+    msg = email.message_from_bytes(raw_eml)
+    subj = _decode_mime_header(msg.get("Subject"))
+    sender = _decode_mime_header(msg.get("From"))
+    dt_hdr = str(msg.get("Date") or "")
+    msg_id = str(msg.get("Message-ID") or "").strip()
+
+    text_parts: List[str] = []
+    html_parts: List[str] = []
+    if msg.is_multipart():
+        for part in msg.walk():
+            c_type = (part.get_content_type() or "").lower()
+            c_disp = str(part.get("Content-Disposition") or "").lower()
+            fname = _decode_mime_header(part.get_filename())
+            payload = part.get_payload(decode=True)
+            if not payload:
+                continue
+            charset = part.get_content_charset() or "utf-8"
+            try:
+                decoded = payload.decode(charset, errors="replace")
+            except LookupError:
+                decoded = payload.decode("utf-8", errors="replace")
+            if c_type == "text/plain" and "attachment" not in c_disp:
+                text_parts.append(decoded)
+            elif c_type == "text/html" or fname.lower().endswith((".html", ".htm")):
+                html_parts.append(decoded)
+    else:
+        payload = msg.get_payload(decode=True)
+        if payload:
+            charset = msg.get_content_charset() or "utf-8"
+            try:
+                decoded = payload.decode(charset, errors="replace")
+            except LookupError:
+                decoded = payload.decode("utf-8", errors="replace")
+            if (msg.get_content_type() or "").lower() == "text/html":
+                html_parts.append(decoded)
+            else:
+                text_parts.append(decoded)
+
+    return {
+        "subject": subj,
+        "sender": sender,
+        "date_str": dt_hdr,
+        "message_id": msg_id,
+        "body_text": "\n".join(text_parts),
+        "body_html": "\n".join(html_parts),
+    }
+
+
+def _discover_imap_scroll_mailboxes(imap: Any, configured_mailbox: str = "INBOX") -> List[str]:
+    """Return ordered list of mailboxes to scroll (configured INBOX + any \\All archive folder)."""
+    primary = (configured_mailbox or "INBOX").strip() or "INBOX"
+    boxes: List[str] = [primary]
+    try:
+        typ, raw_list = imap.list()
+        if typ == "OK" and raw_list:
+            for entry in raw_list:
+                if not isinstance(entry, bytes):
+                    continue
+                line = entry.decode("utf-8", errors="replace")
+                if "\\All" in line or "[Gmail]/All Mail" in line:
+                    m_q = re.search(r'"([^"]+)"\s*$', line)
+                    cand = m_q.group(1).strip() if m_q else line.rsplit(" ", 1)[-1].strip()
+                    if cand and cand not in boxes:
+                        # Put All Mail first when available so archived messages are scanned in one pass
+                        boxes.insert(0, cand)
+    except Exception:
+        pass
+    return boxes
+
+
+def _ensure_toss_merchant_master(
+    cursor: sqlite3.Cursor,
+    biz_reg_no: str,
+    merchant_name: str,
+) -> None:
+    clean_no = re.sub(r"\D", "", str(biz_reg_no or ""))
+    if len(clean_no) != 10 or not merchant_name:
+        return
+    cursor.execute(
+        """
+        INSERT INTO merchants (biz_reg_no, merchant_name, tax_type_code, biz_status)
+        VALUES (?, ?, 'GENERAL', 'ACTIVE')
+        ON CONFLICT(biz_reg_no) DO UPDATE SET
+            merchant_name = CASE
+                WHEN merchants.merchant_name = '' THEN excluded.merchant_name
+                ELSE merchants.merchant_name
+            END
+        """,
+        (clean_no, merchant_name[:100]),
+    )
+
+
+def _format_imap_date_token(ymd: str, add_days: int = 0) -> str:
+    """Convert YYYY-MM-DD into RFC3501 DD-Mon-YYYY string (English month names)."""
+    norm = _normalize_datetime_str(ymd)[:10]
+    dt = datetime.strptime(norm, "%Y-%m-%d") + timedelta(days=add_days)
+    months = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+    return f"{dt.day:02d}-{months[dt.month - 1]}-{dt.year:04d}"
+
+
+def _reconcile_or_create_corp_toss_record(
+    cursor: sqlite3.Cursor,
+    record: Dict[str, Any],
+    ownership: Dict[str, Any],
+    used_tx_ids: set[int],
+    auto_create_corp_tx: bool = True,
+    archive_dir: Optional[Path] = None,
+) -> Optional[Dict[str, Any]]:
+    """Reconcile a verified corporate Toss Payments record with card_transactions and build slips."""
+    amount = int(record.get("billed_amount") or record.get("effective_amount") or record.get("paid_amount") or 0)
+    full_dt = str(record.get("paid_at") or record.get("transacted_at") or "").strip()
+    if amount <= 0 or len(full_dt) < 10:
+        return None
+
+    date_prefix = full_dt[:10]
+    full_ts = full_dt[:19] if len(full_dt) >= 19 else f"{date_prefix} 12:00:00"
+    app_no = str(record.get("approval_no") or "").strip()
+    merch_name = str(record.get("merchant_name") or "토스페이먼츠 가맹점").strip()
+    clean_biz = re.sub(r"\D", "", str(record.get("biz_reg_no") or ""))
+    if len(clean_biz) != 10:
+        clean_biz = ""
+    item_name = str(record.get("item_name") or "").strip() or f"{merch_name} 결제 품목"
+    resolved_c4 = str(ownership.get("card_last4") or "0000").strip() or "0000"
+
+    if clean_biz:
+        _ensure_toss_merchant_master(cursor, clean_biz, merch_name)
+
+    policy = load_corp_card_policy(archive_dir)
+    if (
+        ownership.get("should_auto_register")
+        and resolved_c4 != "0000"
+        and policy.get("auto_register_on_statement_upload", True)
+    ):
+        issuer_code = str(ownership.get("issuer_code") or "WOORI")
+        register_corp_card(
+            card_last4=resolved_c4,
+            issuer=issuer_code,
+            archive_dir=archive_dir,
+        )
+
+    # 1. Search existing card_transactions by approval_no first, then (amount, date ±3d)
+    tx_row = None
+    if app_no:
+        cursor.execute(
+            """
+            SELECT * FROM card_transactions
+            WHERE approval_no = ? AND reconcile_status != 'CANCELED'
+            ORDER BY CASE WHEN ABS(total_amount) = ? THEN 0 ELSE 1 END ASC, tx_id DESC
+            """,
+            (app_no, amount),
+        )
+        for cand in cursor.fetchall():
+            if int(cand["tx_id"]) not in used_tx_ids:
+                tx_row = cand
+                break
+
+    if tx_row is None:
+        cursor.execute(
+            """
+            SELECT * FROM card_transactions
+            WHERE ABS(total_amount) = ?
+              AND ABS(julianday(SUBSTR(transacted_at, 1, 10)) - julianday(?)) <= 3.0
+              AND reconcile_status != 'CANCELED'
+            ORDER BY ABS(julianday(SUBSTR(transacted_at, 1, 10)) - julianday(?)) ASC, tx_id DESC
+            """,
+            (amount, date_prefix, date_prefix),
+        )
+        for cand in cursor.fetchall():
+            cid = int(cand["tx_id"])
+            if cid in used_tx_ids:
+                continue
+            cand_merch = str(cand["raw_merchant_name"] or "").lower()
+            cand_c4 = str(cand["card_last4"] or "")
+            is_pg_or_toss = "토스" in cand_merch or str(cand["biz_reg_no"] or "") == "4118601799"
+            is_merch_match = bool(
+                merch_name
+                and (
+                    merch_name.lower() in cand_merch
+                    or cand_merch in merch_name.lower()
+                )
+            )
+            is_card_match = bool(resolved_c4 != "0000" and cand_c4 == resolved_c4)
+            if is_pg_or_toss or is_merch_match or is_card_match:
+                tx_row = cand
+                break
+
+    action = "MATCHED"
+    mp_seller = ""
+    if tx_row is None:
+        if not auto_create_corp_tx:
+            return None
+        rule_eval = evaluate_tax_rules(cursor, f"{merch_name} {item_name}", clean_biz or None)
+        vat_type = str(rule_eval["vat_deduction_type"])
+        slip_vat = record.get("vat_amount")
+        slip_tax_free = int(record.get("tax_free_amount") or 0)
+        if slip_vat is not None and int(slip_vat) == 0 and slip_tax_free > 0:
+            vat_type = "EXEMPT"
+        sup_val, vat_val = calculate_supply_and_vat(amount, vat_type)
+        if (
+            slip_vat is not None
+            and record.get("supply_value") is not None
+            and int(record["supply_value"]) + int(slip_vat) == amount
+            and vat_type == "DEDUCTIBLE"
+        ):
+            sup_val = int(record["supply_value"])
+            vat_val = int(slip_vat)
+
+        cursor.execute(
+            """
+            INSERT INTO card_transactions (
+                card_last4, approval_no, transacted_at, raw_merchant_name, biz_reg_no,
+                total_amount, supply_value, vat_amount,
+                account_code, account_name, vat_deduction_type,
+                non_deduct_reason, is_vehicle_expense, counterparty_info, reconcile_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OCR_MATCHED')
+            """,
+            (
+                resolved_c4,
+                app_no or None,
+                full_ts,
+                merch_name[:100],
+                clean_biz or None,
+                amount,
+                sup_val,
+                vat_val,
+                rule_eval["account_code"],
+                rule_eval["account_name"],
+                vat_type,
+                rule_eval["non_deduct_reason"],
+                1 if rule_eval["is_vehicle_expense"] else 0,
+                f"[토스페이먼츠] {item_name}"[:200],
+            ),
+        )
+        new_tx_id = int(cursor.lastrowid)
+        cursor.execute("SELECT * FROM card_transactions WHERE tx_id = ?", (new_tx_id,))
+        tx_row = cursor.fetchone()
+        action = "CREATED"
+    else:
+        ex_id = int(tx_row["tx_id"])
+        ex_biz = str(tx_row["biz_reg_no"] or "").strip()
+        ex_merch = str(tx_row["raw_merchant_name"] or "")
+        ex_c4 = str(tx_row["card_last4"] or "0000")
+        next_c4 = resolved_c4 if (ex_c4 == "0000" and resolved_c4 != "0000") else ex_c4
+        next_biz = ex_biz
+        if clean_biz and (not ex_biz or ex_biz == "4118601799"):
+            next_biz = clean_biz
+        if "토스" in ex_merch and merch_name and "토스" not in merch_name:
+            mp_seller = (
+                f"{merch_name} ({format_biz_reg_no_display(clean_biz)})"
+                if clean_biz
+                else merch_name
+            )
+        cursor.execute(
+            """
+            UPDATE card_transactions
+            SET approval_no = COALESCE(approval_no, ?),
+                card_last4 = ?,
+                biz_reg_no = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE tx_id = ?
+            """,
+            (app_no or None, next_c4, next_biz or None, ex_id),
+        )
+        cursor.execute("SELECT * FROM card_transactions WHERE tx_id = ?", (ex_id,))
+        tx_row = cursor.fetchone()
+
+    if tx_row is None:
+        return None
+
+    tx_id = int(tx_row["tx_id"])
+    used_tx_ids.add(tx_id)
+    tx_merch_now = str(tx_row["raw_merchant_name"] or "")
+    memo_item = (
+        f"[{merch_name}] {item_name}"
+        if ("토스" in tx_merch_now and merch_name and merch_name not in item_name)
+        else (f"[토스페이먼츠] {item_name}" if "토스페이먼츠" not in item_name else item_name)
+    )
+    stmt_res = generate_electronic_statement_for_tx(
+        cursor,
+        tx_id=tx_id,
+        item_name=memo_item[:200],
+        line_items=[{"item": item_name, "qty": 1, "price": amount, "seller": merch_name}],
+        marketplace_seller=mp_seller or None,
+        archive_dir=archive_dir,
+    )
+
+    # Preserve exact Toss SalesSlip supply/VAT breakdown when provided
+    slip_vat_f = record.get("vat_amount")
+    slip_sup_f = record.get("supply_value")
+    cursor.execute("SELECT * FROM card_transactions WHERE tx_id = ?", (tx_id,))
+    latest_tx = dict(cursor.fetchone())
+    if (
+        slip_vat_f is not None
+        and slip_sup_f is not None
+        and int(slip_sup_f) + int(slip_vat_f) == amount
+        and str(latest_tx.get("vat_deduction_type")) in ("DEDUCTIBLE", "EXEMPT")
+    ):
+        cursor.execute(
+            """
+            UPDATE card_transactions
+            SET supply_value = ?, vat_amount = ?
+            WHERE tx_id = ?
+            """,
+            (int(slip_sup_f), int(slip_vat_f), tx_id),
+        )
+        cursor.execute("SELECT * FROM card_transactions WHERE tx_id = ?", (tx_id,))
+        latest_tx = dict(cursor.fetchone())
+
+    generate_electronic_slips_for_ledger(cursor, archive_dir=archive_dir)
+    final_biz = str(latest_tx.get("biz_reg_no") or "").strip()
+    return {
+        "tx_id": tx_id,
+        "action": action,
+        "is_created": action == "CREATED",
+        "transacted_at": str(latest_tx["transacted_at"]),
+        "card_last4": str(latest_tx.get("card_last4") or "0000"),
+        "card_label": format_card_label(str(latest_tx.get("card_last4") or "0000")),
+        "card_number_masked": str(record.get("card_number_masked") or ""),
+        "approval_no": str(latest_tx.get("approval_no") or app_no),
+        "order_no": str(record.get("order_no") or ""),
+        "raw_merchant_name": str(latest_tx["raw_merchant_name"]),
+        "biz_reg_no": format_biz_reg_no_display(final_biz) if final_biz else "",
+        "marketplace_seller": mp_seller,
+        "item_name": stmt_res["item_name"],
+        "line_items_count": 1,
+        "total_amount": int(latest_tx["total_amount"]),
+        "supply_value": int(latest_tx["supply_value"]),
+        "vat_amount": int(latest_tx["vat_amount"]),
+        "account_code": str(latest_tx["account_code"]),
+        "account_name": str(latest_tx["account_name"]),
+        "archived_file_name": stmt_res["archived_file_name"],
+        "sales_slip_url": str(record.get("sales_slip_url") or record.get("receipt_url") or ""),
+        "ownership_reason": str(ownership.get("reason") or ""),
+    }
+
+
+def scroll_imap_toss_payments_emails(
+    cursor: sqlite3.Cursor,
+    archive_dir: Optional[Path] = None,
+    account_id: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    page_size: int = 50,
+    max_pages: int = 20,
+    verify_receipt_slip: bool = True,
+    auto_create_corp_tx: bool = True,
+) -> Dict[str, Any]:
+    """Deep-scroll IMAP mailboxes page-by-page for corporate card Toss Payments purchase history."""
+    cfg = load_email_watcher_config(archive_dir)
+    accounts: List[Dict[str, Any]] = list(cfg.get("accounts") or [])
+    targets = (
+        [a for a in accounts if a.get("account_id") == account_id]
+        if account_id
+        else [a for a in accounts if a.get("enabled", True)]
+    )
+    valid_targets = [
+        a
+        for a in targets
+        if str(a.get("imap_host") or "").strip()
+        and str(a.get("email_address") or "").strip()
+        and str(a.get("app_password") or "").strip()
+    ]
+    if not valid_targets:
+        return {
+            "status": "not_configured",
+            "message": "활성화된 이메일 계정(주소 및 IMAP 앱 비밀번호)을 먼저 등록해 주세요.",
+            "scrolled_pages": 0,
+            "scanned_messages": 0,
+            "parsed_toss_count": 0,
+            "verified_slips_count": 0,
+            "corp_matched_existing_count": 0,
+            "corp_created_count": 0,
+            "skipped_personal_count": 0,
+            "skipped_canceled_count": 0,
+            "items": [],
+            "account_results": [],
+        }
+
+    eff_page_size = max(10, min(200, int(page_size or 50)))
+    eff_max_pages = max(1, min(100, int(max_pages or 20)))
+    norm_start = _normalize_datetime_str(start_date)[:10] if start_date else ""
+    norm_end = _normalize_datetime_str(end_date)[:10] if end_date else ""
+
+    cursor.execute(
+        """
+        SELECT DISTINCT approval_no FROM card_transactions
+        WHERE approval_no IS NOT NULL AND TRIM(approval_no) != ''
+          AND reconcile_status != 'CANCELED'
+        """
+    )
+    existing_corp_approvals = {str(r[0]).strip() for r in cursor.fetchall() if r[0]}
+
+    total_pages = 0
+    total_scanned_msgs = 0
+    verified_slips_cnt = 0
+    seen_msg_keys: set[str] = set()
+    raw_toss_records: List[Dict[str, Any]] = []
+    account_results: List[Dict[str, Any]] = []
+    error_messages: List[str] = []
+    success_accounts = 0
+
+    for acc in valid_targets:
+        aid = str(acc["account_id"])
+        host = str(acc["imap_host"]).strip()
+        port = int(acc.get("imap_port") or 993)
+        user = str(acc["email_address"]).strip()
+        password = str(acc["app_password"]).strip()
+        conf_mbox = str(acc.get("mailbox") or "INBOX").strip() or "INBOX"
+        acc_pages = 0
+        acc_msgs = 0
+        acc_parsed = 0
+
+        try:
+            imap = imaplib.IMAP4_SSL(host, port, timeout=25.0)
+            try:
+                imap.login(user, password)
+                mailboxes = _discover_imap_scroll_mailboxes(imap, conf_mbox)
+                for mbox in mailboxes:
+                    sel_name = f'"{mbox}"' if (" " in mbox and not mbox.startswith('"')) else mbox
+                    typ_sel, _ = imap.select(sel_name, readonly=True)
+                    if typ_sel != "OK":
+                        continue
+
+                    search_tokens: List[str] = ['FROM', '"tosspayments"']
+                    if len(norm_start) == 10:
+                        search_tokens.extend(["SINCE", _format_imap_date_token(norm_start, 0)])
+                    if len(norm_end) == 10:
+                        search_tokens.extend(["BEFORE", _format_imap_date_token(norm_end, 1)])
+
+                    typ_s, data_s = imap.uid("SEARCH", None, *search_tokens)
+                    uids: List[bytes] = (
+                        data_s[0].split() if (typ_s == "OK" and data_s and data_s[0]) else []
+                    )
+                    if not uids:
+                        continue
+
+                    # Scroll backward newest-to-oldest in pages of eff_page_size
+                    rev_uids = list(reversed(uids))
+                    for p_idx in range(eff_max_pages):
+                        start_i = p_idx * eff_page_size
+                        if start_i >= len(rev_uids):
+                            break
+                        batch_uids = rev_uids[start_i : start_i + eff_page_size]
+                        acc_pages += 1
+                        total_pages += 1
+
+                        uid_set = b",".join(batch_uids)
+                        typ_f, fetch_data = imap.uid("FETCH", uid_set, "(BODY.PEEK[])")
+                        if typ_f != "OK" or not fetch_data:
+                            continue
+
+                        for item in fetch_data:
+                            if not (
+                                isinstance(item, tuple)
+                                and len(item) >= 2
+                                and isinstance(item[1], bytes)
+                            ):
+                                continue
+                            raw_eml = item[1]
+                            if not raw_eml:
+                                continue
+                            acc_msgs += 1
+                            total_scanned_msgs += 1
+                            parts = _extract_eml_parts(raw_eml)
+                            dedup_k = (
+                                f"{user}:{parts['message_id']}"
+                                if parts["message_id"]
+                                else f"{user}:{hashlib.sha1(raw_eml[:2048]).hexdigest()}"
+                            )
+                            if dedup_k in seen_msg_keys:
+                                continue
+                            seen_msg_keys.add(dedup_k)
+
+                            parsed = parse_toss_payments_email(
+                                subject=parts["subject"],
+                                sender=parts["sender"],
+                                date_str=parts["date_str"],
+                                body_text=parts["body_text"],
+                                body_html=parts["body_html"],
+                            )
+                            if not parsed:
+                                continue
+                            parsed["recipient_email"] = user
+                            acc_parsed += 1
+                            raw_toss_records.append(parsed)
+            finally:
+                try:
+                    imap.logout()
+                except Exception:
+                    pass
+
+            success_accounts += 1
+            account_results.append(
+                {
+                    "account_id": aid,
+                    "email_address": user,
+                    "status": "scrolled",
+                    "scrolled_pages": acc_pages,
+                    "scanned_messages": acc_msgs,
+                    "parsed_toss_count": acc_parsed,
+                }
+            )
+        except Exception as exc:
+            err_str = f"{user} ({host}:{port}) 스크롤 실패: {exc}"
+            error_messages.append(err_str)
+            account_results.append(
+                {
+                    "account_id": aid,
+                    "email_address": user,
+                    "status": "error",
+                    "scrolled_pages": acc_pages,
+                    "scanned_messages": acc_msgs,
+                    "parsed_toss_count": acc_parsed,
+                    "message": err_str,
+                }
+            )
+
+    if success_accounts == 0 and error_messages:
+        return {
+            "status": "error",
+            "message": " / ".join(error_messages),
+            "scrolled_pages": total_pages,
+            "scanned_messages": total_scanned_msgs,
+            "parsed_toss_count": 0,
+            "verified_slips_count": 0,
+            "corp_matched_existing_count": 0,
+            "corp_created_count": 0,
+            "skipped_personal_count": 0,
+            "skipped_canceled_count": 0,
+            "items": [],
+            "account_results": account_results,
+        }
+
+    # Enrich records via Toss official receipt slip API (deduplicating slip calls per receipt_url)
+    slip_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+    for rec in raw_toss_records:
+        r_url = str(rec.get("receipt_url") or "").strip()
+        if not (verify_receipt_slip and r_url):
+            continue
+        if r_url not in slip_cache:
+            slip_cache[r_url] = fetch_toss_sales_slip_metadata(
+                receipt_url=r_url,
+                recipient_email=str(rec.get("recipient_email") or ""),
+                approval_no=str(rec.get("approval_no") or ""),
+                approved_date=str(rec.get("transacted_at") or "")[:10],
+                amount=int(rec.get("paid_amount") or rec.get("effective_amount") or 0),
+            )
+        slip_meta = slip_cache[r_url]
+        if slip_meta:
+            verified_slips_cnt += 1
+            rec["card_name"] = slip_meta.get("card_name") or rec.get("card_issuer")
+            rec["card_number_masked"] = slip_meta.get("card_number_masked") or ""
+            rec["slip_status"] = slip_meta.get("slip_status") or ""
+            rec["is_cancel"] = bool(slip_meta.get("is_cancel"))
+            rec["has_partial_cancel"] = bool(slip_meta.get("has_partial_cancel"))
+            rec["billed_amount"] = slip_meta.get("billed_amount")
+            rec["supply_value"] = slip_meta.get("supply_value")
+            rec["vat_amount"] = slip_meta.get("vat_amount")
+            rec["tax_free_amount"] = slip_meta.get("tax_free_amount")
+            if slip_meta.get("merchant_name"):
+                rec["merchant_name"] = slip_meta["merchant_name"]
+            if slip_meta.get("biz_reg_no"):
+                rec["biz_reg_no"] = slip_meta["biz_reg_no"]
+            if slip_meta.get("auth_number") and not rec.get("approval_no"):
+                rec["approval_no"] = slip_meta["auth_number"]
+            if slip_meta.get("paid_at"):
+                rec["paid_at"] = slip_meta["paid_at"]
+            if slip_meta.get("order_id") and not rec.get("order_no"):
+                rec["order_no"] = slip_meta["order_id"]
+            if slip_meta.get("product_name") and not rec.get("item_name"):
+                rec["item_name"] = slip_meta["product_name"]
+            if slip_meta.get("sales_slip_url"):
+                rec["sales_slip_url"] = slip_meta["sales_slip_url"]
+
+    # Pass 1: Collect canceled approvals & confirmed corporate card numbers across the mailbox
+    canceled_approvals: set[str] = set()
+    confirmed_corp_cards: set[str] = set()
+    for rec in raw_toss_records:
+        app_no = str(rec.get("approval_no") or "").strip()
+        ev = str(rec.get("event_type") or "")
+        s_stat = str(rec.get("slip_status") or "")
+        billed = rec.get("billed_amount")
+        if ev == "CANCEL" or rec.get("is_cancel") or s_stat == "취소" or (billed is not None and int(billed) == 0):
+            if app_no:
+                canceled_approvals.add(app_no)
+
+        c_num = str(rec.get("card_number_masked") or "").strip()
+        if not c_num:
+            continue
+        tail4, bin6 = _extract_card_tail4_and_bin6(c_num)
+        if tail4 and is_blocked_personal_card_code(tail4, archive_dir=archive_dir):
+            continue
+        if bin6 and any(bin6.startswith(p) for p in _TOSS_PERSONAL_CARD_BIN6_PREFIXES):
+            continue
+        buyer_probe = f"{rec.get('buyer_greeting') or ''} {rec.get('item_name') or ''}"
+        if (
+            (tail4 and match_registered_corp_card_code(tail4, archive_dir=archive_dir))
+            or (app_no and app_no in existing_corp_approvals)
+            or (bin6 and any(bin6.startswith(p) for p in _TOSS_CORP_CARD_BIN6_PREFIXES))
+            or _CORP_BUYER_OR_ITEM_RE.search(buyer_probe)
+        ):
+            confirmed_corp_cards.add(c_num)
+
+    # Mark any previously auto-created rows canceled if full cancellation was discovered
+    if canceled_approvals:
+        ph = ",".join("?" for _ in canceled_approvals)
+        cursor.execute(
+            f"""
+            UPDATE card_transactions
+            SET reconcile_status = 'CANCELED', updated_at = CURRENT_TIMESTAMP
+            WHERE approval_no IN ({ph})
+              AND reconcile_status IN ('EMAIL_ORDER', 'OCR_MATCHED')
+            """,
+            tuple(canceled_approvals),
+        )
+
+    # Pass 2: Deduplicate payment records (oldest-to-newest) and reconcile corporate purchases
+    payment_records = [r for r in reversed(raw_toss_records) if r.get("event_type") == "PAYMENT"]
+    seen_payment_keys: set[str] = set()
+    used_tx_ids: set[int] = set()
+    skipped_personal = 0
+    skipped_canceled = 0
+    matched_existing_cnt = 0
+    created_cnt = 0
+    result_items: List[Dict[str, Any]] = []
+
+    for rec in payment_records:
+        dt_str = str(rec.get("paid_at") or rec.get("transacted_at") or "")[:10]
+        if len(norm_start) == 10 and dt_str and dt_str < norm_start:
+            continue
+        if len(norm_end) == 10 and dt_str and dt_str > norm_end:
+            continue
+
+        app_no = str(rec.get("approval_no") or "").strip()
+        ord_no = str(rec.get("order_no") or "").strip()
+        pay_key = app_no or ord_no or f"{dt_str}|{rec.get('paid_amount')}|{rec.get('item_name')}"
+        if pay_key in seen_payment_keys:
+            continue
+        seen_payment_keys.add(pay_key)
+
+        billed = rec.get("billed_amount")
+        if (app_no and app_no in canceled_approvals) or (billed is not None and int(billed) <= 0):
+            skipped_canceled += 1
+            continue
+
+        ownership = classify_toss_card_ownership(
+            rec,
+            confirmed_corp_card_numbers=confirmed_corp_cards,
+            existing_corp_approvals=existing_corp_approvals,
+            archive_dir=archive_dir,
+        )
+        if not ownership["is_corporate"]:
+            skipped_personal += 1
+            continue
+
+        outcome = _reconcile_or_create_corp_toss_record(
+            cursor,
+            record=rec,
+            ownership=ownership,
+            used_tx_ids=used_tx_ids,
+            auto_create_corp_tx=auto_create_corp_tx,
+            archive_dir=archive_dir,
+        )
+        if outcome:
+            if outcome["action"] == "CREATED":
+                created_cnt += 1
+            else:
+                matched_existing_cnt += 1
+            result_items.append(outcome)
+
+    result_items.sort(key=lambda x: str(x.get("transacted_at") or ""), reverse=True)
+    if result_items:
+        merged_hist = _merge_recent_matched_items(
+            cfg.get("recent_matched_items") or [],
+            result_items,
+        )
+        save_email_watcher_config({"recent_matched_items": merged_hist}, archive_dir=archive_dir)
+
+    total_corp = matched_existing_cnt + created_cnt
+    summary_msg = (
+        f"토스페이먼츠 메일 스크롤링 완료 ({total_pages}페이지 · {total_scanned_msgs}통 탐색 · "
+        f"결제메일 {len(raw_toss_records)}건 분석): "
+        f"법인카드 {total_corp}건 반영 (기존매칭 {matched_existing_cnt}건 · 신규생성 {created_cnt}건), "
+        f"개인카드 {skipped_personal}건 제외"
+    )
+    if skipped_canceled > 0:
+        summary_msg += f", 취소 {skipped_canceled}건 제외"
+
+    return {
+        "status": "scrolled",
+        "message": summary_msg,
+        "scrolled_pages": total_pages,
+        "scanned_messages": total_scanned_msgs,
+        "parsed_toss_count": len(raw_toss_records),
+        "verified_slips_count": verified_slips_cnt,
+        "corp_total_count": total_corp,
+        "corp_matched_existing_count": matched_existing_cnt,
+        "corp_created_count": created_cnt,
+        "skipped_personal_count": skipped_personal,
+        "skipped_canceled_count": skipped_canceled,
+        "items": result_items,
         "account_results": account_results,
     }

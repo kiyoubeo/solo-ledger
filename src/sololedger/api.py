@@ -36,6 +36,7 @@ from sololedger.email_watcher import (
     ingest_email_order_payload,
     load_email_watcher_config,
     save_email_watcher_config,
+    scroll_imap_toss_payments_emails,
     sync_imap_order_emails,
     update_email_account_entry,
 )
@@ -1487,6 +1488,46 @@ async def sync_email_orders_endpoint(
             conn.close()
 
     return await asyncio.to_thread(_run_sync)
+
+
+@app.post("/api/v1/scraper/email-scroll-toss")
+async def scroll_toss_payments_email_endpoint(
+    payload: Dict[str, Any] = Body(default_factory=dict),
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Deep-scroll IMAP mailboxes page-by-page for corporate card Toss Payments purchases."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    body = payload if isinstance(payload, dict) else {}
+    acc_id = str(body.get("account_id") or "").strip()
+    start_dt = str(body.get("start_date") or "").strip()
+    end_dt = str(body.get("end_date") or "").strip()
+    page_size = int(body.get("page_size", 50))
+    max_pages = int(body.get("max_pages", 20))
+    verify_slip = bool(body.get("verify_receipt_slip", True))
+    auto_create = bool(body.get("auto_create_corp_tx", True))
+
+    def _run_scroll() -> Dict[str, Any]:
+        init_db()
+        conn = get_connection()
+        cur = conn.cursor()
+        try:
+            res = scroll_imap_toss_payments_emails(
+                cur,
+                account_id=acc_id or None,
+                start_date=start_dt or None,
+                end_date=end_dt or None,
+                page_size=page_size,
+                max_pages=max_pages,
+                verify_receipt_slip=verify_slip,
+                auto_create_corp_tx=auto_create,
+            )
+            conn.commit()
+            return res
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_run_scroll)
 
 
 @app.post("/api/v1/scraper/email-webhook")
