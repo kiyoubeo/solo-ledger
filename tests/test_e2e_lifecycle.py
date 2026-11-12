@@ -24,7 +24,7 @@ def test_full_sololedger_lifecycle_e2e(client):
     )
     assert sms_coupang.status_code == 200
     tx_coupang_id = sms_coupang.json()["tx_id"]
-    assert sms_coupang.json()["account_code"] == "830"  # 소모품비
+    assert sms_coupang.json()["account_code"] == "999"  # 품목 확인 전 미분류
 
     sms_starbucks = client.post(
         "/api/v1/webhooks/sms",

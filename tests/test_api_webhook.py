@@ -34,8 +34,8 @@ def test_webhook_records_and_deduplicates_sms(client):
     assert body1["status"] == "recorded"
     assert body1["merchant"] == "(주)쿠팡"
     assert body1["amount"] == 45000
-    assert body1["account_code"] == "830"
-    assert body1["account_name"] == "소모품비"
+    assert body1["account_code"] == "999"
+    assert body1["account_name"] == "미분류"
 
     # Second identical transmission -> duplicate_skipped
     r2 = client.post("/api/v1/webhooks/sms", json=payload, headers=headers)

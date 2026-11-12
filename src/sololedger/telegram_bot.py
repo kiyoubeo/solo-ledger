@@ -8,12 +8,17 @@ from sololedger.archiver import build_archived_filename
 
 _MEMO_ACCOUNT_KEYWORDS = [
     (re.compile(r"(비품|모니터|노트북|키보드|책상|의자)"), ("212", "비품", False, None)),
+    (re.compile(r"(주차|주유|세차|정비|하이패스|통행료)"), ("822", "차량유지비", True, "PASSENGER_CAR")),
     (re.compile(r"(도서|책|인쇄|출판)"), ("826", "도서인쇄비", False, None)),
-    (re.compile(r"(소프트웨어|구독|클라우드|서버|수수료)"), ("831", "지급수수료", False, None)),
+    (
+        re.compile(r"(소프트웨어|구독|클라우드|서버|수수료|인증서|범용인증서|라이선스)"),
+        ("831", "지급수수료", False, None),
+    ),
     (re.compile(r"(미팅|접대|거래처|고객사|식사대접)"), ("813", "기업업무추진비", True, "ENTERTAINMENT")),
     (
         re.compile(
-            r"(원재료|현장자재|목재|합판|석고보드|페인트|철물|건재|타일|벽지|장판|인테리어필름|시트지|타카|시공자재)"
+            r"(원재료|현장자재|목재|합판|석고보드|페인트|철물|건재|타일|벽지|장판|"
+            r"인테리어필름|시트지|타카|시공자재|조명|장스탠드|펜던트등|다운라이트)"
         ),
         ("501", "원재료비", False, None),
     ),
@@ -179,6 +184,7 @@ def handle_telegram_text_reply(
 
     if override:
         acc_code, acc_name, force_non_ded, reason = override
+        is_veh = 1 if acc_code == "822" else 0
         if force_non_ded:
             cursor.execute(
                 """
@@ -188,10 +194,11 @@ def handle_telegram_text_reply(
                     account_name = ?,
                     vat_deduction_type = 'NON_DEDUCTIBLE',
                     non_deduct_reason = ?,
+                    is_vehicle_expense = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE tx_id = ?
                 """,
-                (clean_memo, acc_code, acc_name, reason, tx_id),
+                (clean_memo, acc_code, acc_name, reason, is_veh, tx_id),
             )
         else:
             cursor.execute(
@@ -200,16 +207,28 @@ def handle_telegram_text_reply(
                 SET counterparty_info = ?,
                     account_code = ?,
                     account_name = ?,
+                    vat_deduction_type = CASE
+                        WHEN vat_deduction_type IN ('PENDING', 'PENDING_CHECK') THEN 'DEDUCTIBLE'
+                        ELSE vat_deduction_type
+                    END,
+                    is_vehicle_expense = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE tx_id = ?
                 """,
-                (clean_memo, acc_code, acc_name, tx_id),
+                (clean_memo, acc_code, acc_name, is_veh, tx_id),
             )
     else:
         cursor.execute(
             """
             UPDATE card_transactions
             SET counterparty_info = ?,
+                account_code = CASE WHEN account_code = '999' THEN '830' ELSE account_code END,
+                account_name = CASE WHEN account_code = '999' THEN '소모품비' ELSE account_name END,
+                vat_deduction_type = CASE
+                    WHEN account_code = '999' AND vat_deduction_type IN ('PENDING', 'PENDING_CHECK')
+                        THEN 'DEDUCTIBLE'
+                    ELSE vat_deduction_type
+                END,
                 updated_at = CURRENT_TIMESTAMP
             WHERE tx_id = ?
             """,

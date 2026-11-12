@@ -21,6 +21,7 @@ from sololedger.tax_engine import (
     calculate_supply_and_vat,
     evaluate_tax_rules,
     generate_default_memo,
+    is_uncertain_item_merchant,
     learn_merchant_rule,
 )
 from sololedger.telegram_bot import _refresh_receipt_archived_filename
@@ -170,13 +171,43 @@ def update_transaction_classification(
     return updated
 
 
+_SYSTEM_AUTO_MEMOS = {
+    "사무실 소모품 및 생활잡화 구입",
+    "업무용 IT구독·통신·교통 수수료",
+    "업무용 IT구독·통신 수수료",
+    "대표자(임직원) 식대 및 복리후생",
+    "현장 시공·디자인 업무 식대 및 복리후생",
+    "현장 시공 부자재·마감용품 및 사무실 소모품 구입",
+    "공간디자인·인테리어 현장 스타일링 소품 및 샘플 구입",
+    "디자인·현장 업무용 IT 주변기기 및 소모품 구입",
+    "디자인·현장 소모품 및 사무용품 구입",
+    "인테리어·공간디자인 현장 가구·조명·스타일링 자재 구입",
+    "사무용 문구 및 소모품 구입",
+    "업무용승용차 주유비",
+    "차량 주차료",
+    "업무용승용차 정비·유지",
+    "하이패스 통행료",
+    "업무용승용차 자동차세 납부",
+}
+
+
 def reapply_tax_rules_to_ledger(cursor: sqlite3.Cursor) -> Dict[str, Any]:
     """Re-evaluate tax classification rules and populate smart default memos across ledger rows."""
     cursor.execute(
         """
+        SELECT DISTINCT tx_id
+        FROM receipt_ocr_metadata
+        WHERE tx_id IS NOT NULL AND source_channel != 'AUTO_SLIP'
+        """
+    )
+    confirmed_tx_ids = {int(row[0]) for row in cursor.fetchall()}
+
+    cursor.execute(
+        """
         SELECT tx_id, raw_merchant_name, biz_reg_no, total_amount,
                supply_value, vat_amount, reconcile_status,
-               account_code, account_name, vat_deduction_type, counterparty_info
+               account_code, account_name, vat_deduction_type,
+               non_deduct_reason, counterparty_info
         FROM card_transactions
         WHERE reconcile_status != 'CANCELED'
         """
@@ -184,56 +215,105 @@ def reapply_tax_rules_to_ledger(cursor: sqlite3.Cursor) -> Dict[str, Any]:
     rows = cursor.fetchall()
     reclassified_count = 0
     auto_memo_filled_count = 0
-    legacy_generic_memos = {
-        "사무실 소모품 및 생활잡화 구입",
-        "업무용 IT구독·통신·교통 수수료",
-        "대표자(임직원) 식대 및 복리후생",
-    }
 
     for r in rows:
         tx_id = int(r["tx_id"])
         m_name = str(r["raw_merchant_name"] or "")
         cur_code = str(r["account_code"] or "999")
         cur_memo = str(r["counterparty_info"] or "").strip()
+        has_confirmed_evidence = tx_id in confirmed_tx_ids
+        has_user_custom_memo = bool(cur_memo) and (cur_memo not in _SYSTEM_AUTO_MEMOS)
 
         rule_eval = evaluate_tax_rules(cursor, m_name, r["biz_reg_no"])
         new_code = cur_code
-        should_reclassify = (cur_code == "999" and rule_eval["account_code"] != "999") or (
-            cur_code in ("830", "831") and rule_eval["account_code"] in ("501", "511")
-        )
+        should_reclassify = False
+
+        if not has_confirmed_evidence and not has_user_custom_memo:
+            if rule_eval["account_code"] == "999" and cur_code != "999":
+                if is_uncertain_item_merchant(m_name) or cur_code != "811":
+                    should_reclassify = True
+            elif rule_eval["account_code"] != "999":
+                if cur_code == "999" or (
+                    cur_code in ("830", "831") and rule_eval["account_code"] != cur_code
+                ):
+                    should_reclassify = True
+
         if should_reclassify:
             new_code = rule_eval["account_code"]
             new_name = rule_eval["account_name"]
-            new_vat_type = (
-                r["vat_deduction_type"]
-                if r["reconcile_status"] == "HOMETAX_VERIFIED"
-                and r["vat_deduction_type"] in ("EXEMPT", "NON_DEDUCTIBLE")
-                else rule_eval["vat_deduction_type"]
-            )
-            new_reason = rule_eval["non_deduct_reason"]
-            is_veh = 1 if rule_eval["is_vehicle_expense"] else 0
-            if r["reconcile_status"] == "HOMETAX_VERIFIED":
-                sup, vat = int(r["supply_value"]), int(r["vat_amount"])
+            if new_code == "999":
+                keep_tax_status = r["vat_deduction_type"] == "EXEMPT" or (
+                    r["vat_deduction_type"] == "NON_DEDUCTIBLE"
+                    and r["non_deduct_reason"] == "SIMPLIFIED_TAX"
+                )
+                new_vat_type = r["vat_deduction_type"] if keep_tax_status else "PENDING"
+                new_reason = r["non_deduct_reason"] if keep_tax_status else None
+                is_veh = 0
+                if r["reconcile_status"] == "HOMETAX_VERIFIED":
+                    sup, vat = int(r["supply_value"]), int(r["vat_amount"])
+                else:
+                    sup, vat = calculate_supply_and_vat(int(r["total_amount"]), new_vat_type)
+                cursor.execute(
+                    """
+                    UPDATE card_transactions
+                    SET account_code = '999',
+                        account_name = '미분류',
+                        vat_deduction_type = ?,
+                        non_deduct_reason = ?,
+                        is_vehicle_expense = 0,
+                        supply_value = ?,
+                        vat_amount = ?,
+                        counterparty_info = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE tx_id = ?
+                    """,
+                    (new_vat_type, new_reason, sup, vat, tx_id),
+                )
+                cur_memo = ""
             else:
-                sup, vat = calculate_supply_and_vat(int(r["total_amount"]), new_vat_type)
-            cursor.execute(
-                """
-                UPDATE card_transactions
-                SET account_code = ?,
-                    account_name = ?,
-                    vat_deduction_type = ?,
-                    non_deduct_reason = COALESCE(non_deduct_reason, ?),
-                    is_vehicle_expense = ?,
-                    supply_value = ?,
-                    vat_amount = ?,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE tx_id = ?
-                """,
-                (new_code, new_name, new_vat_type, new_reason, is_veh, sup, vat, tx_id),
-            )
+                new_vat_type = (
+                    r["vat_deduction_type"]
+                    if r["reconcile_status"] == "HOMETAX_VERIFIED"
+                    and r["vat_deduction_type"] in ("EXEMPT", "NON_DEDUCTIBLE")
+                    else rule_eval["vat_deduction_type"]
+                )
+                new_reason = rule_eval["non_deduct_reason"]
+                is_veh = 1 if rule_eval["is_vehicle_expense"] else 0
+                if r["reconcile_status"] == "HOMETAX_VERIFIED":
+                    sup, vat = int(r["supply_value"]), int(r["vat_amount"])
+                else:
+                    sup, vat = calculate_supply_and_vat(int(r["total_amount"]), new_vat_type)
+                cursor.execute(
+                    """
+                    UPDATE card_transactions
+                    SET account_code = ?,
+                        account_name = ?,
+                        vat_deduction_type = ?,
+                        non_deduct_reason = COALESCE(non_deduct_reason, ?),
+                        is_vehicle_expense = ?,
+                        supply_value = ?,
+                        vat_amount = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE tx_id = ?
+                    """,
+                    (new_code, new_name, new_vat_type, new_reason, is_veh, sup, vat, tx_id),
+                )
+            _refresh_receipt_archived_filename(cursor, tx_id)
             reclassified_count += 1
 
-        if not cur_memo or cur_memo in legacy_generic_memos or should_reclassify:
+        if new_code == "999":
+            if not has_confirmed_evidence and not has_user_custom_memo and cur_memo:
+                cursor.execute(
+                    """
+                    UPDATE card_transactions
+                    SET counterparty_info = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE tx_id = ?
+                    """,
+                    (tx_id,),
+                )
+                _refresh_receipt_archived_filename(cursor, tx_id)
+        elif not cur_memo or cur_memo in _SYSTEM_AUTO_MEMOS or should_reclassify:
             req_prompt = bool(rule_eval.get("require_memo_prompt", False))
             auto_memo = generate_default_memo(new_code, m_name, req_prompt)
             if auto_memo and auto_memo != cur_memo:
@@ -246,6 +326,7 @@ def reapply_tax_rules_to_ledger(cursor: sqlite3.Cursor) -> Dict[str, Any]:
                     """,
                     (auto_memo, tx_id),
                 )
+                _refresh_receipt_archived_filename(cursor, tx_id)
                 auto_memo_filled_count += 1
 
     return {
@@ -2424,7 +2505,13 @@ def render_dashboard_html(
         document.getElementById('modal-header-title').textContent =
           '📄 거래명세서 (#' + d.tx_id + ')';
         const mdStr = escHtml(String(d.transacted_at || '').slice(5, 10).replace('-', '/'));
-        const itemVal = escHtml(d.counterparty_info || typedMemo || (d.raw_merchant_name + ' 구매 품목'));
+        const rawItemStr = String(d.counterparty_info || typedMemo || '').trim();
+        const itemVal = rawItemStr
+          ? escHtml(rawItemStr)
+          : (String(d.account_code) === '999'
+              ? '<span style="color:#b45309;">품목 미확인 (미분류 — 아래 입력란에 거래품목 입력)</span>'
+              : escHtml(d.raw_merchant_name + ' 구매 품목'));
+        const stmtInputVal = escHtml(rawItemStr);
         const totAmt = Number(d.total_amount || 0);
         const supAmt = (d.vat_deduction_type === 'EXEMPT')
           ? totAmt
@@ -2436,7 +2523,7 @@ def render_dashboard_html(
         let totQty = 0;
         if (Array.isArray(d.line_items) && d.line_items.length > 0) {{
           d.line_items.forEach((li) => {{
-            const liName = escHtml(li.item || li.name || itemVal);
+            const liName = escHtml(li.item || li.name || rawItemStr || '품목 미확인');
             const liSeller = (d.marketplace_seller && li.seller)
               ? (' <span style="color:#64748b; font-size:11px; font-weight:400;">(판매자: ' +
                  escHtml(li.seller) + ')</span>')
@@ -2522,7 +2609,7 @@ def render_dashboard_html(
           '<div style="font-weight:700; font-size:12px; margin-bottom:6px; color:#1e3a8a;">' +
           '✏️ 거래명세서 품목·규격 입력 및 전자 거래명세서 발급</div>' +
           '<div style="display:flex; gap:6px; flex-wrap:wrap;">' +
-          '<input type="text" id="modal-stmt-item" value="' + itemVal + '" ' +
+          '<input type="text" id="modal-stmt-item" value="' + stmtInputVal + '" ' +
           'style="flex:1; min-width:180px;" placeholder="품목명 또는 거래 내역 입력" />' +
           '<button onclick="saveStatementForActiveTx()">💾 품목 반영 · 명세서 저장</button>' +
           '</div></div>' +

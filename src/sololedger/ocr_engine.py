@@ -221,7 +221,7 @@ async def process_and_link_receipt(
                 (primary_item_name, matched_tx_id),
             )
 
-    # Apply item-based account inference for PG/unclassified rows if line items indicate specific account
+    # Apply item-based account inference when confirmed receipt line items are extracted
     if primary_item_name:
         cursor.execute("SELECT * FROM card_transactions WHERE tx_id = ?", (matched_tx_id,))
         curr_tx = cursor.fetchone()
@@ -232,43 +232,65 @@ async def process_and_link_receipt(
             inferred = _detect_memo_account_override(primary_item_name)
             if inferred:
                 acc_code, acc_name, force_non_ded, reason = inferred
-                # For PG transactions already classified as 830 (consumables), only upgrade to
-                # 212 (equipment) when total_amount >= 300,000 KRW or '비품' is explicitly stated.
-                should_apply = True
+                # Below 300,000 KRW without explicit '비품', classify IT/office gear as 830 소모품비
                 if (
-                    curr_tx["account_code"] == "830"
+                    curr_tx["account_code"] in ("999", "830")
                     and acc_code == "212"
                     and int(curr_tx["total_amount"]) < 300_000
                     and "비품" not in primary_item_name
                 ):
-                    should_apply = False
+                    acc_code, acc_name, force_non_ded, reason = ("830", "소모품비", False, None)
 
-                if should_apply:
-                    new_ded = "NON_DEDUCTIBLE" if force_non_ded else "DEDUCTIBLE"
-                    inf_supply, inf_vat = calculate_supply_and_vat(
-                        int(curr_tx["total_amount"]), new_ded
-                    )
-                    cursor.execute(
-                        """
-                        UPDATE card_transactions
-                        SET account_code = ?,
-                            account_name = ?,
-                            vat_deduction_type = ?,
-                            non_deduct_reason = ?,
-                            supply_value = ?,
-                            vat_amount = ?
-                        WHERE tx_id = ?
-                        """,
-                        (
-                            acc_code,
-                            acc_name,
-                            new_ded,
-                            reason,
-                            inf_supply,
-                            inf_vat,
-                            matched_tx_id,
-                        ),
-                    )
+                new_ded = "NON_DEDUCTIBLE" if force_non_ded else "DEDUCTIBLE"
+                is_veh = 1 if acc_code == "822" else 0
+                inf_supply, inf_vat = calculate_supply_and_vat(
+                    int(curr_tx["total_amount"]), new_ded
+                )
+                cursor.execute(
+                    """
+                    UPDATE card_transactions
+                    SET account_code = ?,
+                        account_name = ?,
+                        vat_deduction_type = ?,
+                        non_deduct_reason = ?,
+                        is_vehicle_expense = ?,
+                        supply_value = ?,
+                        vat_amount = ?
+                    WHERE tx_id = ?
+                    """,
+                    (
+                        acc_code,
+                        acc_name,
+                        new_ded,
+                        reason,
+                        is_veh,
+                        inf_supply,
+                        inf_vat,
+                        matched_tx_id,
+                    ),
+                )
+            elif curr_tx["account_code"] == "999":
+                new_ded = (
+                    curr_tx["vat_deduction_type"]
+                    if curr_tx["vat_deduction_type"] in ("EXEMPT", "NON_DEDUCTIBLE")
+                    and curr_tx["non_deduct_reason"] == "SIMPLIFIED_TAX"
+                    else "DEDUCTIBLE"
+                )
+                inf_supply, inf_vat = calculate_supply_and_vat(
+                    int(curr_tx["total_amount"]), new_ded
+                )
+                cursor.execute(
+                    """
+                    UPDATE card_transactions
+                    SET account_code = '830',
+                        account_name = '소모품비',
+                        vat_deduction_type = ?,
+                        supply_value = ?,
+                        vat_amount = ?
+                    WHERE tx_id = ?
+                    """,
+                    (new_ded, inf_supply, inf_vat, matched_tx_id),
+                )
             elif curr_tx["vat_deduction_type"] in ("PENDING", "PENDING_CHECK"):
                 cursor.execute(
                     """

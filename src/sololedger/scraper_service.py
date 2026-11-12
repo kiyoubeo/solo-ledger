@@ -44,6 +44,7 @@ from sololedger.importers import (
     _pick_col,
     parse_hometax_csv,
 )
+from sololedger.merchant_service import ACCOUNT_CODE_NAMES
 from sololedger.models import ReconcileItem
 from sololedger.nts_client import validate_biz_reg_no_checksum
 from sololedger.reconciler import reconcile_single_item
@@ -1846,7 +1847,12 @@ def render_electronic_statement_html(
         supply_val, vat_amt = calculate_supply_and_vat(total_amt, "DEDUCTIBLE")
     acc_str = html.escape(f"{tx_row['account_code']} {tx_row['account_name']}")
     raw_memo = str(tx_row.get("counterparty_info") or "").strip()
-    item_title = html.escape(raw_memo if raw_memo else f"{tx_row['raw_merchant_name']} 구매 품목")
+    if raw_memo:
+        item_title = html.escape(raw_memo)
+    elif str(tx_row.get("account_code") or "") == "999":
+        item_title = html.escape("품목 미확인 (미분류 — 거래내역 확인 필요)")
+    else:
+        item_title = html.escape(f"{tx_row['raw_merchant_name']} 구매 품목")
     slip_title = build_receipt_print_title(
         tx_id=tx_id,
         transacted_at=str(tx_row["transacted_at"]),
@@ -2069,23 +2075,40 @@ def generate_electronic_statement_for_tx(
         resolved_item = f"{tx['raw_merchant_name']} 거래명세서 확인 품목"
 
     new_code = account_code or str(tx["account_code"])
-    new_name = str(tx["account_name"])
+    new_name = (
+        ACCOUNT_CODE_NAMES.get(account_code, str(tx["account_name"]))
+        if account_code
+        else str(tx["account_name"])
+    )
     new_vat_type = str(tx["vat_deduction_type"])
     new_reason = tx.get("non_deduct_reason")
 
     inferred = _detect_memo_account_override(resolved_item)
     if inferred and not account_code:
         inf_code, inf_name, force_non_ded, inf_reason = inferred
-        if not (new_code == "830" and inf_code == "212" and int(tx["total_amount"]) < 300_000):
-            new_code = inf_code
-            new_name = inf_name
-            new_vat_type = "NON_DEDUCTIBLE" if force_non_ded else "DEDUCTIBLE"
-            new_reason = inf_reason
-    elif new_code == "999":
-        new_code = "830"
-        new_name = "소모품비"
+        if (
+            new_code in ("999", "830")
+            and inf_code == "212"
+            and int(tx["total_amount"]) < 300_000
+            and "비품" not in resolved_item
+        ):
+            inf_code, inf_name, force_non_ded, inf_reason = ("830", "소모품비", False, None)
+        new_code = inf_code
+        new_name = inf_name
+        new_vat_type = "NON_DEDUCTIBLE" if force_non_ded else "DEDUCTIBLE"
+        new_reason = inf_reason
+    elif not account_code and new_code == "999":
+        if "아톡" in str(tx.get("raw_merchant_name") or ""):
+            new_code = "831"
+            new_name = "지급수수료"
+        else:
+            new_code = "830"
+            new_name = "소모품비"
+        new_vat_type = "DEDUCTIBLE"
+    elif account_code and new_code != "999" and new_vat_type in ("PENDING", "PENDING_CHECK"):
         new_vat_type = "DEDUCTIBLE"
 
+    is_veh = 1 if new_code == "822" else 0
     sup, vat = calculate_supply_and_vat(int(tx["total_amount"]), new_vat_type)
     cursor.execute(
         """
@@ -2094,6 +2117,7 @@ def generate_electronic_statement_for_tx(
             account_name = ?,
             vat_deduction_type = ?,
             non_deduct_reason = ?,
+            is_vehicle_expense = ?,
             supply_value = ?,
             vat_amount = ?,
             counterparty_info = ?,
@@ -2104,7 +2128,7 @@ def generate_electronic_statement_for_tx(
             updated_at = CURRENT_TIMESTAMP
         WHERE tx_id = ?
         """,
-        (new_code, new_name, new_vat_type, new_reason, sup, vat, resolved_item, tx_id),
+        (new_code, new_name, new_vat_type, new_reason, is_veh, sup, vat, resolved_item, tx_id),
     )
 
     cursor.execute("SELECT * FROM card_transactions WHERE tx_id = ?", (tx_id,))
@@ -2203,6 +2227,11 @@ def generate_electronic_slips_for_ledger(
             SELECT t.*
             FROM card_transactions t
             WHERE t.reconcile_status != 'CANCELED'
+              AND NOT EXISTS (
+                  SELECT 1 FROM receipt_ocr_metadata r
+                  WHERE r.tx_id = t.tx_id
+                    AND r.source_channel != 'AUTO_SLIP'
+              )
             ORDER BY t.transacted_at DESC, t.tx_id DESC
             """
         )
@@ -2229,6 +2258,12 @@ def generate_electronic_slips_for_ledger(
         slip_html = render_electronic_slip_html(tx)
         slip_bytes = slip_html.encode("utf-8")
         file_hash = compute_sha256_hex(slip_bytes)
+
+        if force_regenerate:
+            cursor.execute(
+                "DELETE FROM receipt_ocr_metadata WHERE tx_id = ? AND source_channel = 'AUTO_SLIP'",
+                (tx_id,),
+            )
 
         cursor.execute(
             "SELECT receipt_id FROM receipt_ocr_metadata WHERE file_hash_sha256 = ?",
