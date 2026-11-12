@@ -1156,9 +1156,11 @@ def render_dashboard_html(
             f"<div class='acc-detail-table-wrap'>"
             f"<table class='acc-detail-table'>"
             f"<thead><tr>"
-            f"<th>전표번호</th><th>거래일시 (영수증/명세서)</th><th>카드구분</th>"
-            f"<th>가맹점명</th><th>합계금액</th><th>공급가액</th><th>부가세</th>"
-            f"<th>공제구분</th><th>적요 / 품목 소명</th><th>계정 재분류 · 저장</th>"
+            f"<th class='nowrap'>전표번호</th><th>거래일시 (영수증/명세서)</th>"
+            f"<th class='nowrap'>카드구분</th><th>가맹점명</th>"
+            f"<th class='num nowrap'>합계금액</th><th class='num nowrap'>공급가액</th>"
+            f"<th class='num nowrap'>부가세</th><th class='nowrap'>공제구분</th>"
+            f"<th>적요 / 품목 소명</th><th class='nowrap'>계정 재분류 · 저장</th>"
             f"<th>증빙파일명</th>"
             f"</tr></thead>"
             f"<tbody>{acc_detail_tbody_str}</tbody>"
@@ -1194,7 +1196,7 @@ def render_dashboard_html(
         )
         pending_rows_html.append(
             f"<tr data-tx-id='{tx_id}' data-total-amount='{int(item['total_amount'])}'>"
-            f"<td>#{tx_id}</td>"
+            f"<td class='tx-pin-cell' title='클릭 시 이 전표 행을 상단 기준행으로 고정/해제'>#{tx_id}</td>"
             f"<td>{dt_link}</td>"
             f"<td><span class='badge card'>{c_lbl}</span></td>"
             f"<td><strong>{merchant}</strong></td>"
@@ -1254,9 +1256,9 @@ def render_dashboard_html(
         )
         has_stmt_flag = "1" if has_stmt else "0"
         tx_rows_html.append(
-            f"<tr data-has-stmt='{has_stmt_flag}' data-account-code='{tx_acc_code}' "
+            f"<tr data-tx-id='{tx_id}' data-has-stmt='{has_stmt_flag}' data-account-code='{tx_acc_code}' "
             f"data-total-amount='{int(tx['total_amount'])}'>"
-            f"<td>#{tx_id}</td>"
+            f"<td class='tx-pin-cell' title='클릭 시 이 전표 행을 상단 기준행으로 고정/해제'>#{tx_id}</td>"
             f"<td>{dt_link}</td>"
             f"<td><span class='badge card'>{c_lbl}</span></td>"
             f"<td>{merchant}</td>"
@@ -1353,15 +1355,88 @@ def render_dashboard_html(
     .card h3 {{ margin: 0 0 8px 0; font-size: 13px; color: #64748b; }}
     .card .val {{ font-size: 22px; font-weight: 700; color: #0f172a; }}
     .section {{ background: #ffffff; border: 1px solid #e2e8f0; border-radius: 10px;
-                padding: 18px; margin-bottom: 24px; }}
+                padding: 18px; margin-bottom: 24px;
+                --sticky-bar-h: 44px; --sticky-thead-h: 40px; }}
     .gauge-track {{ width: 100%; height: 16px; background: #e2e8f0; border-radius: 8px;
                     overflow: hidden; margin: 10px 0; }}
     .gauge-bar {{ height: 100%; background: #2563eb; width: {gauge_pct}%; }}
     table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
     th, td {{ border-bottom: 1px solid #e2e8f0; padding: 9px 8px; text-align: left; }}
     th {{ background: #f1f5f9; font-weight: 600; }}
-    td.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
+    th.num, td.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
+    th.nowrap {{ white-space: nowrap; }}
     td.empty {{ text-align: center; color: #64748b; padding: 18px; }}
+    .section-sticky-bar {{
+      display: flex; justify-content: space-between; align-items: center;
+      flex-wrap: wrap; gap: 8px; background: #ffffff;
+      padding: 10px 0; margin: -8px 0 0 0;
+    }}
+    .section-sticky-bar h2 {{ margin: 0; font-size: 18px; }}
+    body:not(.unfreeze-headers) .section-sticky-bar {{
+      position: sticky; top: 0; z-index: 30;
+      box-shadow: 0 -4px 0 #ffffff;
+    }}
+    body:not(.unfreeze-headers) .section.is-stuck > .section-sticky-bar {{
+      box-shadow: 0 -4px 0 #ffffff, inset 0 -1px 0 #e2e8f0;
+    }}
+    body:not(.unfreeze-headers) .sticky-ledger-table > thead > tr > th {{
+      position: sticky; top: var(--sticky-bar-h, 44px); z-index: 25;
+      background: #f1f5f9; color: #0f172a; border-bottom: none;
+      word-break: keep-all;
+      box-shadow: 0 -1px 0 #e2e8f0, inset 0 -2px 0 #cbd5e1;
+      transition: background-color 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
+    }}
+    body:not(.unfreeze-headers) .section.is-stuck > .sticky-ledger-table > thead > tr > th {{
+      background: #e2e8f0;
+      box-shadow: 0 -1px 0 #cbd5e1, inset 0 -2px 0 #2563eb, 0 4px 10px -2px rgba(15, 23, 42, 0.12);
+    }}
+    .sticky-ledger-table > thead > tr > th.col-hover-active,
+    .acc-detail-table > thead > tr > th.col-hover-active {{
+      background: #dbeafe !important; color: #1d4ed8 !important;
+      box-shadow: 0 -1px 0 #bfdbfe, inset 0 -3px 0 #1d4ed8 !important;
+    }}
+    .sticky-ledger-table > tbody > tr {{
+      scroll-margin-top: calc(var(--sticky-bar-h, 44px) + var(--sticky-thead-h, 40px) + 12px);
+    }}
+    .sticky-ledger-table > tbody > tr:not(.acc-detail-row):not(.acc-summary-row):hover > td,
+    .acc-detail-table > tbody > tr:hover > td {{
+      background: #f8fafc;
+    }}
+    td.tx-pin-cell {{
+      cursor: pointer; white-space: nowrap; font-weight: 600; color: #334155;
+      user-select: none;
+    }}
+    td.tx-pin-cell:hover {{ color: #1d4ed8; background: #eff6ff !important; }}
+    td.tx-pin-cell::after {{
+      content: ' 📌'; font-size: 10px; opacity: 0; transition: opacity 0.12s ease;
+    }}
+    td.tx-pin-cell:hover::after,
+    tr.pinned-ledger-row > td.tx-pin-cell::after {{ opacity: 1; }}
+    body:not(.unfreeze-headers) .sticky-ledger-table > tbody > tr.pinned-ledger-row > td {{
+      position: sticky;
+      top: var(--pinned-row-top, calc(var(--sticky-bar-h, 44px) + var(--sticky-thead-h, 40px)));
+      z-index: 20;
+      background: #fefce8 !important;
+      border-bottom: none;
+      box-shadow: 0 -1px 0 #fde047, inset 0 -2px 0 #eab308, 0 3px 8px -2px rgba(15, 23, 42, 0.10);
+    }}
+    body.unfreeze-headers .sticky-ledger-table > tbody > tr.pinned-ledger-row > td {{
+      background: #fefce8 !important;
+      box-shadow: inset 0 -2px 0 #eab308;
+    }}
+    .freeze-toggle-btn {{
+      background: #eff6ff; color: #1d4ed8; border: 1px solid #93c5fd;
+      font-weight: 700; font-size: 12px; padding: 5px 10px;
+    }}
+    .freeze-toggle-btn:hover {{ background: #dbeafe; }}
+    .freeze-toggle-btn.off {{
+      background: #f1f5f9; color: #475569; border-color: #cbd5e1;
+    }}
+    .scroll-top-btn {{
+      background: #f8fafc; color: #334155; border: 1px solid #cbd5e1;
+      font-weight: 700; font-size: 12px; padding: 5px 9px;
+    }}
+    .scroll-top-btn:hover {{ background: #e2e8f0; color: #0f172a; }}
     .badge.warn {{ background: #fef3c7; color: #92400e; padding: 2px 8px; border-radius: 4px; }}
     .badge.card {{ background: #dbeafe; color: #1e40af; padding: 3px 8px; border-radius: 4px;
                    font-weight: 600; font-size: 12px; }}
@@ -1395,9 +1470,21 @@ def render_dashboard_html(
                           flex-wrap: wrap; gap: 8px; margin-bottom: 8px; font-size: 13px; }}
     .acc-detail-table-wrap {{ max-height: 440px; overflow-y: auto; background: #ffffff;
                               border: 1px solid #cbd5e1; border-radius: 8px; }}
-    .acc-detail-table th {{ position: sticky; top: 0; background: #eff6ff;
-                            color: #1e3a8a; z-index: 1; font-size: 12px; }}
+    .acc-detail-table > thead > tr > th {{
+      position: sticky; top: 0; background: #eff6ff;
+      color: #1e3a8a; z-index: 3; font-size: 12px; border-bottom: none;
+      word-break: keep-all;
+      box-shadow: 0 -2px 0 #eff6ff, inset 0 -2px 0 #93c5fd;
+    }}
     .acc-detail-table td {{ font-size: 12px; padding: 7px 8px; }}
+    #email-matched-list thead th {{
+      position: sticky; top: 0; z-index: 2; background: #f0fdf4;
+      box-shadow: 0 -1px 0 #ffffff, inset 0 -2px 0 #86efac;
+    }}
+    #toss-scroll-results thead th {{
+      position: sticky; top: 0; z-index: 2; background: #e0f2fe;
+      box-shadow: 0 -1px 0 #ffffff, inset 0 -2px 0 #7dd3fc;
+    }}
     .modal-backdrop {{ display: none; position: fixed; inset: 0; background: rgba(15, 23, 42, 0.58);
                        z-index: 9999; align-items: center; justify-content: center; padding: 16px; }}
     .modal-backdrop.open {{ display: flex; }}
@@ -1494,6 +1581,12 @@ def render_dashboard_html(
         break-inside: avoid;
       }}
       .no-print {{ display: none !important; }}
+      .section-sticky-bar,
+      .sticky-ledger-table > thead > tr > th,
+      .sticky-ledger-table > tbody > tr.pinned-ledger-row > td {{
+        position: static !important;
+        box-shadow: none !important;
+      }}
       mark.sl-find-hit {{
         background: transparent !important; color: inherit !important; box-shadow: none !important;
       }}
@@ -1601,6 +1694,11 @@ def render_dashboard_html(
                   onclick="openCtrlFSearch()" title="화면 내 찾기 및 원장 전표 실시간 필터 (단축키: Ctrl+F)">
             🔎 빠른 검색 (Ctrl+F)
           </button>
+          <button type="button" id="btn-toggle-freeze-header" class="freeze-toggle-btn"
+                  onclick="toggleFreezeHeaders()"
+                  title="스크롤 시 항목 헤더 행을 엑셀처럼 화면 상단에 고정/해제합니다">
+            📌 상단 행 고정 ON
+          </button>
         </div>
       </div>
 
@@ -1660,9 +1758,8 @@ def render_dashboard_html(
   </section>
 
   <section class="section" id="account-summary-section">
-    <div style="display:flex; justify-content:space-between; align-items:center;
-                flex-wrap:wrap; gap:8px; margin-bottom:10px;">
-      <h2 style="margin:0;">
+    <div class="section-sticky-bar">
+      <h2>
         계정과목별 지출 및 부가세 요약표 ({len(summary.get('account_breakdown', []))}개 계정)
         <span style="font-size:12px; font-weight:500; color:#475569; margin-left:8px;">
           💡 계정과목을 클릭하면 해당 계정의 분류된 전표 목록을 바로 볼 수 있습니다.
@@ -1675,11 +1772,16 @@ def render_dashboard_html(
                 onclick="toggleAllAccountDetails(false)">▲ 전체 접기</button>
       </div>
     </div>
-    <table>
+    <table class="sticky-ledger-table">
       <thead>
         <tr>
-          <th>계정과목 (코드·명칭 · 클릭 시 분류 목록 표시)</th><th>거래 건수</th><th>지출 합계</th>
-          <th>공급가액</th><th>공제 가능 부가세</th><th>불공제 합계</th><th>지출 비중</th>
+          <th>계정과목 (코드·명칭 · 클릭 시 분류 목록 표시)</th>
+          <th class="num nowrap">거래 건수</th>
+          <th class="num nowrap">지출 합계</th>
+          <th class="num nowrap">공급가액</th>
+          <th class="num nowrap">공제 가능 부가세</th>
+          <th class="num nowrap">불공제 합계</th>
+          <th class="num nowrap">지출 비중</th>
         </tr>
       </thead>
       <tbody>
@@ -1688,14 +1790,21 @@ def render_dashboard_html(
     </table>
   </section>
 
-  <section class="section">
-    <h2>카드별 지출 및 영수증 분류 현황 ({len(summary.get('card_breakdown', []))}개 카드)</h2>
-    <table>
+  <section class="section" id="card-summary-section">
+    <div class="section-sticky-bar">
+      <h2>카드별 지출 및 영수증 분류 현황 ({len(summary.get('card_breakdown', []))}개 카드)</h2>
+    </div>
+    <table class="sticky-ledger-table">
       <thead>
         <tr>
-          <th>카드명 (식별번호)</th><th>결제 건수</th><th>지출 합계</th>
-          <th>공제 부가세</th><th>불공제 합계</th><th>첨부 영수증</th>
-          <th>영수증 보관 폴더</th><th>필터</th>
+          <th>카드명 (식별번호)</th>
+          <th class="num nowrap">결제 건수</th>
+          <th class="num nowrap">지출 합계</th>
+          <th class="num nowrap">공제 부가세</th>
+          <th class="num nowrap">불공제 합계</th>
+          <th class="num nowrap">첨부 영수증</th>
+          <th>영수증 보관 폴더</th>
+          <th class="nowrap">필터</th>
         </tr>
       </thead>
       <tbody>
@@ -1713,13 +1822,25 @@ def render_dashboard_html(
     <p><small>{html.escape(veh['advice'])}</small></p>
   </section>
 
-  <section class="section">
-    <h2>미분류(999) 및 품목·참석자 소명 필요 전표 ({summary['pending_action_count']}건)</h2>
-    <table>
+  <section class="section" id="pending-ledger-section">
+    <div class="section-sticky-bar">
+      <h2>미분류(999) 및 품목·참석자 소명 필요 전표 ({summary['pending_action_count']}건)</h2>
+      <div class="no-print" style="display:flex; gap:6px; align-items:center;">
+        <button type="button" class="scroll-top-btn" onclick="scrollToDashboardTop()"
+                title="상단 조회 기간 및 필터 영역으로 즉시 이동">⬆ 맨 위로</button>
+      </div>
+    </div>
+    <table class="sticky-ledger-table" id="pending-ledger-table">
       <thead>
         <tr>
-          <th>전표번호</th><th>거래일시</th><th>카드구분</th><th>가맹점명</th><th>금액</th>
-          <th>현재 계정</th><th>품목 / 참석자 소명</th><th>작업</th>
+          <th class="nowrap" title="전표번호 클릭 시 해당 행을 상단 기준행으로 고정/해제">전표번호</th>
+          <th class="nowrap">거래일시</th>
+          <th class="nowrap">카드구분</th>
+          <th>가맹점명</th>
+          <th class="num nowrap">금액</th>
+          <th class="nowrap">현재 계정</th>
+          <th>품목 / 참석자 소명</th>
+          <th class="nowrap">작업</th>
         </tr>
       </thead>
       <tbody id="pending-ledger-tbody">
@@ -1729,8 +1850,7 @@ def render_dashboard_html(
   </section>
 
   <section class="section" id="main-ledger-section">
-    <div style="display:flex; justify-content:space-between; align-items:center;
-                flex-wrap:wrap; gap:8px; margin-bottom:10px;">
+    <div class="section-sticky-bar">
       <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
         <h2 style="margin:0;">조회 기간 법인카드 원장 ({s_date} ~ {e_date}, 총 {summary['total_tx_count']}건)</h2>
         <span id="ledger-account-filter-badge" class="badge card no-print"
@@ -1739,6 +1859,12 @@ def render_dashboard_html(
               style="display:none; background:#ccfbf1; color:#0f766e; padding:4px 10px;"></span>
       </div>
       <div class="no-print" style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+        <button type="button" id="btn-clear-pinned-rows" class="secondary"
+                style="display:none; background:#ca8a04; font-weight:700;"
+                onclick="clearAllPinnedLedgerRows()"
+                title="고정된 기준 전표 행을 모두 해제합니다">
+          📌 기준행 고정 해제
+        </button>
         <button id="btn-clear-search-filter" class="secondary" style="display:none;"
                 onclick="closeCtrlFSearch()">
           ✕ 검색 필터 해제
@@ -1754,13 +1880,30 @@ def render_dashboard_html(
         <button class="secondary" onclick="openEmailOrderModal()">
           📧 이메일 연동 결과 확인
         </button>
+        <button type="button" id="btn-ledger-freeze-header" class="freeze-toggle-btn"
+                onclick="toggleFreezeHeaders()"
+                title="스크롤 시 상단 항목 행 고정 켜기/끄기 (전표번호 클릭 시 해당 행도 기준행으로 추가 고정 가능)">
+          📌 행 고정 ON
+        </button>
+        <button type="button" class="scroll-top-btn" onclick="scrollToDashboardTop()"
+                title="상단 조회 기간 및 필터 영역으로 즉시 이동">
+          ⬆ 맨 위로
+        </button>
       </div>
     </div>
-    <table>
+    <table class="sticky-ledger-table" id="main-ledger-table">
       <thead>
         <tr>
-          <th>전표번호</th><th>거래일시 (클릭: 영수증 팝업)</th><th>카드구분</th><th>가맹점명</th><th>합계금액</th>
-          <th>부가세</th><th>계정과목</th><th>공제구분</th><th>적요/참석자</th><th>증빙파일명</th>
+          <th class="nowrap" title="전표번호 클릭 시 해당 행을 상단 기준행으로 추가 고정할 수 있습니다">전표번호</th>
+          <th>거래일시 (클릭: 영수증 팝업)</th>
+          <th class="nowrap">카드구분</th>
+          <th>가맹점명</th>
+          <th class="num nowrap">합계금액</th>
+          <th class="num nowrap">부가세</th>
+          <th class="nowrap">계정과목</th>
+          <th class="nowrap">공제구분</th>
+          <th>적요/참석자</th>
+          <th>증빙파일명</th>
         </tr>
       </thead>
       <tbody id="main-ledger-tbody">
@@ -3179,6 +3322,9 @@ def render_dashboard_html(
           clearSearchBtn.style.display = 'none';
         }}
       }}
+      if (typeof syncStickySectionOffsets === 'function') {{
+        syncStickySectionOffsets();
+      }}
       return {{ matchSearchCount, matchSearchAmt }};
     }}
     function toggleStatementRowsFilter(stmtCnt) {{
@@ -3904,6 +4050,197 @@ def render_dashboard_html(
         closeCorpCardModal();
       }}
     }});
+
+    const FREEZE_HEADER_STORAGE_KEY = 'sololedger_freeze_header';
+    let freezeHeadersEnabled = true;
+    let activeHoverTh = null;
+    let stickyScrollRafPending = false;
+
+    function readSavedFreezePreference() {{
+      try {{
+        const saved = window.localStorage.getItem(FREEZE_HEADER_STORAGE_KEY);
+        if (saved === '0' || saved === 'false') return false;
+      }} catch (e) {{}}
+      return true;
+    }}
+
+    function saveFreezePreference(enabled) {{
+      try {{
+        window.localStorage.setItem(FREEZE_HEADER_STORAGE_KEY, enabled ? '1' : '0');
+      }} catch (e) {{}}
+    }}
+
+    function setHoverHeaderCell(nextTh) {{
+      if (activeHoverTh === nextTh) return;
+      if (activeHoverTh) activeHoverTh.classList.remove('col-hover-active');
+      activeHoverTh = nextTh || null;
+      if (activeHoverTh) activeHoverTh.classList.add('col-hover-active');
+    }}
+
+    function syncStickySectionOffsets() {{
+      const sections = document.querySelectorAll('.section');
+      let totalPinnedRows = 0;
+      sections.forEach((sec) => {{
+        let bar = null;
+        let tbl = null;
+        for (let i = 0; i < sec.children.length; i += 1) {{
+          const child = sec.children[i];
+          if (!bar && child.classList && child.classList.contains('section-sticky-bar')) {{
+            bar = child;
+          }} else if (!tbl && child.classList && child.classList.contains('sticky-ledger-table')) {{
+            tbl = child;
+          }}
+        }}
+        const barH = bar ? bar.getBoundingClientRect().height : 0;
+        const thead = tbl && tbl.tHead ? tbl.tHead : null;
+        const theadH = thead ? thead.getBoundingClientRect().height : 0;
+        sec.style.setProperty('--sticky-bar-h', barH.toFixed(2) + 'px');
+        sec.style.setProperty('--sticky-thead-h', theadH.toFixed(2) + 'px');
+
+        if (tbl && tbl.tBodies && tbl.tBodies[0]) {{
+          let cumulativeTop = barH + theadH;
+          const pinnedRows = tbl.tBodies[0].querySelectorAll('tr.pinned-ledger-row');
+          pinnedRows.forEach((tr) => {{
+            if (tr.style.display === 'none') return;
+            totalPinnedRows += 1;
+            tr.style.setProperty('--pinned-row-top', cumulativeTop.toFixed(2) + 'px');
+            cumulativeTop += tr.getBoundingClientRect().height;
+          }});
+        }}
+      }});
+
+      const clearPinnedBtn = document.getElementById('btn-clear-pinned-rows');
+      if (clearPinnedBtn) {{
+        if (totalPinnedRows > 0) {{
+          clearPinnedBtn.style.display = 'inline-block';
+          clearPinnedBtn.textContent = '📌 기준행 고정 해제 (' + totalPinnedRows + '건)';
+        }} else {{
+          clearPinnedBtn.style.display = 'none';
+        }}
+      }}
+    }}
+
+    function updateStickyStuckClasses() {{
+      const sections = document.querySelectorAll('.section');
+      if (!freezeHeadersEnabled || document.body.classList.contains('unfreeze-headers')) {{
+        sections.forEach((sec) => sec.classList.remove('is-stuck'));
+        return;
+      }}
+      sections.forEach((sec) => {{
+        let hasTable = false;
+        for (let i = 0; i < sec.children.length; i += 1) {{
+          if (sec.children[i].classList && sec.children[i].classList.contains('sticky-ledger-table')) {{
+            hasTable = true;
+            break;
+          }}
+        }}
+        if (!hasTable) return;
+        const rect = sec.getBoundingClientRect();
+        const isStuck = rect.top <= 2 && rect.bottom > 110;
+        sec.classList.toggle('is-stuck', isStuck);
+      }});
+    }}
+
+    function applyFreezeHeaderState(enabled) {{
+      freezeHeadersEnabled = !!enabled;
+      document.body.classList.toggle('unfreeze-headers', !freezeHeadersEnabled);
+      const topBtn = document.getElementById('btn-toggle-freeze-header');
+      const ledgerBtn = document.getElementById('btn-ledger-freeze-header');
+      if (topBtn) {{
+        topBtn.classList.toggle('off', !freezeHeadersEnabled);
+        topBtn.textContent = freezeHeadersEnabled ? '📌 상단 행 고정 ON' : '📌 상단 행 고정 OFF';
+      }}
+      if (ledgerBtn) {{
+        ledgerBtn.classList.toggle('off', !freezeHeadersEnabled);
+        ledgerBtn.textContent = freezeHeadersEnabled ? '📌 행 고정 ON' : '📌 행 고정 OFF';
+      }}
+      syncStickySectionOffsets();
+      updateStickyStuckClasses();
+    }}
+
+    function toggleFreezeHeaders() {{
+      const nextState = !freezeHeadersEnabled;
+      saveFreezePreference(nextState);
+      applyFreezeHeaderState(nextState);
+    }}
+
+    function clearAllPinnedLedgerRows() {{
+      const pinned = document.querySelectorAll('tr.pinned-ledger-row');
+      pinned.forEach((tr) => {{
+        tr.classList.remove('pinned-ledger-row');
+        tr.style.removeProperty('--pinned-row-top');
+      }});
+      syncStickySectionOffsets();
+    }}
+
+    function scrollToDashboardTop() {{
+      window.scrollTo({{ top: 0, behavior: 'smooth' }});
+    }}
+
+    (function initStickyLedgerFreeze() {{
+      applyFreezeHeaderState(readSavedFreezePreference());
+
+      window.addEventListener('scroll', function() {{
+        if (stickyScrollRafPending) return;
+        stickyScrollRafPending = true;
+        window.requestAnimationFrame(function() {{
+          stickyScrollRafPending = false;
+          updateStickyStuckClasses();
+        }});
+      }}, {{ passive: true }});
+
+      window.addEventListener('resize', function() {{
+        syncStickySectionOffsets();
+        updateStickyStuckClasses();
+      }});
+
+      if (typeof ResizeObserver !== 'undefined') {{
+        const ro = new ResizeObserver(function() {{
+          syncStickySectionOffsets();
+        }});
+        document.querySelectorAll('.section-sticky-bar, .sticky-ledger-table > thead').forEach((el) => {{
+          ro.observe(el);
+        }});
+      }}
+
+      document.addEventListener('mouseover', function(ev) {{
+        const target = ev.target;
+        const td = target && target.closest ? target.closest('tbody td') : null;
+        if (!td || td.colSpan > 1) {{
+          setHoverHeaderCell(null);
+          return;
+        }}
+        const tr = td.parentElement;
+        if (!tr || tr.classList.contains('acc-detail-row')) {{
+          setHoverHeaderCell(null);
+          return;
+        }}
+        const tbl = tr.closest('table.sticky-ledger-table, table.acc-detail-table');
+        if (!tbl || !tbl.tHead || !tbl.tHead.rows || !tbl.tHead.rows[0]) {{
+          setHoverHeaderCell(null);
+          return;
+        }}
+        const headCell = tbl.tHead.rows[0].cells[td.cellIndex] || null;
+        setHoverHeaderCell(headCell);
+      }});
+
+      document.addEventListener('mouseleave', function() {{
+        setHoverHeaderCell(null);
+      }});
+
+      document.addEventListener('click', function(ev) {{
+        const target = ev.target;
+        const pinCell = target && target.closest ? target.closest('td.tx-pin-cell') : null;
+        if (!pinCell) return;
+        const tr = pinCell.parentElement;
+        if (!tr) return;
+        tr.classList.toggle('pinned-ledger-row');
+        if (!tr.classList.contains('pinned-ledger-row')) {{
+          tr.style.removeProperty('--pinned-row-top');
+        }}
+        syncStickySectionOffsets();
+      }});
+    }})();
 
     (function initUrlFindQuery() {{
       try {{

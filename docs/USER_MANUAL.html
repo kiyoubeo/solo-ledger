@@ -147,6 +147,13 @@
       background: #f1f5f9;
       font-weight: 600;
     }
+    thead th {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      background: #f1f5f9;
+      box-shadow: 0 -2px 0 #ffffff, inset 0 -2px 0 #cbd5e1;
+    }
     pre {
       background: var(--code-bg);
       color: var(--code-fg);
@@ -354,6 +361,10 @@ powershell -ExecutionPolicy Bypass -File scripts/server_service.ps1 stop-backgro
           <div class="step-box">
             <strong>④ [세무사 제출용 ZIP+CSV 생성]</strong>
             해당 귀속월의 세무사 제출용 기장원장 CSV(<code>utf-8-sig</code>)와 정규화 영수증을 하나의 <code>.zip</code>으로 압축합니다.
+          </div>
+          <div class="step-box">
+            <strong>⑤ [📌 상단 행 고정 ON/OFF] (엑셀 행 고정)</strong>
+            스크롤을 내릴 때 현재 보고 있는 표의 섹션 제목과 컬럼 항목 헤더 행을 화면 최상단에 자동 고정하며, 전표번호(<code>#번호</code>) 클릭 시 해당 전표도 기준행으로 추가 고정할 수 있습니다.
           </div>
         </div>
       </section>

@@ -322,3 +322,72 @@ def test_dashboard_and_manual_ctrl_f_search_bar_and_ledger_filter() -> None:
     assert "🔎 매뉴얼 검색 (Ctrl+F)" in manual_html
     assert "window.openManualFind" in manual_html
     assert "window.stepManualFind" in manual_html
+
+
+def test_dashboard_sticky_header_and_excel_row_freeze() -> None:
+    """Verify Excel-like sticky table headers, column highlight sync, and reference row freeze."""
+    client = TestClient(app)
+
+    from sololedger.config import settings as cur_settings
+
+    seed_resp = client.post("/api/v1/system/seed-demo", headers={"X-API-Key": cur_settings.api_key})
+    assert seed_resp.status_code == 200
+
+    dash_resp = client.get("/dashboard?year_month=ALL")
+    assert dash_resp.status_code == 200
+    html_text = dash_resp.text
+
+    # 1. Verify all 4 dashboard table sections have sticky bars and sticky-ledger-table markup
+    for section_id in (
+        'id="account-summary-section"',
+        'id="card-summary-section"',
+        'id="pending-ledger-section"',
+        'id="main-ledger-section"',
+    ):
+        assert section_id in html_text
+    assert html_text.count('class="section-sticky-bar"') == 4
+    assert html_text.count('class="sticky-ledger-table"') >= 2
+    assert 'id="pending-ledger-table"' in html_text
+    assert 'id="main-ledger-table"' in html_text
+
+    # 2. Verify sticky CSS rules, column hover highlight, and pinned reference row styles
+    for css_token in (
+        "body:not(.unfreeze-headers) .section-sticky-bar",
+        "body:not(.unfreeze-headers) .sticky-ledger-table > thead > tr > th",
+        "top: var(--sticky-bar-h, 44px);",
+        ".sticky-ledger-table > thead > tr > th.col-hover-active",
+        "body:not(.unfreeze-headers) .sticky-ledger-table > tbody > tr.pinned-ledger-row > td",
+        "td.tx-pin-cell",
+    ):
+        assert css_token in html_text
+
+    # 3. Verify UI controls (freeze ON/OFF buttons, unpin button, scroll-to-top, and pin cells)
+    assert 'id="btn-toggle-freeze-header"' in html_text
+    assert 'id="btn-ledger-freeze-header"' in html_text
+    assert 'id="btn-clear-pinned-rows"' in html_text
+    assert "📌 상단 행 고정 ON" in html_text
+    assert "📌 행 고정 ON" in html_text
+    assert "scrollToDashboardTop()" in html_text
+    assert "class='tx-pin-cell'" in html_text
+
+    # 4. Verify JavaScript freeze state, ResizeObserver offset sync, column hover, and row pinning
+    for js_token in (
+        "FREEZE_HEADER_STORAGE_KEY",
+        "function syncStickySectionOffsets(",
+        "function updateStickyStuckClasses(",
+        "function applyFreezeHeaderState(",
+        "function toggleFreezeHeaders(",
+        "function clearAllPinnedLedgerRows(",
+        "function setHoverHeaderCell(",
+        "initStickyLedgerFreeze",
+    ):
+        assert js_token in html_text
+
+    assert "{{" not in html_text
+    assert "}}" not in html_text
+
+    # 5. Verify /manual table headers also use sticky positioning
+    manual_resp = client.get("/manual")
+    assert manual_resp.status_code == 200
+    assert "thead th {" in manual_resp.text
+    assert "position: sticky;" in manual_resp.text
