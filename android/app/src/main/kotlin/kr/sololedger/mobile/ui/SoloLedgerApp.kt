@@ -372,21 +372,44 @@ private fun HomeSummaryTab(
 
     if (summary != null) {
       item {
-        Row(
-          modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-          horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-          FilterChip(
-            selected = state.selectedYearMonth == "ALL",
-            onClick = { onSelectYearMonth("ALL") },
-            label = { Text("전체 기간") },
-          )
-          summary.monthlyPeriods.take(12).forEach { period ->
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+          Row(
+            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+          ) {
             FilterChip(
-              selected = state.selectedYearMonth == period.ym,
-              onClick = { onSelectYearMonth(period.ym) },
-              label = { Text("${period.shortLabel} (${period.txCount})") },
+              selected = state.selectedYearMonth == "ALL",
+              onClick = { onSelectYearMonth("ALL") },
+              label = { Text("전체 기간") },
             )
+            summary.monthlyPeriods.take(12).forEach { period ->
+              FilterChip(
+                selected = state.selectedYearMonth == period.ym,
+                onClick = { onSelectYearMonth(period.ym) },
+                label = { Text("${period.shortLabel} (${period.txCount})") },
+              )
+            }
+          }
+          if (summary.quarterlyPeriods.isNotEmpty()) {
+            Row(
+              modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+              horizontalArrangement = Arrangement.spacedBy(8.dp),
+              verticalAlignment = Alignment.CenterVertically,
+            ) {
+              Text(
+                text = "분기별:",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+              )
+              summary.quarterlyPeriods.take(8).forEach { qPeriod ->
+                FilterChip(
+                  selected = state.selectedYearMonth == qPeriod.yq,
+                  onClick = { onSelectYearMonth(qPeriod.yq) },
+                  label = { Text("${qPeriod.shortLabel} (${qPeriod.txCount})") },
+                )
+              }
+            }
           }
         }
       }

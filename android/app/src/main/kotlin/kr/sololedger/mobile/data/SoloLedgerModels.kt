@@ -84,6 +84,13 @@ data class MonthlyPeriodSummary(
   val txCount: Int,
 )
 
+data class QuarterlyPeriodSummary(
+  val yq: String,
+  val label: String,
+  val shortLabel: String,
+  val txCount: Int,
+)
+
 data class CardSummaryItem(
   val cardLast4: String,
   val cardLabel: String,
@@ -128,8 +135,10 @@ data class LedgerTransaction(
 
 data class DashboardSummary(
   val yearMonth: String,
+  val quarter: String?,
   val availableMonths: List<String>,
   val monthlyPeriods: List<MonthlyPeriodSummary>,
+  val quarterlyPeriods: List<QuarterlyPeriodSummary>,
   val cardBreakdown: List<CardSummaryItem>,
   val totalTxCount: Int,
   val totalExpenditure: Long,

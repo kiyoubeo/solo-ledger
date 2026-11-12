@@ -323,9 +323,12 @@ def test_import_phone_sms_api_endpoint(client):
     c_labels = [c["card_label"] for c in all_sum["card_breakdown"]]
     assert c_labels == sorted(c_labels)
     assert len(all_sum["monthly_periods"]) >= 1
+    assert len(all_sum["quarterly_periods"]) >= 4
     dash_html = client.get("/dashboard?year_month=ALL").text
     assert 'id="month-filter"' in dash_html
     assert "selectMonthRange(" in dash_html
+    assert 'id="quarter-filter"' in dash_html
+    assert "selectQuarterRange(" in dash_html
 
     # Verify Coupang 1-click browser extractor script endpoint
     cp_script_res = client.get("/api/v1/scraper/coupang-script")
@@ -1195,9 +1198,77 @@ def test_corporate_card_dedicated_mode_policy_and_personal_card_blocking(client)
     assert all(c["card_last4"] != "7788" for c in del_res.json()["registered_corp_cards"])
 
 
+def test_dashboard_quarterly_period_filtering(client):
+    """Verify quarterly period lookup across summary API, date-range detection, and HTML dashboard."""
+    headers = {"X-API-Key": "test-secret-key"}
+    csv_text = (
+        "거래일시,카드번호,승인번호,가맹점명,사업자등록번호,공급가액,부가세,합계금액,과세유형\n"
+        "2026-02-14 10:00:00,6534,Q1000001,1분기목재상사,101-81-00001,100000,10000,110000,일반과세자\n"
+        "2026-05-10 11:00:00,6534,Q2000002,2분기조명타운,102-81-00002,200000,20000,220000,일반과세자\n"
+        "2026-08-20 14:30:00,6534,Q3000003,3분기타일센터,103-81-00003,300000,30000,330000,일반과세자\n"
+        "2026-11-05 16:45:00,6534,Q4000004,4분기페인트샵,104-81-00004,400000,40000,440000,일반과세자\n"
+    )
+    imp_res = client.post(
+        "/api/v1/imports/hometax-csv",
+        headers=headers,
+        json={"csv_text": csv_text},
+    )
+    assert imp_res.status_code == 200
+    assert imp_res.json()["total_rows"] == 4
 
+    # 1. Explicit quarter query param (YYYYQn)
+    q1_sum = client.get("/api/v1/dashboard/summary?quarter=2026Q1", headers=headers).json()
+    assert q1_sum["quarter"] == "2026Q1"
+    assert q1_sum["year_month"] == "202603"
+    assert q1_sum["start_date"] == "2026-01-01"
+    assert q1_sum["end_date"] == "2026-03-31"
+    assert q1_sum["total_tx_count"] == 1
+    assert q1_sum["total_expenditure"] == 110000
 
+    # 2. Separate year + numeric quarter query params
+    q2_sum = client.get("/api/v1/dashboard/summary?year=2026&quarter=2", headers=headers).json()
+    assert q2_sum["quarter"] == "2026Q2"
+    assert q2_sum["year_month"] == "202606"
+    assert q2_sum["start_date"] == "2026-04-01"
+    assert q2_sum["end_date"] == "2026-06-30"
+    assert q2_sum["total_tx_count"] == 1
+    assert q2_sum["total_expenditure"] == 220000
 
+    # 3. Quarter token passed via year_month (used by mobile filter chips)
+    q3_sum = client.get("/api/v1/dashboard/summary?year_month=2026Q3", headers=headers).json()
+    assert q3_sum["quarter"] == "2026Q3"
+    assert q3_sum["year_month"] == "202609"
+    assert q3_sum["start_date"] == "2026-07-01"
+    assert q3_sum["end_date"] == "2026-09-30"
+    assert q3_sum["total_tx_count"] == 1
+    assert q3_sum["total_expenditure"] == 330000
 
+    # 4. Exact quarter start_date..end_date (used by web UI dropdown/chips/shiftQuarter)
+    q4_sum = client.get(
+        "/api/v1/dashboard/summary?start_date=2026-10-01&end_date=2026-12-31",
+        headers=headers,
+    ).json()
+    assert q4_sum["quarter"] == "2026Q4"
+    assert q4_sum["total_tx_count"] == 1
+    assert q4_sum["total_expenditure"] == 440000
+
+    q_counts = {qp["yq"]: qp["tx_count"] for qp in q4_sum["quarterly_periods"]}
+    assert q_counts["2026Q1"] == 1
+    assert q_counts["2026Q2"] == 1
+    assert q_counts["2026Q3"] == 1
+    assert q_counts["2026Q4"] == 1
+
+    # 5. Verify HTML dashboard quarterly UI controls and active state
+    q1_html = client.get("/dashboard?quarter=2026Q1").text
+    assert 'id="quarter-filter"' in q1_html
+    assert "selectQuarterRange(" in q1_html
+    assert "shiftQuarter(-1)" in q1_html
+    assert "shiftQuarter(1)" in q1_html
+    assert "setQuickRange('THIS_QUARTER')" in q1_html
+    assert "setQuickRange('LAST_QUARTER')" in q1_html
+    assert "value='2026-01-01|2026-03-31' selected" in q1_html
+    assert "선택 분기: <strong>2026년 1분기</strong>" in q1_html
+    assert "1분기목재상사" in q1_html
+    assert "2분기조명타운" not in q1_html
 
 

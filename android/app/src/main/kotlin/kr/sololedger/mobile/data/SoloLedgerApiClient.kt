@@ -139,6 +139,21 @@ class SoloLedgerApiClient(private val prefs: AppPreferences) {
         }
       }
 
+      val qPeriods = mutableListOf<QuarterlyPeriodSummary>()
+      json.optJSONArray("quarterly_periods")?.let { arr ->
+        for (i in 0 until arr.length()) {
+          val o = arr.optJSONObject(i) ?: continue
+          qPeriods.add(
+            QuarterlyPeriodSummary(
+              yq = o.optString("yq"),
+              label = o.optString("label"),
+              shortLabel = o.optString("short_label"),
+              txCount = o.optInt("tx_count", 0),
+            )
+          )
+        }
+      }
+
       val cards = mutableListOf<CardSummaryItem>()
       json.optJSONArray("card_breakdown")?.let { arr ->
         for (i in 0 until arr.length()) {
@@ -170,10 +185,14 @@ class SoloLedgerApiClient(private val prefs: AppPreferences) {
 
       val txs = parseTransactionsArray(json.optJSONArray("transactions"))
 
+      val rawQuarter = json.optString("quarter", "").takeIf { it.isNotBlank() && it != "null" }
+
       DashboardSummary(
         yearMonth = json.optString("year_month", yearMonth),
+        quarter = rawQuarter,
         availableMonths = months,
         monthlyPeriods = periods,
+        quarterlyPeriods = qPeriods,
         cardBreakdown = cards,
         totalTxCount = json.optInt("total_tx_count", txs.size),
         totalExpenditure = json.optLong("total_expenditure", 0L),

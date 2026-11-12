@@ -145,7 +145,7 @@ class SoloLedgerViewModel(application: Application) : AndroidViewModel(applicati
       try {
         WooriPushListenerService.flushOfflineQueue(getApplication())
         var data = api.fetchDashboardSummary(yearMonth = yearMonth, cardLast4 = cardLast4)
-        var resolvedYm = data.yearMonth
+        var resolvedYm = data.quarter ?: data.yearMonth
         var resolvedExportYm = _uiState.value.exportYearMonth
         if (
           initialAutoPickLatestMonth &&
@@ -156,8 +156,12 @@ class SoloLedgerViewModel(application: Application) : AndroidViewModel(applicati
           data = api.fetchDashboardSummary(yearMonth = latestActiveYm, cardLast4 = cardLast4)
           resolvedYm = data.yearMonth
           resolvedExportYm = latestActiveYm
-        } else if (resolvedYm != "ALL" && resolvedYm.length == 6) {
-          resolvedExportYm = resolvedYm
+        } else if (
+          data.yearMonth != "ALL" &&
+            data.yearMonth.length == 6 &&
+            data.yearMonth.all { it.isDigit() }
+        ) {
+          resolvedExportYm = data.yearMonth
         }
         _uiState.update {
           it.copy(

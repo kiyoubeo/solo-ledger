@@ -230,6 +230,12 @@ def test_operational_cli_commands(test_db_path, tmp_path):
     assert stat_res["total_ledger_rows"] == 1
     assert stat_res["monthly_summary"]["total_expenditure"] == 18000
 
+    q_stat_res = run_cli(["status", "--quarter", "2026Q4"])
+    assert q_stat_res["monthly_summary"]["quarter"] == "2026Q4"
+    assert q_stat_res["monthly_summary"]["start_date"] == "2026-10-01"
+    assert q_stat_res["monthly_summary"]["end_date"] == "2026-12-31"
+    assert q_stat_res["monthly_summary"]["total_expenditure"] == 18000
+
     exp_res = run_cli(["export-pack", "202610"])
     assert exp_res["command"] == "export-pack"
     assert exp_res["exported_count"] == 1

@@ -1112,6 +1112,7 @@ async def serve_transaction_receipt_file(tx_id: int):
 async def dashboard_summary_endpoint(
     year_month: Optional[str] = Query(default=None),
     year: Optional[int] = Query(default=None),
+    quarter: Optional[str] = Query(default=None),
     card_last4: Optional[str] = Query(default=None),
     start_date: Optional[str] = Query(default=None),
     end_date: Optional[str] = Query(default=None),
@@ -1133,6 +1134,7 @@ async def dashboard_summary_endpoint(
             start_date=start_date,
             end_date=end_date,
             account_code=account_code,
+            quarter=quarter,
         )
     finally:
         conn.close()
@@ -1636,6 +1638,7 @@ async def generate_electronic_slips_endpoint(
 async def render_dashboard_page(
     year_month: Optional[str] = Query(default=None),
     year: Optional[int] = Query(default=None),
+    quarter: Optional[str] = Query(default=None),
     card_last4: Optional[str] = Query(default=None),
     start_date: Optional[str] = Query(default=None),
     end_date: Optional[str] = Query(default=None),
@@ -1656,6 +1659,7 @@ async def render_dashboard_page(
             start_date=start_date,
             end_date=end_date,
             account_code=account_code,
+            quarter=quarter,
         )
         return HTMLResponse(content=html_doc)
     finally:

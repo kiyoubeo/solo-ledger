@@ -47,6 +47,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Target year in YYYY format (defaults to current year)",
     )
+    status_parser.add_argument(
+        "--quarter",
+        default=None,
+        help="Target quarter in YYYYQ1..YYYYQ4 or 1..4 format",
+    )
 
     # 3. import-csv
     import_parser = subparsers.add_parser(
@@ -166,9 +171,14 @@ def run_cli(argv: Optional[List[str]] = None) -> Dict[str, Any]:
     try:
         if args.command == "status":
             now = datetime.now()
-            ym = args.year_month or now.strftime("%Y%m")
-            yr = args.year or int(ym[:4])
-            dash = build_dashboard_summary(cursor, year_month=ym, year=yr)
+            ym = args.year_month or (None if args.quarter else now.strftime("%Y%m"))
+            yr = args.year or (int(ym[:4]) if ym and ym[:4].isdigit() else None)
+            dash = build_dashboard_summary(
+                cursor,
+                year_month=ym,
+                year=yr,
+                quarter=args.quarter,
+            )
 
             cursor.execute("SELECT COUNT(*) FROM card_transactions")
             total_ledger_rows = int(cursor.fetchone()[0])
@@ -186,6 +196,9 @@ def run_cli(argv: Optional[List[str]] = None) -> Dict[str, Any]:
                 "archived_receipts": total_receipts,
                 "monthly_summary": {
                     "year_month": dash["year_month"],
+                    "quarter": dash.get("quarter"),
+                    "start_date": dash["start_date"],
+                    "end_date": dash["end_date"],
                     "tx_count": dash["total_tx_count"],
                     "total_expenditure": dash["total_expenditure"],
                     "deductible_vat": dash["deductible_vat"],

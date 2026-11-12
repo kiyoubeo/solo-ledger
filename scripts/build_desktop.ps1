@@ -40,6 +40,14 @@ Write-Host "==========================================================" -Foregro
 Write-Host " [SoloLedger Desktop] Building Standalone Windows App ($Mode)" -ForegroundColor Cyan
 Write-Host "==========================================================" -ForegroundColor Cyan
 
+$runningProcs = @(Get-Process -Name "SoloLedger" -ErrorAction SilentlyContinue)
+$wasAppRunning = ($runningProcs.Count -gt 0)
+if ($wasAppRunning) {
+    Write-Host "[Pre-Build] Stopping running SoloLedger.exe process(es) to release binary lock..." -ForegroundColor Yellow
+    $runningProcs | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+}
+
 $modeFlag = if ($Mode -eq "onefile") { "--onefile" } else { "--onedir" }
 
 $SchemaFile = Join-Path $RepoRoot "sql\schema.sql"
@@ -126,4 +134,9 @@ if ($CreateDesktopShortcut) {
         New-AppShortcut -ShortcutPath $DesktopShortcut -TargetExe $ExePath -WorkDir $RepoRoot -Icon $IconPath
         Write-Host "[Shortcut] Desktop shortcut created   : $DesktopShortcut" -ForegroundColor Cyan
     }
+}
+
+if ($wasAppRunning) {
+    Write-Host "[Post-Build] Relaunching updated SoloLedger.exe..." -ForegroundColor Green
+    Start-Process -FilePath $ExePath -WorkingDirectory $RepoRoot | Out-Null
 }

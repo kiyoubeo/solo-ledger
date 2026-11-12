@@ -2,11 +2,12 @@
 
 import calendar
 import html
+import re
 import shutil
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from sololedger import __version__
 from sololedger.archiver import compute_sha256_hex, save_receipt_files
@@ -267,6 +268,57 @@ def _normalize_date_str(val: Optional[str]) -> Optional[str]:
     return s[:10]
 
 
+def _quarter_date_bounds(year_val: int, quarter_val: int) -> Tuple[str, str]:
+    """Return ('YYYY-MM-DD', 'YYYY-MM-DD') start/end bounds for a calendar quarter (1..4)."""
+    q = max(1, min(4, int(quarter_val)))
+    s_month = (q - 1) * 3 + 1
+    e_month = q * 3
+    last_day = calendar.monthrange(year_val, e_month)[1]
+    return f"{year_val:04d}-{s_month:02d}-01", f"{year_val:04d}-{e_month:02d}-{last_day:02d}"
+
+
+def _parse_quarter_spec(
+    raw_spec: Optional[str], fallback_year: int
+) -> Optional[Tuple[int, int, str, str]]:
+    """Parse quarter token (e.g. '2026Q1', '2026-Q2', 'Q3', '4분기', '1') into (year, q, start, end)."""
+    if not raw_spec:
+        return None
+    token = raw_spec.strip().upper()
+    if not token:
+        return None
+
+    m_yq = re.fullmatch(r"(\d{4})\s*[-_/\s년]*\s*(?:Q([1-4])|([1-4])\s*(?:Q|분기))", token)
+    if m_yq:
+        y_i = int(m_yq.group(1))
+        q_i = int(m_yq.group(2) or m_yq.group(3))
+        s_dt, e_dt = _quarter_date_bounds(y_i, q_i)
+        return y_i, q_i, s_dt, e_dt
+
+    m_q = re.fullmatch(r"(?:Q([1-4])|([1-4])\s*(?:Q|분기)?)", token)
+    if m_q:
+        q_i = int(m_q.group(1) or m_q.group(2))
+        s_dt, e_dt = _quarter_date_bounds(fallback_year, q_i)
+        return fallback_year, q_i, s_dt, e_dt
+
+    return None
+
+
+def _detect_exact_quarter(start_ymd: str, end_ymd: str) -> Optional[str]:
+    """Return 'YYYYQn' if start_ymd..end_ymd exactly spans one calendar quarter, else None."""
+    if len(start_ymd) < 10 or len(end_ymd) < 10:
+        return None
+    if not (start_ymd[:4].isdigit() and end_ymd[:4].isdigit()):
+        return None
+    s_y, e_y = int(start_ymd[:4]), int(end_ymd[:4])
+    if s_y != e_y:
+        return None
+    for q_i in (1, 2, 3, 4):
+        qs, qe = _quarter_date_bounds(s_y, q_i)
+        if start_ymd == qs and end_ymd == qe:
+            return f"{s_y:04d}Q{q_i}"
+    return None
+
+
 def build_dashboard_summary(
     cursor: sqlite3.Cursor,
     year_month: Optional[str] = None,
@@ -275,6 +327,7 @@ def build_dashboard_summary(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     account_code: Optional[str] = None,
+    quarter: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build aggregated dashboard metrics, per-card breakdown, pending action items, and vehicle limit."""
     now = datetime.now()
@@ -338,6 +391,13 @@ def build_dashboard_summary(
 
     norm_start = _normalize_date_str(start_date)
     norm_end = _normalize_date_str(end_date)
+    parsed_quarter = _parse_quarter_spec(quarter, year or now.year)
+    if parsed_quarter is None and year_month and (
+        "Q" in year_month.upper() or "분기" in year_month
+    ):
+        parsed_quarter = _parse_quarter_spec(year_month, year or now.year)
+
+    active_quarter: Optional[str] = None
 
     if norm_start is not None or norm_end is not None:
         resolved_start = norm_start or min_tx_date
@@ -351,7 +411,36 @@ def build_dashboard_summary(
             if len(resolved_end) >= 7
             else now.strftime("%Y%m")
         )
-        target_ym = (year_month or default_ym).strip().upper()
+        clean_ym = (year_month or "").strip().upper()
+        target_ym = (
+            clean_ym
+            if (clean_ym == "ALL" or (len(clean_ym) == 6 and clean_ym.isdigit()))
+            else default_ym
+        )
+        active_quarter = _detect_exact_quarter(resolved_start, resolved_end)
+        cursor.execute(
+            """
+            SELECT t.*,
+                   (
+                       SELECT r.archived_file_name
+                       FROM receipt_ocr_metadata r
+                       WHERE r.tx_id = t.tx_id
+                       ORDER BY r.receipt_id DESC
+                       LIMIT 1
+                   ) AS archived_file_name
+            FROM card_transactions t
+            WHERE SUBSTR(t.transacted_at, 1, 10) >= ?
+              AND SUBSTR(t.transacted_at, 1, 10) <= ?
+              AND t.reconcile_status != 'CANCELED'
+            ORDER BY t.transacted_at DESC, t.tx_id DESC
+            """,
+            (resolved_start, resolved_end),
+        )
+    elif parsed_quarter is not None:
+        q_year, q_num, resolved_start, resolved_end = parsed_quarter
+        target_year = year or q_year
+        target_ym = f"{q_year:04d}{q_num * 3:02d}"
+        active_quarter = f"{q_year:04d}Q{q_num}"
         cursor.execute(
             """
             SELECT t.*,
@@ -408,6 +497,45 @@ def build_dashboard_summary(
             (ym_prefix,),
         )
     all_period_rows = [dict(r) for r in cursor.fetchall()]
+
+    quarterly_counts: Dict[str, int] = {}
+    for ym_val, cnt in monthly_counts.items():
+        if len(ym_val) >= 6 and ym_val[:4].isdigit() and ym_val[4:6].isdigit():
+            y_i = int(ym_val[:4])
+            m_i = int(ym_val[4:6])
+            if 1 <= m_i <= 12:
+                q_i = (m_i - 1) // 3 + 1
+                yq_key = f"{y_i:04d}Q{q_i}"
+                quarterly_counts[yq_key] = quarterly_counts.get(yq_key, 0) + cnt
+
+    quarter_keys_set = set(quarterly_counts.keys())
+    for base_y in {now.year, target_year}:
+        for q_i in (1, 2, 3, 4):
+            quarter_keys_set.add(f"{base_y:04d}Q{q_i}")
+    if active_quarter:
+        quarter_keys_set.add(active_quarter)
+
+    available_quarters = sorted(quarter_keys_set, reverse=True)
+    quarterly_periods: List[Dict[str, Any]] = []
+    for yq_val in available_quarters:
+        y_i = int(yq_val[:4])
+        q_i = int(yq_val[5:6])
+        q_start, q_end = _quarter_date_bounds(y_i, q_i)
+        s_m = (q_i - 1) * 3 + 1
+        e_m = q_i * 3
+        cnt = quarterly_counts.get(yq_val, 0)
+        quarterly_periods.append(
+            {
+                "yq": yq_val,
+                "year": y_i,
+                "quarter": q_i,
+                "label": f"{y_i}년 {q_i}분기 ({s_m:02d}~{e_m:02d}월, {cnt}건)",
+                "short_label": f"{str(y_i)[2:]}.{q_i}분기",
+                "start_date": q_start,
+                "end_date": q_end,
+                "tx_count": cnt,
+            }
+        )
 
     card_stats: Dict[str, Dict[str, Any]] = {}
     for r in all_period_rows:
@@ -530,6 +658,7 @@ def build_dashboard_summary(
         "db_path": str(settings.db_path),
         "nas_backup_dir": str(settings.nas_backup_dir),
         "year_month": target_ym,
+        "quarter": active_quarter,
         "start_date": resolved_start,
         "end_date": resolved_end,
         "min_tx_date": min_tx_date,
@@ -538,6 +667,8 @@ def build_dashboard_summary(
         "account_code": target_account,
         "available_months": available_months,
         "monthly_periods": monthly_periods,
+        "available_quarters": available_quarters,
+        "quarterly_periods": quarterly_periods,
         "card_breakdown": card_breakdown,
         "account_breakdown": account_breakdown,
         "account_transactions": account_transactions,
@@ -778,6 +909,7 @@ def render_dashboard_html(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     account_code: Optional[str] = None,
+    quarter: Optional[str] = None,
 ) -> str:
     """Render server-side HTML5 management dashboard for SoloLedger."""
     summary = build_dashboard_summary(
@@ -788,6 +920,7 @@ def render_dashboard_html(
         start_date=start_date,
         end_date=end_date,
         account_code=account_code,
+        quarter=quarter,
     )
     veh = summary["vehicle_limit"]
     gauge_pct = min(100.0, float(veh["usage_ratio_pct"]))
@@ -796,6 +929,13 @@ def render_dashboard_html(
     min_d = html.escape(str(summary["min_tx_date"]))
     max_d = html.escape(str(summary["max_tx_date"]))
     active_acc_code = str(summary.get("account_code") or "ALL")
+    active_q_code = str(summary.get("quarter") or "")
+    active_q_meta_html = ""
+    if len(active_q_code) >= 6 and active_q_code[:4].isdigit() and "Q" in active_q_code:
+        active_q_meta_html = (
+            f" &nbsp;|&nbsp; 선택 분기: "
+            f"<strong>{html.escape(active_q_code[:4])}년 {html.escape(active_q_code[5:])}분기</strong>"
+        )
 
     card_options_html = []
     c_all_sel = "selected" if summary["card_last4"] == "ALL" else ""
@@ -818,6 +958,33 @@ def render_dashboard_html(
         sel = "selected" if active_acc_code == str(ab["account_code"]) else ""
         account_options_html.append(f"<option value='{a_val}' {sel}>{a_opt_lbl}</option>")
     account_select_html = "".join(account_options_html)
+
+    quarter_options_html = ["<option value=''>-- 분기별 선택 --</option>"]
+    quarter_chips_list = []
+    for qp in summary.get("quarterly_periods", []):
+        q_val = f"{qp['start_date']}|{qp['end_date']}"
+        q_lbl = html.escape(str(qp["label"]))
+        is_q_active = (
+            summary["start_date"] == qp["start_date"]
+            and summary["end_date"] == qp["end_date"]
+        )
+        q_sel = "selected" if is_q_active else ""
+        quarter_options_html.append(f"<option value='{q_val}' {q_sel}>{q_lbl}</option>")
+    quarter_select_html = "".join(quarter_options_html)
+
+    for qp in sorted(summary.get("quarterly_periods", []), key=lambda x: str(x["yq"])):
+        q_val = f"{qp['start_date']}|{qp['end_date']}"
+        sq_lbl = html.escape(f"{qp['short_label']}({qp['tx_count']})")
+        is_q_active = (
+            summary["start_date"] == qp["start_date"]
+            and summary["end_date"] == qp["end_date"]
+        )
+        q_btn_cls = "" if is_q_active else "secondary"
+        quarter_chips_list.append(
+            f"<button class='{q_btn_cls}' style='padding:4px 9px; font-size:12px; margin:2px;' "
+            f"onclick=\"selectQuarterRange('{q_val}')\">{sq_lbl}</button>"
+        )
+    quarter_chips_html = "".join(quarter_chips_list)
 
     month_options_html = ["<option value=''>-- 달별 선택 --</option>"]
     month_chips_list = []
@@ -1288,6 +1455,8 @@ def render_dashboard_html(
         <div class="header-meta">
           귀속 연도: <strong>{summary['year']}년</strong>
           &nbsp;|&nbsp;
+          조회 구간: <strong>{s_date} ~ {e_date}</strong>{active_q_meta_html}
+          &nbsp;|&nbsp;
           원장 DB: <code>{html.escape(Path(summary['db_path']).name)}</code>
         </div>
       </div>
@@ -1330,6 +1499,8 @@ def render_dashboard_html(
         <div class="filter-group">
           <button class="secondary" onclick="setQuickRange('THIS_MONTH')">이번 달</button>
           <button class="secondary" onclick="setQuickRange('LAST_MONTH')">지난 달</button>
+          <button class="secondary" onclick="setQuickRange('THIS_QUARTER')">이번 분기</button>
+          <button class="secondary" onclick="setQuickRange('LAST_QUARTER')">지난 분기</button>
           <button class="secondary" onclick="setQuickRange('3M')">최근 3개월</button>
           <button class="secondary" onclick="setQuickRange('THIS_YEAR')">올해 전체</button>
           <button class="secondary" onclick="setQuickRange('ALL')">전체 기간</button>
@@ -1347,6 +1518,22 @@ def render_dashboard_html(
           <select id="account-filter" onchange="applyFilters()">
             {account_select_html}
           </select>
+        </div>
+      </div>
+
+      <div class="filter-row" style="border-top: 1px dashed #e2e8f0; padding-top: 8px;">
+        <div class="filter-group">
+          <span class="filter-label">📊 분기별 조회:</span>
+          <button class="secondary" onclick="shiftQuarter(-1)" title="이전 분기">◀ 이전 분기</button>
+          <select id="quarter-filter" onchange="selectQuarterRange(this.value)">
+            {quarter_select_html}
+          </select>
+          <button class="secondary" onclick="shiftQuarter(1)" title="다음 분기">다음 분기 ▶</button>
+        </div>
+        <div class="filter-divider"></div>
+        <div style="display:flex; align-items:center; flex-wrap:wrap; gap:3px;">
+          <span class="filter-label" style="margin-right:4px;">분기별 바로가기:</span>
+          {quarter_chips_html}
         </div>
       </div>
 
@@ -2414,6 +2601,36 @@ def render_dashboard_html(
       }});
       window.location.reload();
     }}
+    function selectQuarterRange(val) {{
+      if (!val || !val.includes('|')) return;
+      const parts = val.split('|');
+      document.getElementById('start-date').value = parts[0];
+      document.getElementById('end-date').value = parts[1];
+      applyFilters();
+    }}
+    function shiftQuarter(delta) {{
+      const curStart = document.getElementById('start-date').value || '';
+      const pad = (n) => String(n).padStart(2, '0');
+      let y = new Date().getFullYear();
+      let m = new Date().getMonth() + 1;
+      if (curStart.length >= 7) {{
+        const py = parseInt(curStart.slice(0, 4), 10);
+        const pm = parseInt(curStart.slice(5, 7), 10);
+        if (!isNaN(py) && !isNaN(pm)) {{
+          y = py;
+          m = pm;
+        }}
+      }}
+      const curQIndex = Math.floor((m - 1) / 3);
+      const targetStart = new Date(y, (curQIndex + delta) * 3, 1);
+      const ty = targetStart.getFullYear();
+      const tsMonth = targetStart.getMonth() + 1;
+      const teMonth = tsMonth + 2;
+      const lastDay = new Date(ty, teMonth, 0).getDate();
+      document.getElementById('start-date').value = ty + '-' + pad(tsMonth) + '-01';
+      document.getElementById('end-date').value = ty + '-' + pad(teMonth) + '-' + pad(lastDay);
+      applyFilters();
+    }}
     function selectMonthRange(val) {{
       if (!val || !val.includes('|')) return;
       const parts = val.split('|');
@@ -2460,6 +2677,22 @@ def render_dashboard_html(
         const pLast = new Date(py, pm, 0).getDate();
         s = py + '-' + pad(pm) + '-01';
         e = py + '-' + pad(pm) + '-' + pad(pLast);
+      }} else if (mode === 'THIS_QUARTER') {{
+        const q = Math.floor((m - 1) / 3) + 1;
+        const qsMonth = (q - 1) * 3 + 1;
+        const qeMonth = q * 3;
+        const qLast = new Date(y, qeMonth, 0).getDate();
+        s = y + '-' + pad(qsMonth) + '-01';
+        e = y + '-' + pad(qeMonth) + '-' + pad(qLast);
+      }} else if (mode === 'LAST_QUARTER') {{
+        const curQ = Math.floor((m - 1) / 3);
+        const prevQStart = new Date(y, (curQ - 1) * 3, 1);
+        const pqy = prevQStart.getFullYear();
+        const pqStartM = prevQStart.getMonth() + 1;
+        const pqEndM = pqStartM + 2;
+        const pqLast = new Date(pqy, pqEndM, 0).getDate();
+        s = pqy + '-' + pad(pqStartM) + '-01';
+        e = pqy + '-' + pad(pqEndM) + '-' + pad(pqLast);
       }} else if (mode === '3M') {{
         const d3 = new Date(y, m - 3, 1);
         s = d3.getFullYear() + '-' + pad(d3.getMonth() + 1) + '-01';
