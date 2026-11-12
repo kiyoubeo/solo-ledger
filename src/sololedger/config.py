@@ -3,9 +3,70 @@
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-DEFAULT_SCHEMA_PATH = PROJECT_ROOT / "sql" / "schema.sql"
+
+def _resolve_bundle_root(
+    frozen: Optional[bool] = None,
+    meipass: Optional[str] = None,
+    executable: Optional[str] = None,
+) -> Path:
+    """Return read-only resource bundle root (supports PyInstaller _MEIPASS)."""
+    is_frozen = getattr(sys, "frozen", False) if frozen is None else frozen
+    if is_frozen:
+        raw_meipass = getattr(sys, "_MEIPASS", None) if meipass is None else meipass
+        if raw_meipass:
+            return Path(raw_meipass).resolve()
+        return Path(executable or sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent.parent
+
+
+def _resolve_project_root(
+    home_env: Optional[str] = None,
+    frozen: Optional[bool] = None,
+    executable: Optional[str] = None,
+) -> Path:
+    """Return mutable runtime workspace directory (DB, .env, archive) across source & .exe runs."""
+    explicit_home = home_env if home_env is not None else os.getenv("SOLOLEDGER_HOME", "")
+    if explicit_home.strip():
+        return Path(explicit_home.strip()).resolve()
+
+    is_frozen = getattr(sys, "frozen", False) if frozen is None else frozen
+    if is_frozen:
+        exe_dir = Path(executable or sys.executable).resolve().parent
+        markers = ("sololedger_prod.db", "sololedger_test.db", ".env", "pyproject.toml")
+        if any((exe_dir / m).exists() for m in markers):
+            return exe_dir
+        build_dir_names = {"dist", "build", "release", "bin"}
+        if exe_dir.name.lower() in build_dir_names:
+            parent_dir = exe_dir.parent
+            if any((parent_dir / m).exists() for m in markers):
+                return parent_dir
+        if exe_dir.parent.name.lower() in build_dir_names:
+            grandparent_dir = exe_dir.parent.parent
+            if any((grandparent_dir / m).exists() for m in markers):
+                return grandparent_dir
+        return exe_dir
+
+    return Path(__file__).resolve().parent.parent.parent
+
+
+BUNDLE_ROOT = _resolve_bundle_root()
+PROJECT_ROOT = _resolve_project_root()
+
+
+def resolve_bundled_path(*parts: str) -> Path:
+    """Resolve a static file from PROJECT_ROOT first, falling back to BUNDLE_ROOT."""
+    project_candidate = PROJECT_ROOT.joinpath(*parts)
+    if project_candidate.exists():
+        return project_candidate
+    bundle_candidate = BUNDLE_ROOT.joinpath(*parts)
+    if bundle_candidate.exists():
+        return bundle_candidate
+    return project_candidate
+
+
+DEFAULT_SCHEMA_PATH = resolve_bundled_path("sql", "schema.sql")
 
 
 def _load_dotenv_file() -> None:

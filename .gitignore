@@ -30,6 +30,9 @@ company/
 logs/tool_edit_audit.jsonl
 logs/stop_guard_state.json
 logs/server.pid
+logs/desktop_app.log
+logs/webview_profile/
+*.lnk
 
 # OS / IDE
 .DS_Store

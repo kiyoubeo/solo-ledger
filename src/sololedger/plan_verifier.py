@@ -21,6 +21,7 @@ PHASE_TEST_MAPPING = {
     "Phase 4": ["tests/test_import_export.py"],
     "Phase 5": ["tests/test_e2e_lifecycle.py", "tests/test_nas_sync.py"],
     "Phase 6": ["tests/test_mobile_api.py"],
+    "Phase 7": ["tests/test_desktop_app.py"],
 }
 
 REQUIRED_PLAN_SECTIONS = [

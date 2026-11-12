@@ -28,8 +28,9 @@ flowchart TD
     P4["Phase 4 (v0.4.0)\n홈택스/카드사 매입내역 CSV·엑셀 배치 파서\n업무용승용차 한도 트래커 · 세무대리인 제출 패키지 생성기"]
     P5["Phase 5 (v1.0.0)\n경량 웹 대시보드 · CLI 관리 도구\nDocker Compose 무비용 배포 패키지 & E2E 통합 검증"]
     P6["Phase 6 (v1.1.0)\n순수 Android 네이티브 앱(Kotlin · Compose)\n원격 세무증빙 ZIP 다운로드 · 보안 인증 · 우리카드 푸시 연동"]
+    P7["Phase 7 (v1.2.0)\n독립 창 Windows 데스크톱 앱(pywebview · PyInstaller)\n내장 서버 자동 기동·종료 · 무콘솔 SoloLedger.exe 패키징"]
 
-    P1 --> P2 --> P3 --> P4 --> P5 --> P6
+    P1 --> P2 --> P3 --> P4 --> P5 --> P6 --> P7
 ```
 
 | 단계 | 목표 버전 | 핵심 개발 범위 | 주요 산출물 (`src/sololedger/`) | 예상 공수 | 현재 상태 |
@@ -40,6 +41,7 @@ flowchart TD
 | **Phase 4** | `v0.4.0` | 홈택스·카드사 엑셀/CSV 파서, 외화 결제 확정, 업무용승용차 1,500만 원 한도 집계, 세무사 제출용 CSV+ZIP 번들 생성기 | `importers.py`, `exporters.py`, `vehicle_tracker.py` | 12h | **완료 (`PASSED`)** |
 | **Phase 5** | `v1.0.0` | 경량 웹 대시보드(미분류·소명 관리/파일 업로드), 운영 CLI, Docker Compose 배포 및 NAS(`Z:\`) 백업 자동화 | `dashboard.py`, `cli.py`, `nas_sync.py`, `docker-compose.yml` | 8h | **완료 (`PASSED`)** |
 | **Phase 6** | `v1.1.0` | 순수 Android 전용 앱(`Kotlin + Jetpack Compose`), 원격 세무사 제출 ZIP/CSV 다운로드 API, Bearer 세션 인증 및 우리카드 푸시 수집 | `api.py`, `sms_parser.py`, `android/app/build.gradle.kts` | 12h | **완료 (`PASSED`)** |
+| **Phase 7** | `v1.2.0` | 독립 창 Windows 데스크톱 앱(`pywebview` + `PyInstaller` `SoloLedger.exe`), 내장 FastAPI 생명주기 제어 및 루프백 자동 로그인 | `desktop_app.py`, `config.py`, `scripts/build_desktop.ps1`, `assets/sololedger.ico` | 6h | **완료 (`PASSED`)** |
 
 ---
 
@@ -155,6 +157,25 @@ flowchart TD
   - 모바일 로그인 토큰 발급·Bearer 인증·`SOLOLEDGER_AUTH_REQUIRED` 잠금 검증
   - 우리WON카드 결제 푸시 파싱 및 광고·청구서 알림 자동 무시 검증
   - 세무사 제출용 ZIP/CSV 원격 다운로드 무결성 및 프로덕션 보호 가드 검증
+
+---
+
+### Phase 7: 독립 창 Windows 네이티브 데스크톱 앱 (`pywebview · PyInstaller`) (`v1.2.0`)
+- **목적**: 매번 PowerShell 명령어로 백그라운드 서버를 수동 기동할 필요 없이, 일반 PC 프로그램(`SoloLedger.exe`) 더블클릭만으로 독립된 전용 프로그램 창이 열리고 창 종료 시 내장 서버도 함께 정리되도록 구현합니다.
+- **세부 구현 과제**:
+  1. **내장 FastAPI 생명주기 제어 및 포트 협상 엔진 (`desktop_app.py`)**
+     - `EmbeddedServerController`: 백그라운드 데몬 스레드에서 내장 Uvicorn(`sololedger.api:app`) 기동, `/health` 준비 완료 대기, 창 종료 시 `should_exit` 우아한 종료 보장.
+     - 스마트 포트 협상(`negotiate_server_endpoint`): 8000번 포트에 이미 SoloLedger 서버가 실행 중이면 중복 기동 없이 즉시 연결(`reuse_existing`), 타 프로그램 점유 시 유휴 포트 자동 할당.
+     - 무콘솔(`--noconsole`) 스트림 안전 가드(`ensure_safe_stdio`) 및 Windows 작업표시줄 고유 앱 ID(`kr.sololedger.desktop`) 등록.
+  2. **루프백 세션 부트스트랩 및 PyInstaller 번들 경로 호환 (`api.py`, `config.py`)**
+     - `GET /desktop-launch`: 로컬 루프백(`127.0.0.1`) + HMAC 서명 토큰 검증 후 `sololedger_session` 쿠키 발급 및 `/dashboard` 자동 진입.
+     - PyInstaller 단일 실행파일(`sys.frozen` / `_MEIPASS`) 실행 시에도 프로젝트 루트의 `sololedger_prod.db`, `.env`, `archive/`를 안전하게 참조하고 내장 리소스(`sql/schema.sql`, `docs/USER_MANUAL.html`, `assets/sololedger.ico`) 폴백 지원.
+  3. **원클릭 빌드 · 아이콘 생성 · 자가 검증 파이프라인 (`scripts/build_desktop.ps1`, `scripts/generate_icon.py`)**
+     - `dist\SoloLedger.exe` 단일 실행파일 패키징, 작업공간/바탕화면 바로가기(`SoloLedger.lnk`) 생성 및 `--check-only` 스모크 검증 자동 수행.
+- **하네스 검증 테스트 (`tests/test_desktop_app.py`)**:
+  - PyInstaller 번들(`sys.frozen`) 환경에서의 `PROJECT_ROOT`·`BUNDLE_ROOT` 경로 해석 검증
+  - `GET /desktop-launch` 루프백 전용 제한 및 서명 토큰 쿠키 발급 검증
+  - 내장 서버 기동·포트 충돌 우회·기존 서버 재사용 및 종료 정리 검증
 
 ---
 

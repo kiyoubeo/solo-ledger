@@ -111,6 +111,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional ADB device serial number",
     )
 
+    # 9. desktop
+    desktop_parser = subparsers.add_parser(
+        "desktop",
+        help="Launch standalone SoloLedger Windows desktop window (pywebview + embedded FastAPI)",
+    )
+    desktop_parser.add_argument(
+        "--host",
+        default=None,
+        help="Bind host for embedded FastAPI server (default: 0.0.0.0)",
+    )
+    desktop_parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Preferred TCP port (default: 8000)",
+    )
+    desktop_parser.add_argument(
+        "--check-only",
+        action="store_true",
+        help="Run headless embedded server + dashboard readiness check and exit",
+    )
+
     return parser
 
 
@@ -127,6 +149,16 @@ def run_cli(argv: Optional[List[str]] = None) -> Dict[str, Any]:
             "db_path": str(db_path),
             "version": __version__,
         }
+
+    if args.command == "desktop":
+        from sololedger.desktop_app import run_desktop_app
+
+        outcome = run_desktop_app(
+            host=args.host,
+            port=args.port,
+            check_only=bool(args.check_only),
+        )
+        return {"command": "desktop", **outcome}
 
     init_db()
     conn = get_connection()

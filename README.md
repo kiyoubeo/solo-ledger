@@ -71,3 +71,18 @@ SoloLedger/
 ├── CHANGELOG.md                # 개발 변경 이력 마스터 테이블
 └── pyproject.toml              # Python 패키지 및 도구 설정 (uv)
 ```
+
+---
+
+## 4. 독립 창 Windows 데스크톱 앱 실행 (`SoloLedger.exe`)
+
+매번 PowerShell 명령어로 서버를 수동 실행할 필요 없이, 내장 FastAPI 서버와 전용 WebView2 창이 통합된 단독 데스크톱 프로그램으로 실행할 수 있습니다.
+
+- **단일 실행파일(`dist\SoloLedger.exe`) 및 바탕화면 바로가기 빌드**:
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File scripts/build_desktop.ps1 -CreateDesktopShortcut
+  ```
+- **즉시 실행**:
+  - 프로젝트 루트의 `SoloLedger.lnk` (또는 바탕화면 `SoloLedger` 아이콘, `dist\SoloLedger.exe`) 더블클릭
+  - 개발 환경 직접 실행: `uv run sololedger-desktop` (또는 `uv run python -m sololedger.cli desktop`)
+  - 창을 닫으면(`X`) 내장 서버도 자동으로 안전 종료됩니다. (이미 8000번 포트에 백그라운드 서버가 실행 중인 경우에는 충돌 없이 기존 서버에 연결됩니다.)

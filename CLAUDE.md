@@ -71,3 +71,4 @@
 | 2026-11-10 | logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/dashboard.py (+1 files) | [feat] 대시보드 계정과목 요약표 클릭 시 분류된 전표 목록 펼침 및 필터 기능 추가 |
 | 2026-11-11 | logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/dashboard.py (+3 files) | [feat] 이메일 내역 법인카드 토스페이먼츠 구매내역 페이지 연속 스크롤링·매출전표 카드번호 검증 및 거래명세서 자동반영 구현 |
 | 2026-11-11 | logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py, src/sololedger/dashboard.py (+2 files) | [feat] 이메일 1년치(365일) 무제한 페이지 스크롤 및 토스페이먼츠 매출전표 정밀정리 통합 |
+| 2026-11-12 | .gitignore, README.md, docs/DEVELOPMENT_PLAN.md, logs/last_verification.json (+15 files) | [feat] 독립 창 Windows 데스크톱 앱(v1.2.0 SoloLedger.exe, pywebview + 내장 FastAPI) 및 원클릭 빌드 스크립트 구축 |

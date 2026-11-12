@@ -20,7 +20,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from sololedger import __version__
 from sololedger.archiver import DuplicateReceiptError, build_receipt_print_title
-from sololedger.config import PROJECT_ROOT, settings
+from sololedger.config import PROJECT_ROOT, resolve_bundled_path, settings
 from sololedger.dashboard import (
     build_dashboard_summary,
     reapply_tax_rules_to_ledger,
@@ -1662,12 +1662,40 @@ async def render_dashboard_page(
         conn.close()
 
 
+@app.get("/desktop-launch")
+async def desktop_session_launch_endpoint(
+    request: Request,
+    token: str = Query(...),
+    next_path: str = Query(default="/dashboard"),
+):
+    """Bootstrap local WebView2 desktop window session strictly on loopback."""
+    client_host = (request.client.host if request.client else "") or ""
+    if client_host not in ("127.0.0.1", "::1", "localhost", "testclient"):
+        raise HTTPException(status_code=403, detail="Desktop launch is restricted to loopback.")
+    if not _verify_session_token(token):
+        raise HTTPException(status_code=401, detail="Invalid or expired desktop launch token.")
+    safe_target = (
+        next_path
+        if next_path.startswith("/") and not next_path.startswith("//")
+        else "/dashboard"
+    )
+    resp = RedirectResponse(url=safe_target, status_code=303)
+    resp.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=_create_session_token(),
+        max_age=SESSION_TTL_SECONDS,
+        httponly=True,
+        samesite="lax",
+    )
+    return resp
+
+
 @app.get("/manual", response_class=HTMLResponse)
 async def render_user_manual_page():
     """Serve the standalone HTML5 User Manual page."""
     if settings.require_auth and not _has_valid_auth():
         return RedirectResponse(url="/login", status_code=303)
-    manual_path = PROJECT_ROOT / "docs" / "USER_MANUAL.html"
+    manual_path = resolve_bundled_path("docs", "USER_MANUAL.html")
     if not manual_path.exists():
         raise HTTPException(status_code=404, detail="USER_MANUAL.html not found.")
     return HTMLResponse(content=manual_path.read_text(encoding="utf-8"))
