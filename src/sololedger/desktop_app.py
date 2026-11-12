@@ -196,6 +196,63 @@ def resolve_app_icon_path() -> Optional[Path]:
     return icon_candidate if icon_candidate.exists() else None
 
 
+def enable_webview_accelerator_keys(window: Any) -> bool:
+    """Enable WebView2 browser accelerator keys (Ctrl+F, F3, F5, Ctrl+P) even when debug=False."""
+    native = getattr(window, "native", None)
+    if native is None:
+        return False
+    webview_ctrl = getattr(native, "webview", None)
+    if webview_ctrl is None:
+        browser_obj = getattr(native, "browser", None)
+        webview_ctrl = getattr(browser_obj, "webview", None)
+    if webview_ctrl is None:
+        return False
+
+    applied = {"ok": False}
+
+    def _apply() -> None:
+        try:
+            core = getattr(webview_ctrl, "CoreWebView2", None)
+            wv_settings = getattr(core, "Settings", None) if core is not None else None
+            if wv_settings is not None:
+                wv_settings.AreBrowserAcceleratorKeysEnabled = True
+                applied["ok"] = True
+        except Exception:
+            applied["ok"] = False
+
+    try:
+        if getattr(webview_ctrl, "InvokeRequired", False):
+            try:
+                from System import Action  # type: ignore[import-not-found]
+
+                webview_ctrl.Invoke(Action(_apply))
+            except Exception:
+                webview_ctrl.Invoke(_apply)
+        else:
+            _apply()
+    except Exception:
+        return False
+    return bool(applied["ok"])
+
+
+def register_webview_window_hooks(window: Any) -> None:
+    """Attach lifecycle hooks to enable keyboard accelerators (e.g. Ctrl+F) on WebView2 ready."""
+    events = getattr(window, "events", None)
+    if events is None:
+        return
+
+    def _on_ready() -> None:
+        enable_webview_accelerator_keys(window)
+
+    for ev_name in ("shown", "loaded"):
+        ev_obj = getattr(events, ev_name, None)
+        if ev_obj is not None:
+            try:
+                ev_obj += _on_ready
+            except Exception:
+                pass
+
+
 def run_desktop_app(
     host: Optional[str] = None,
     port: Optional[int] = None,
@@ -258,7 +315,7 @@ def run_desktop_app(
         icon_path = resolve_app_icon_path()
 
         window_title = f"SoloLedger v{__version__} — 법인 회계·세무증빙 원장"
-        webview.create_window(
+        window = webview.create_window(
             title=window_title,
             url=start_url,
             width=width,
@@ -269,6 +326,7 @@ def run_desktop_app(
             zoomable=True,
             confirm_close=False,
         )
+        register_webview_window_hooks(window)
         gui_backend = "edgechromium" if sys.platform == "win32" else None
         webview.start(
             gui=gui_backend,

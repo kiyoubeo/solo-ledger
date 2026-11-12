@@ -1193,7 +1193,7 @@ def render_dashboard_html(
             f"onclick='openReceiptModal({tx_id})' title='클릭하여 영수증/매출전표 팝업 보기'>{t_dt} 🧾</a>"
         )
         pending_rows_html.append(
-            f"<tr data-tx-id='{tx_id}'>"
+            f"<tr data-tx-id='{tx_id}' data-total-amount='{int(item['total_amount'])}'>"
             f"<td>#{tx_id}</td>"
             f"<td>{dt_link}</td>"
             f"<td><span class='badge card'>{c_lbl}</span></td>"
@@ -1254,7 +1254,8 @@ def render_dashboard_html(
         )
         has_stmt_flag = "1" if has_stmt else "0"
         tx_rows_html.append(
-            f"<tr data-has-stmt='{has_stmt_flag}' data-account-code='{tx_acc_code}'>"
+            f"<tr data-has-stmt='{has_stmt_flag}' data-account-code='{tx_acc_code}' "
+            f"data-total-amount='{int(tx['total_amount'])}'>"
             f"<td>#{tx_id}</td>"
             f"<td>{dt_link}</td>"
             f"<td><span class='badge card'>{c_lbl}</span></td>"
@@ -1420,6 +1421,58 @@ def render_dashboard_html(
     .receipt-img-wrap {{ text-align: center; margin-top: 10px; background: #f8fafc;
                          border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px; }}
     .receipt-img-wrap img {{ max-width: 100%; max-height: 360px; border-radius: 6px; }}
+    .ctrlf-bar {{
+      position: fixed; top: 14px; right: 20px; z-index: 10050; display: none;
+      align-items: center; gap: 6px; flex-wrap: wrap; background: #ffffff;
+      border: 2px solid #2563eb; border-radius: 10px; padding: 7px 10px;
+      box-shadow: 0 12px 30px rgba(15, 23, 42, 0.24); max-width: calc(100vw - 32px);
+    }}
+    .ctrlf-bar.open {{ display: flex; }}
+    .ctrlf-input {{
+      width: 240px; padding: 6px 9px !important; font-size: 13px;
+      border: 1px solid #94a3b8 !important; border-radius: 6px !important; outline: none;
+    }}
+    .ctrlf-input:focus {{
+      border-color: #2563eb !important; box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.18);
+    }}
+    .ctrlf-count {{
+      font-size: 12px; font-weight: 700; color: #334155; min-width: 52px;
+      text-align: center; font-variant-numeric: tabular-nums;
+      padding: 3px 7px; background: #f1f5f9; border-radius: 5px;
+    }}
+    .ctrlf-count.zero {{ background: #fee2e2; color: #b91c1c; }}
+    .ctrlf-nav-btn {{
+      background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe;
+      padding: 4px 8px; font-size: 12px; font-weight: 700; margin-left: 0;
+    }}
+    .ctrlf-nav-btn:hover {{ background: #dbeafe; }}
+    .ctrlf-filter-toggle {{
+      display: inline-flex; align-items: center; gap: 4px; font-size: 12px;
+      font-weight: 700; color: #0f172a; cursor: pointer; user-select: none;
+      padding: 3px 7px; border-radius: 5px; background: #f8fafc; border: 1px solid #cbd5e1;
+    }}
+    .ctrlf-filter-pill {{
+      font-size: 11px; font-weight: 700; color: #0f766e; background: #ccfbf1;
+      padding: 3px 8px; border-radius: 999px; white-space: nowrap;
+    }}
+    .ctrlf-close-btn {{
+      background: transparent; color: #475569; padding: 4px 7px;
+      font-size: 13px; font-weight: 800; margin-left: 0;
+    }}
+    .ctrlf-close-btn:hover {{ background: #f1f5f9; color: #0f172a; }}
+    mark.sl-find-hit {{
+      background: #fef08a; color: #0f172a; padding: 0 1px;
+      border-radius: 2px; box-shadow: 0 0 0 1px #facc15;
+    }}
+    mark.sl-find-hit.sl-find-active {{
+      background: #fb923c; color: #ffffff; font-weight: 700;
+      box-shadow: 0 0 0 2px #ea580c;
+    }}
+    input.sl-find-input-hit {{ background: #fef9c3 !important; border-color: #eab308 !important; }}
+    input.sl-find-input-hit.sl-find-active {{
+      background: #ffedd5 !important; border-color: #ea580c !important;
+      box-shadow: 0 0 0 2px rgba(234, 88, 12, 0.35) !important;
+    }}
     @media print {{
       body.modal-open {{ background: #ffffff !important; padding: 0 !important; margin: 0 !important; }}
       body.modal-open > header,
@@ -1441,10 +1494,33 @@ def render_dashboard_html(
         break-inside: avoid;
       }}
       .no-print {{ display: none !important; }}
+      mark.sl-find-hit {{
+        background: transparent !important; color: inherit !important; box-shadow: none !important;
+      }}
     }}
   </style>
 </head>
 <body>
+  <div id="ctrlf-search-bar" class="ctrlf-bar no-print" role="search" aria-label="화면 및 전표 검색">
+    <span style="font-size:14px;">🔎</span>
+    <input type="text" id="ctrlf-search-input" class="ctrlf-input"
+           placeholder="가맹점·품목·금액·전표번호 검색 (Ctrl+F)"
+           autocomplete="off" spellcheck="false"
+           oninput="onCtrlFInput()" onkeydown="onCtrlFInputKeydown(event)" />
+    <span id="ctrlf-match-count" class="ctrlf-count">0 / 0</span>
+    <button type="button" class="ctrlf-nav-btn" onclick="stepCtrlFMatch(-1)"
+            title="이전 일치 항목 (Shift+Enter / Shift+F3)">▲</button>
+    <button type="button" class="ctrlf-nav-btn" onclick="stepCtrlFMatch(1)"
+            title="다음 일치 항목 (Enter / F3)">▼</button>
+    <span id="ctrlf-filter-summary" class="ctrlf-filter-pill" style="display:none;"></span>
+    <label class="ctrlf-filter-toggle"
+           title="체크 시 원장 테이블에서 검색어와 일치하는 전표 행만 필터링합니다">
+      <input type="checkbox" id="ctrlf-filter-rows-chk" onchange="onCtrlFRowFilterToggle()" />
+      전표만 필터
+    </label>
+    <button type="button" class="ctrlf-close-btn" onclick="closeCtrlFSearch()"
+            title="검색창 닫기 (Esc)">✕</button>
+  </div>
   <header>
     <div class="header-top">
       <div class="header-title-wrap">
@@ -1518,6 +1594,13 @@ def render_dashboard_html(
           <select id="account-filter" onchange="applyFilters()">
             {account_select_html}
           </select>
+        </div>
+        <div class="filter-divider"></div>
+        <div class="filter-group">
+          <button type="button" style="background:#1e40af; font-weight:700;"
+                  onclick="openCtrlFSearch()" title="화면 내 찾기 및 원장 전표 실시간 필터 (단축키: Ctrl+F)">
+            🔎 빠른 검색 (Ctrl+F)
+          </button>
         </div>
       </div>
 
@@ -1639,7 +1722,7 @@ def render_dashboard_html(
           <th>현재 계정</th><th>품목 / 참석자 소명</th><th>작업</th>
         </tr>
       </thead>
-      <tbody>
+      <tbody id="pending-ledger-tbody">
         {pending_tbody}
       </tbody>
     </table>
@@ -1652,8 +1735,14 @@ def render_dashboard_html(
         <h2 style="margin:0;">조회 기간 법인카드 원장 ({s_date} ~ {e_date}, 총 {summary['total_tx_count']}건)</h2>
         <span id="ledger-account-filter-badge" class="badge card no-print"
               style="display:none; background:#dbeafe; color:#1e3a8a; padding:4px 10px;"></span>
+        <span id="ledger-search-filter-badge" class="badge card no-print"
+              style="display:none; background:#ccfbf1; color:#0f766e; padding:4px 10px;"></span>
       </div>
       <div class="no-print" style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+        <button id="btn-clear-search-filter" class="secondary" style="display:none;"
+                onclick="closeCtrlFSearch()">
+          ✕ 검색 필터 해제
+        </button>
         <button id="btn-clear-acc-filter" class="secondary" style="display:none;"
                 onclick="clearLedgerAccountFilter()">
           📋 전체 계정 전표 다시 보기
@@ -2328,6 +2417,7 @@ def render_dashboard_html(
           '<div class="slip-row no-print"><span>PDF 저장명</span>' +
           '<code style="font-size:11px; color:#1d4ed8;">' + escHtml(activeModalPrintTitle) + '.pdf</code></div>';
       }}
+      refreshCtrlFIfOpen();
     }}
 
     function switchModalDocTab(mode) {{
@@ -2446,6 +2536,7 @@ def render_dashboard_html(
       document.getElementById('receipt-modal-backdrop').classList.remove('open');
       activeModalPrintTitle = '';
       document.title = DEFAULT_DOC_TITLE;
+      refreshCtrlFIfOpen();
     }}
 
     function printReceiptSlip() {{
@@ -2541,6 +2632,7 @@ def render_dashboard_html(
         }}
       }}
       applyMainLedgerRowVisibility();
+      refreshCtrlFIfOpen();
     }}
     function toggleAllAccountDetails(openAll) {{
       const detailRows = document.querySelectorAll('tr.acc-detail-row');
@@ -2561,6 +2653,7 @@ def render_dashboard_html(
         activeLedgerAccountFilter = '';
         applyMainLedgerRowVisibility();
       }}
+      refreshCtrlFIfOpen();
     }}
     function focusAccountSummary(accCode) {{
       const detailRow = document.getElementById('acc-detail-' + accCode);
@@ -3003,21 +3096,63 @@ def render_dashboard_html(
       box.innerHTML = htmlRows;
     }}
     let stmtFilterOnly = false;
+    let ctrlFRowFilterOnly = false;
+    let activeCtrlFQuery = '';
+    let activeCtrlFRegex = null;
+    let ctrlFHitElements = [];
+    let ctrlFActiveIndex = -1;
+
+    function getLedgerRowSearchText(tr) {{
+      let txt = tr.textContent || '';
+      const inputs = tr.querySelectorAll('input[type="text"]');
+      inputs.forEach((inp) => {{
+        if (inp.value) txt += ' ' + inp.value;
+      }});
+      return txt;
+    }}
+
+    function rowMatchesCtrlF(tr, regex) {{
+      if (!regex) return true;
+      regex.lastIndex = 0;
+      return regex.test(getLedgerRowSearchText(tr));
+    }}
+
     function applyMainLedgerRowVisibility() {{
       const tbody = document.getElementById('main-ledger-tbody');
+      const pendingTbody = document.getElementById('pending-ledger-tbody');
       const badgeEl = document.getElementById('ledger-account-filter-badge');
       const clearBtn = document.getElementById('btn-clear-acc-filter');
+      const searchBadgeEl = document.getElementById('ledger-search-filter-badge');
+      const clearSearchBtn = document.getElementById('btn-clear-search-filter');
       let matchAccCount = 0;
+      let matchSearchCount = 0;
+      let matchSearchAmt = 0;
       if (tbody) {{
         const rows = tbody.querySelectorAll('tr[data-has-stmt]');
         rows.forEach((tr) => {{
           const hasStmt = tr.getAttribute('data-has-stmt') === '1';
           const rowAcc = tr.getAttribute('data-account-code') || '';
+          const rowAmt = parseInt(tr.getAttribute('data-total-amount') || '0', 10) || 0;
           const stmtOk = !stmtFilterOnly || hasStmt;
           const accOk = !activeLedgerAccountFilter || rowAcc === activeLedgerAccountFilter;
-          const visible = stmtOk && accOk;
+          const hitsQuery = !activeCtrlFRegex || rowMatchesCtrlF(tr, activeCtrlFRegex);
+          if (stmtOk && accOk && activeCtrlFRegex && hitsQuery) {{
+            matchSearchCount += 1;
+            matchSearchAmt += rowAmt;
+          }}
+          const searchOk = !ctrlFRowFilterOnly || hitsQuery;
+          const visible = stmtOk && accOk && searchOk;
           tr.style.display = visible ? '' : 'none';
           if (accOk) matchAccCount += 1;
+        }});
+      }}
+      if (pendingTbody) {{
+        const pRows = pendingTbody.querySelectorAll('tr[data-tx-id]');
+        pRows.forEach((tr) => {{
+          const pOk = !ctrlFRowFilterOnly
+            || !activeCtrlFRegex
+            || rowMatchesCtrlF(tr, activeCtrlFRegex);
+          tr.style.display = pOk ? '' : 'none';
         }});
       }}
       if (badgeEl && clearBtn) {{
@@ -3031,10 +3166,25 @@ def render_dashboard_html(
           clearBtn.style.display = 'none';
         }}
       }}
+      if (searchBadgeEl && clearSearchBtn) {{
+        if (ctrlFRowFilterOnly && activeCtrlFQuery) {{
+          const fmtAmt = matchSearchAmt.toLocaleString('ko-KR') + '원';
+          searchBadgeEl.style.display = 'inline-block';
+          searchBadgeEl.textContent =
+            '🔎 검색 필터: "' + activeCtrlFQuery + '" (' + matchSearchCount + '건 · ' + fmtAmt + ')';
+          clearSearchBtn.style.display = 'inline-block';
+        }} else {{
+          searchBadgeEl.style.display = 'none';
+          searchBadgeEl.textContent = '';
+          clearSearchBtn.style.display = 'none';
+        }}
+      }}
+      return {{ matchSearchCount, matchSearchAmt }};
     }}
     function toggleStatementRowsFilter(stmtCnt) {{
       stmtFilterOnly = !stmtFilterOnly;
       applyMainLedgerRowVisibility();
+      refreshCtrlFIfOpen();
       const btn = document.getElementById('btn-filter-stmt-only');
       if (btn) {{
         btn.className = stmtFilterOnly ? '' : 'secondary';
@@ -3453,14 +3603,317 @@ def render_dashboard_html(
       }};
       reader.readAsDataURL(file);
     }}
+    function isCtrlFSearchOpen() {{
+      const bar = document.getElementById('ctrlf-search-bar');
+      return !!(bar && bar.classList.contains('open'));
+    }}
+
+    function escapeCtrlFRegExp(rawStr) {{
+      return String(rawStr || '').replace(/[.*+?^${{}}()|[\\]\\\\]/g, '\\\\$&');
+    }}
+
+    function buildCtrlFRegex(rawQuery) {{
+      const trimmed = String(rawQuery || '').trim();
+      if (!trimmed) return null;
+      const litPat = escapeCtrlFRegExp(trimmed);
+      const numCand = trimmed.replace(/[\\s,]/g, '').replace(/원$/, '');
+      if (/^\\d{{2,}}$/.test(numCand)) {{
+        const sep = numCand.length === 10 ? '[-,]?' : ',?';
+        const numPat = numCand.split('').join(sep);
+        const combined = litPat === numPat ? litPat : (litPat + '|' + numPat);
+        return new RegExp(combined, 'gi');
+      }}
+      return new RegExp(litPat, 'gi');
+    }}
+
+    function clearCtrlFHighlights() {{
+      const marks = document.querySelectorAll('mark.sl-find-hit');
+      marks.forEach((m) => {{
+        const parent = m.parentNode;
+        if (parent) {{
+          parent.replaceChild(document.createTextNode(m.textContent || ''), m);
+          parent.normalize();
+        }}
+      }});
+      const inputHits = document.querySelectorAll('.sl-find-input-hit');
+      inputHits.forEach((inp) => {{
+        inp.classList.remove('sl-find-input-hit', 'sl-find-active');
+      }});
+      ctrlFHitElements = [];
+      ctrlFActiveIndex = -1;
+    }}
+
+    function isCtrlFElementVisible(el, openModal) {{
+      if (!el) return false;
+      if (openModal && !openModal.contains(el)) return false;
+      let cur = el;
+      while (cur && cur !== document.body) {{
+        const tag = (cur.tagName || '').toUpperCase();
+        if (
+          tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT'
+          || tag === 'OPTION' || tag === 'SELECT' || tag === 'TEXTAREA'
+        ) {{
+          return false;
+        }}
+        if (cur.id === 'ctrlf-search-bar') return false;
+        if (!openModal && cur.classList && cur.classList.contains('modal-backdrop')) {{
+          return false;
+        }}
+        if (cur.hidden) return false;
+        if (cur.style && cur.style.display === 'none') return false;
+        if (window.getComputedStyle) {{
+          const cs = window.getComputedStyle(cur);
+          if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+        }}
+        cur = cur.parentElement;
+      }}
+      return true;
+    }}
+
+    function highlightCtrlFMatches(regex) {{
+      const openModal = document.querySelector('.modal-backdrop.open');
+      const rootNode = openModal || document.body;
+      if (!rootNode || !regex) return;
+
+      const textNodes = [];
+      const walker = document.createTreeWalker(rootNode, NodeFilter.SHOW_TEXT, null);
+      let curNode;
+      while ((curNode = walker.nextNode())) {{
+        const val = curNode.nodeValue || '';
+        if (!val.trim()) continue;
+        if (!isCtrlFElementVisible(curNode.parentElement, openModal)) continue;
+        regex.lastIndex = 0;
+        if (regex.test(val)) {{
+          textNodes.push(curNode);
+        }}
+      }}
+
+      textNodes.forEach((tNode) => {{
+        const text = tNode.nodeValue || '';
+        regex.lastIndex = 0;
+        const frag = document.createDocumentFragment();
+        let lastIdx = 0;
+        let m;
+        while ((m = regex.exec(text)) !== null) {{
+          if (m[0].length === 0) {{
+            regex.lastIndex += 1;
+            continue;
+          }}
+          if (m.index > lastIdx) {{
+            frag.appendChild(document.createTextNode(text.slice(lastIdx, m.index)));
+          }}
+          const mark = document.createElement('mark');
+          mark.className = 'sl-find-hit';
+          mark.textContent = m[0];
+          frag.appendChild(mark);
+          ctrlFHitElements.push(mark);
+          lastIdx = m.index + m[0].length;
+        }}
+        if (lastIdx < text.length) {{
+          frag.appendChild(document.createTextNode(text.slice(lastIdx)));
+        }}
+        if (tNode.parentNode) {{
+          tNode.parentNode.replaceChild(frag, tNode);
+        }}
+      }});
+
+      const inputs = rootNode.querySelectorAll('input[type="text"]');
+      let hasInputHit = false;
+      inputs.forEach((inp) => {{
+        if (inp.id === 'ctrlf-search-input') return;
+        const v = inp.value || '';
+        if (!v.trim()) return;
+        if (!isCtrlFElementVisible(inp, openModal)) return;
+        regex.lastIndex = 0;
+        if (regex.test(v)) {{
+          inp.classList.add('sl-find-input-hit');
+          ctrlFHitElements.push(inp);
+          hasInputHit = true;
+        }}
+      }});
+
+      if (hasInputHit && ctrlFHitElements.length > 1) {{
+        ctrlFHitElements.sort((a, b) => {{
+          if (a === b) return 0;
+          const pos = a.compareDocumentPosition(b);
+          return (pos & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1;
+        }});
+      }}
+    }}
+
+    function updateCtrlFCounterUI(ledgerStats) {{
+      const cntEl = document.getElementById('ctrlf-match-count');
+      const pillEl = document.getElementById('ctrlf-filter-summary');
+      const total = ctrlFHitElements.length;
+      if (cntEl) {{
+        if (!activeCtrlFQuery) {{
+          cntEl.textContent = '0 / 0';
+          cntEl.classList.remove('zero');
+        }} else if (total === 0) {{
+          cntEl.textContent = '0 / 0';
+          cntEl.classList.add('zero');
+        }} else {{
+          cntEl.textContent = (ctrlFActiveIndex + 1) + ' / ' + total;
+          cntEl.classList.remove('zero');
+        }}
+      }}
+      if (pillEl) {{
+        if (activeCtrlFQuery && ledgerStats) {{
+          const fmtAmt = Number(ledgerStats.matchSearchAmt || 0).toLocaleString('ko-KR') + '원';
+          pillEl.style.display = 'inline-block';
+          pillEl.textContent =
+            '원장 ' + (ledgerStats.matchSearchCount || 0) + '건 · ' + fmtAmt;
+        }} else {{
+          pillEl.style.display = 'none';
+          pillEl.textContent = '';
+        }}
+      }}
+    }}
+
+    function activateCtrlFMatch(idx, shouldScroll) {{
+      const total = ctrlFHitElements.length;
+      if (total === 0) {{
+        ctrlFActiveIndex = -1;
+        return;
+      }}
+      if (ctrlFActiveIndex >= 0 && ctrlFActiveIndex < total) {{
+        ctrlFHitElements[ctrlFActiveIndex].classList.remove('sl-find-active');
+      }}
+      const normalized = ((idx % total) + total) % total;
+      ctrlFActiveIndex = normalized;
+      const target = ctrlFHitElements[normalized];
+      if (target) {{
+        target.classList.add('sl-find-active');
+        if (shouldScroll && target.scrollIntoView) {{
+          target.scrollIntoView({{ behavior: 'smooth', block: 'center', inline: 'nearest' }});
+        }}
+      }}
+    }}
+
+    function executeCtrlFSearch(shouldScrollToFirst) {{
+      const inp = document.getElementById('ctrlf-search-input');
+      const rawVal = inp ? inp.value : '';
+      clearCtrlFHighlights();
+      activeCtrlFQuery = String(rawVal || '').trim();
+      activeCtrlFRegex = buildCtrlFRegex(activeCtrlFQuery);
+      const ledgerStats = applyMainLedgerRowVisibility();
+      if (activeCtrlFRegex) {{
+        highlightCtrlFMatches(activeCtrlFRegex);
+        if (ctrlFHitElements.length > 0) {{
+          activateCtrlFMatch(0, !!shouldScrollToFirst);
+        }}
+      }}
+      updateCtrlFCounterUI(ledgerStats);
+    }}
+
+    function refreshCtrlFIfOpen() {{
+      if (isCtrlFSearchOpen() && activeCtrlFQuery) {{
+        executeCtrlFSearch(false);
+      }}
+    }}
+
+    function stepCtrlFMatch(delta) {{
+      if (!activeCtrlFQuery) return;
+      if (ctrlFHitElements.length === 0) {{
+        executeCtrlFSearch(true);
+        return;
+      }}
+      const nextIdx = ctrlFActiveIndex < 0 ? 0 : (ctrlFActiveIndex + delta);
+      activateCtrlFMatch(nextIdx, true);
+      updateCtrlFCounterUI(applyMainLedgerRowVisibility());
+    }}
+
+    function onCtrlFInput() {{
+      executeCtrlFSearch(true);
+    }}
+
+    function onCtrlFRowFilterToggle() {{
+      const chk = document.getElementById('ctrlf-filter-rows-chk');
+      ctrlFRowFilterOnly = !!(chk && chk.checked);
+      executeCtrlFSearch(true);
+    }}
+
+    function onCtrlFInputKeydown(ev) {{
+      if (ev.key === 'Enter' && !ev.isComposing && ev.keyCode !== 229) {{
+        ev.preventDefault();
+        stepCtrlFMatch(ev.shiftKey ? -1 : 1);
+      }}
+    }}
+
+    function openCtrlFSearch(presetQuery) {{
+      const bar = document.getElementById('ctrlf-search-bar');
+      const inp = document.getElementById('ctrlf-search-input');
+      if (!bar || !inp) return;
+      bar.classList.add('open');
+      if (typeof presetQuery === 'string' && presetQuery.trim()) {{
+        inp.value = presetQuery.trim();
+      }} else if (window.getSelection) {{
+        const sel = String(window.getSelection().toString() || '').trim();
+        if (sel && sel.length <= 80 && !sel.includes('\\n')) {{
+          inp.value = sel;
+        }}
+      }}
+      inp.focus();
+      inp.select();
+      if (inp.value.trim()) {{
+        executeCtrlFSearch(true);
+      }}
+    }}
+
+    function closeCtrlFSearch() {{
+      const bar = document.getElementById('ctrlf-search-bar');
+      const chk = document.getElementById('ctrlf-filter-rows-chk');
+      if (bar) bar.classList.remove('open');
+      if (chk) chk.checked = false;
+      ctrlFRowFilterOnly = false;
+      activeCtrlFQuery = '';
+      activeCtrlFRegex = null;
+      clearCtrlFHighlights();
+      applyMainLedgerRowVisibility();
+      updateCtrlFCounterUI(null);
+    }}
+
     document.addEventListener('keydown', function(ev) {{
+      const isFindKey = (ev.ctrlKey || ev.metaKey)
+        && !ev.altKey
+        && !ev.shiftKey
+        && (ev.key === 'f' || ev.key === 'F' || ev.code === 'KeyF');
+      if (isFindKey) {{
+        ev.preventDefault();
+        openCtrlFSearch();
+        return;
+      }}
+      if (ev.key === 'F3') {{
+        ev.preventDefault();
+        if (!isCtrlFSearchOpen()) {{
+          openCtrlFSearch();
+        }} else {{
+          stepCtrlFMatch(ev.shiftKey ? -1 : 1);
+        }}
+        return;
+      }}
       if (ev.key === 'Escape') {{
+        if (isCtrlFSearchOpen()) {{
+          ev.preventDefault();
+          closeCtrlFSearch();
+          return;
+        }}
         closeReceiptModal();
         closeCoupangModal();
         closeEmailOrderModal();
         closeCorpCardModal();
       }}
     }});
+
+    (function initUrlFindQuery() {{
+      try {{
+        const params = new URLSearchParams(window.location.search || '');
+        const initialFind = params.get('find') || params.get('q') || '';
+        if (initialFind.trim()) {{
+          openCtrlFSearch(initialFind.trim());
+        }}
+      }} catch (e) {{}}
+    }})();
 
     const CORP_ISSUER_PREFIX_MAP = {{
       WOORI: '우리법인',

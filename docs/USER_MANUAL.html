@@ -210,9 +210,51 @@
       aside { position: static; height: auto; border-right: none; border-bottom: 1px solid var(--border); }
       main { padding: 20px; }
     }
+    .ctrlf-bar {
+      position: fixed; top: 14px; right: 20px; z-index: 10050; display: none;
+      align-items: center; gap: 6px; flex-wrap: wrap; background: #ffffff;
+      border: 2px solid #2563eb; border-radius: 10px; padding: 7px 10px;
+      box-shadow: 0 12px 30px rgba(15, 23, 42, 0.24); max-width: calc(100vw - 32px);
+    }
+    .ctrlf-bar.open { display: flex; }
+    .ctrlf-input {
+      width: 220px; padding: 6px 9px; font-size: 13px;
+      border: 1px solid #94a3b8; border-radius: 6px; outline: none;
+    }
+    .ctrlf-input:focus { border-color: #2563eb; box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.18); }
+    .ctrlf-count {
+      font-size: 12px; font-weight: 700; color: #334155; min-width: 50px;
+      text-align: center; font-variant-numeric: tabular-nums;
+      padding: 3px 7px; background: #f1f5f9; border-radius: 5px;
+    }
+    .ctrlf-count.zero { background: #fee2e2; color: #b91c1c; }
+    .ctrlf-btn {
+      background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe;
+      border-radius: 6px; padding: 4px 8px; font-size: 12px; font-weight: 700; cursor: pointer;
+    }
+    .ctrlf-close {
+      background: transparent; color: #475569; border: none; border-radius: 6px;
+      padding: 4px 7px; font-size: 13px; font-weight: 800; cursor: pointer;
+    }
+    mark.sl-find-hit {
+      background: #fef08a; color: #0f172a; padding: 0 1px;
+      border-radius: 2px; box-shadow: 0 0 0 1px #facc15;
+    }
+    mark.sl-find-hit.sl-find-active {
+      background: #fb923c; color: #ffffff; font-weight: 700; box-shadow: 0 0 0 2px #ea580c;
+    }
   </style>
 </head>
 <body>
+  <div id="ctrlf-search-bar" class="ctrlf-bar" role="search" aria-label="매뉴얼 내 검색">
+    <span style="font-size:14px;">🔎</span>
+    <input type="text" id="ctrlf-search-input" class="ctrlf-input"
+           placeholder="매뉴얼 키워드 검색 (Ctrl+F)" autocomplete="off" spellcheck="false" />
+    <span id="ctrlf-match-count" class="ctrlf-count">0 / 0</span>
+    <button type="button" class="ctrlf-btn" onclick="stepManualFind(-1)" title="이전 (Shift+Enter)">▲</button>
+    <button type="button" class="ctrlf-btn" onclick="stepManualFind(1)" title="다음 (Enter)">▼</button>
+    <button type="button" class="ctrlf-close" onclick="closeManualFind()" title="닫기 (Esc)">✕</button>
+  </div>
   <div class="layout">
     <aside>
       <h2>SoloLedger 매뉴얼</h2>
@@ -227,8 +269,9 @@
         <a href="#sec-7">7. NAS(Z:\) 백업 &amp; 24시간 서버</a>
       </nav>
       <div class="quick-links">
-        <a class="btn-link" href="http://127.0.0.1:8000/dashboard" target="_blank">웹 대시보드 열기</a>
-        <a class="btn-link secondary" href="http://127.0.0.1:8000/docs" target="_blank">Swagger API 문서 열기</a>
+        <a class="btn-link" href="javascript:void(0)" onclick="openManualFind()">🔎 매뉴얼 검색 (Ctrl+F)</a>
+        <a class="btn-link" href="/dashboard">웹 대시보드 열기</a>
+        <a class="btn-link secondary" href="/docs" target="_blank">Swagger API 문서 열기</a>
       </div>
     </aside>
 
@@ -504,5 +547,127 @@ powershell -ExecutionPolicy Bypass -File scripts/server_service.ps1 install</cod
       </section>
     </main>
   </div>
+  <script>
+    (function() {
+      let hits = [];
+      let activeIdx = -1;
+      const bar = document.getElementById('ctrlf-search-bar');
+      const inp = document.getElementById('ctrlf-search-input');
+      const cnt = document.getElementById('ctrlf-match-count');
+
+      function clearHits() {
+        document.querySelectorAll('mark.sl-find-hit').forEach((m) => {
+          const p = m.parentNode;
+          if (p) {
+            p.replaceChild(document.createTextNode(m.textContent || ''), m);
+            p.normalize();
+          }
+        });
+        hits = [];
+        activeIdx = -1;
+      }
+
+      function activateHit(idx) {
+        if (hits.length === 0) {
+          cnt.textContent = (inp.value.trim() ? '0 / 0' : '0 / 0');
+          if (inp.value.trim()) cnt.classList.add('zero');
+          else cnt.classList.remove('zero');
+          return;
+        }
+        if (activeIdx >= 0 && activeIdx < hits.length) {
+          hits[activeIdx].classList.remove('sl-find-active');
+        }
+        activeIdx = ((idx % hits.length) + hits.length) % hits.length;
+        const el = hits[activeIdx];
+        el.classList.add('sl-find-active');
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        cnt.textContent = (activeIdx + 1) + ' / ' + hits.length;
+        cnt.classList.remove('zero');
+      }
+
+      function runFind() {
+        clearHits();
+        const q = (inp.value || '').trim();
+        if (!q) {
+          cnt.textContent = '0 / 0';
+          cnt.classList.remove('zero');
+          return;
+        }
+        const esc = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const re = new RegExp(esc, 'gi');
+        const nodes = [];
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+        let n;
+        while ((n = walker.nextNode())) {
+          const p = n.parentElement;
+          if (!p || bar.contains(p)) continue;
+          const tag = (p.tagName || '').toUpperCase();
+          if (tag === 'SCRIPT' || tag === 'STYLE') continue;
+          re.lastIndex = 0;
+          if (re.test(n.nodeValue || '')) nodes.push(n);
+        }
+        nodes.forEach((tn) => {
+          const txt = tn.nodeValue || '';
+          re.lastIndex = 0;
+          const frag = document.createDocumentFragment();
+          let last = 0;
+          let m;
+          while ((m = re.exec(txt)) !== null) {
+            if (!m[0].length) { re.lastIndex += 1; continue; }
+            if (m.index > last) frag.appendChild(document.createTextNode(txt.slice(last, m.index)));
+            const mk = document.createElement('mark');
+            mk.className = 'sl-find-hit';
+            mk.textContent = m[0];
+            frag.appendChild(mk);
+            hits.push(mk);
+            last = m.index + m[0].length;
+          }
+          if (last < txt.length) frag.appendChild(document.createTextNode(txt.slice(last)));
+          if (tn.parentNode) tn.parentNode.replaceChild(frag, tn);
+        });
+        activateHit(0);
+      }
+
+      window.openManualFind = function() {
+        bar.classList.add('open');
+        const sel = window.getSelection ? String(window.getSelection().toString() || '').trim() : '';
+        if (sel && sel.length <= 80 && !sel.includes('\n')) inp.value = sel;
+        inp.focus();
+        inp.select();
+        if (inp.value.trim()) runFind();
+      };
+      window.closeManualFind = function() {
+        bar.classList.remove('open');
+        clearHits();
+        cnt.textContent = '0 / 0';
+        cnt.classList.remove('zero');
+      };
+      window.stepManualFind = function(d) {
+        if (!hits.length) { runFind(); return; }
+        activateHit(activeIdx + d);
+      };
+
+      inp.addEventListener('input', runFind);
+      inp.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter' && !ev.isComposing && ev.keyCode !== 229) {
+          ev.preventDefault();
+          window.stepManualFind(ev.shiftKey ? -1 : 1);
+        }
+      });
+      document.addEventListener('keydown', (ev) => {
+        if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && !ev.shiftKey && (ev.key === 'f' || ev.key === 'F' || ev.code === 'KeyF')) {
+          ev.preventDefault();
+          window.openManualFind();
+        } else if (ev.key === 'F3') {
+          ev.preventDefault();
+          if (!bar.classList.contains('open')) window.openManualFind();
+          else window.stepManualFind(ev.shiftKey ? -1 : 1);
+        } else if (ev.key === 'Escape' && bar.classList.contains('open')) {
+          ev.preventDefault();
+          window.closeManualFind();
+        }
+      });
+    })();
+  </script>
 </body>
 </html>

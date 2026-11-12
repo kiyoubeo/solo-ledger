@@ -15,10 +15,12 @@ from sololedger.config import _resolve_bundle_root, _resolve_project_root
 from sololedger.desktop_app import (
     EmbeddedServerController,
     build_desktop_start_url,
+    enable_webview_accelerator_keys,
     ensure_safe_stdio,
     find_free_port,
     is_sololedger_running,
     negotiate_server_endpoint,
+    register_webview_window_hooks,
     resolve_app_icon_path,
     run_desktop_app,
 )
@@ -208,3 +210,115 @@ def test_desktop_gui_window_invocation_and_cleanup(monkeypatch) -> None:
     assert resolve_app_icon_path() is not None
     # Server must be stopped after window closes
     assert is_sololedger_running(port, timeout=0.3) is False
+
+
+def test_webview_accelerator_keys_hook_enables_ctrl_f_direct_and_invoke() -> None:
+    # 1. Missing native window safely returns False
+    empty_win = SimpleNamespace(native=None)
+    assert enable_webview_accelerator_keys(empty_win) is False
+
+    # 2. Direct UI thread execution viaregister_webview_window_hooks
+    class FakeEvent:
+        def __init__(self) -> None:
+            self.callbacks = []
+
+        def __iadd__(self, cb):
+            self.callbacks.append(cb)
+            return self
+
+        def fire(self) -> None:
+            for cb in self.callbacks:
+                cb()
+
+    wv_settings = SimpleNamespace(AreBrowserAcceleratorKeysEnabled=False)
+    webview_ctrl = SimpleNamespace(
+        InvokeRequired=False,
+        CoreWebView2=SimpleNamespace(Settings=wv_settings),
+    )
+    shown_ev = FakeEvent()
+    loaded_ev = FakeEvent()
+    win = SimpleNamespace(
+        native=SimpleNamespace(webview=webview_ctrl),
+        events=SimpleNamespace(shown=shown_ev, loaded=loaded_ev),
+    )
+    register_webview_window_hooks(win)
+    assert len(shown_ev.callbacks) == 1
+    assert len(loaded_ev.callbacks) == 1
+    loaded_ev.fire()
+    assert wv_settings.AreBrowserAcceleratorKeysEnabled is True
+
+    # 3. Cross-thread InvokeRequired=True marshaling + browser.webview fallback
+    invoked_settings = SimpleNamespace(AreBrowserAcceleratorKeysEnabled=False)
+    invoke_calls = []
+
+    def fake_invoke(delegate_fn) -> None:
+        invoke_calls.append(delegate_fn)
+        delegate_fn()
+
+    fallback_webview_ctrl = SimpleNamespace(
+        InvokeRequired=True,
+        Invoke=fake_invoke,
+        CoreWebView2=SimpleNamespace(Settings=invoked_settings),
+    )
+    win_invoke = SimpleNamespace(
+        native=SimpleNamespace(
+            webview=None,
+            browser=SimpleNamespace(webview=fallback_webview_ctrl),
+        )
+    )
+    assert enable_webview_accelerator_keys(win_invoke) is True
+    assert len(invoke_calls) == 1
+    assert invoked_settings.AreBrowserAcceleratorKeysEnabled is True
+
+
+def test_dashboard_and_manual_ctrl_f_search_bar_and_ledger_filter() -> None:
+    client = TestClient(app)
+
+    # Seed demo rows so ledger tables emit data-total-amount attributes
+    seed_resp = client.post("/api/v1/system/seed-demo", headers={"X-API-Key": "dev-secret-key"})
+    assert seed_resp.status_code in (200, 401)
+    if seed_resp.status_code == 401:
+        from sololedger.config import settings as cur_settings
+
+        client.post("/api/v1/system/seed-demo", headers={"X-API-Key": cur_settings.api_key})
+
+    dash_resp = client.get("/dashboard?year_month=ALL")
+    assert dash_resp.status_code == 200
+    html_text = dash_resp.text
+
+    # Verify Ctrl+F floating search bar, toolbar button, filter toggle, and row attributes
+    assert 'id="ctrlf-search-bar"' in html_text
+    assert 'id="ctrlf-search-input"' in html_text
+    assert 'id="ctrlf-match-count"' in html_text
+    assert 'id="ctrlf-filter-rows-chk"' in html_text
+    assert 'id="ctrlf-filter-summary"' in html_text
+    assert "🔎 빠른 검색 (Ctrl+F)" in html_text
+    assert 'id="ledger-search-filter-badge"' in html_text
+    assert 'id="btn-clear-search-filter"' in html_text
+    assert 'id="pending-ledger-tbody"' in html_text
+    assert "data-total-amount=" in html_text
+
+    # Verify JS functions and keyboard shortcuts (Ctrl+F, F3, Escape) rendered cleanly
+    for expected_token in (
+        "function openCtrlFSearch(",
+        "function closeCtrlFSearch(",
+        "function stepCtrlFMatch(",
+        "function buildCtrlFRegex(",
+        "function onCtrlFRowFilterToggle(",
+        "ev.code === 'KeyF'",
+        "ev.key === 'F3'",
+    ):
+        assert expected_token in html_text
+
+    # Verify no accidental double-brace f-string artifacts leaked into rendered HTML/JS
+    assert "{{" not in html_text
+    assert "}}" not in html_text
+
+    # Verify /manual also includes Ctrl+F search bar & handlers
+    manual_resp = client.get("/manual")
+    assert manual_resp.status_code == 200
+    manual_html = manual_resp.text
+    assert 'id="ctrlf-search-bar"' in manual_html
+    assert "🔎 매뉴얼 검색 (Ctrl+F)" in manual_html
+    assert "window.openManualFind" in manual_html
+    assert "window.stepManualFind" in manual_html
