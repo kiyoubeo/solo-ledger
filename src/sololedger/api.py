@@ -20,6 +20,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from sololedger import __version__
 from sololedger.archiver import DuplicateReceiptError, build_receipt_print_title
+from sololedger.audit_graph import run_pre_export_tax_audit
 from sololedger.config import PROJECT_ROOT, resolve_bundled_path, settings
 from sololedger.dashboard import (
     build_dashboard_summary,
@@ -55,8 +56,11 @@ from sololedger.models import (
     ReceiptUploadRequest,
     ReconcileBatchRequest,
     SmsWebhookPayload,
+    TaxAuditRequest,
     TaxPackExportRequest,
     TransactionUpdateRequest,
+    WorkflowResumeRequest,
+    WorkflowRunRequest,
 )
 from sololedger.nas_sync import sync_to_nas
 from sololedger.notifier import send_telegram_memo_prompt
@@ -86,6 +90,10 @@ from sololedger.sms_parser import (
 from sololedger.tax_engine import calculate_supply_and_vat, evaluate_tax_rules
 from sololedger.telegram_bot import handle_telegram_update
 from sololedger.vehicle_tracker import get_vehicle_expense_summary
+from sololedger.workflow_graph import (
+    resume_transaction_workflow,
+    run_transaction_workflow,
+)
 
 
 async def _background_email_watcher_loop() -> None:
@@ -741,6 +749,79 @@ async def vehicle_limit_endpoint(
     cursor = conn.cursor()
     try:
         return get_vehicle_expense_summary(cursor, year=year)
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/audits/tax-pack/{year_month}")
+async def pre_export_tax_audit_endpoint(
+    year_month: str,
+    request: Optional[TaxAuditRequest] = Body(default=None),
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Run the Phase 8 pre-export parallel tax audit fan-out/join graph for YYYYMM."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        try:
+            report = await run_pre_export_tax_audit(
+                cursor,
+                year_month=year_month,
+                request=request,
+            )
+            conn.commit()
+            return report
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/workflows/transactions/{tx_id}/run")
+async def run_transaction_workflow_endpoint(
+    tx_id: int,
+    request: Optional[WorkflowRunRequest] = Body(default=None),
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Execute the Phase 8 lightweight transaction resolution state graph."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        try:
+            outcome = await run_transaction_workflow(cursor, tx_id=tx_id, request=request)
+            conn.commit()
+            return outcome
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/workflows/transactions/{tx_id}/resume")
+async def resume_transaction_workflow_endpoint(
+    tx_id: int,
+    request: WorkflowResumeRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Resume an interrupted transaction workflow checkpoint with human clarification."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        try:
+            outcome = await resume_transaction_workflow(cursor, tx_id=tx_id, request=request)
+            conn.commit()
+            return outcome
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
     finally:
         conn.close()
 

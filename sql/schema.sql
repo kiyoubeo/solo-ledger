@@ -76,6 +76,23 @@ CREATE TABLE IF NOT EXISTS tax_classification_rules (
     UNIQUE(priority, match_field, match_pattern)
 );
 
+-- 5. Workflow State Graph Checkpoints Table (Human-in-the-loop Interrupt & Resume)
+CREATE TABLE IF NOT EXISTS workflow_checkpoints (
+    checkpoint_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tx_id INTEGER NOT NULL,
+    graph_name VARCHAR(50) NOT NULL DEFAULT 'tx_resolution_graph',
+    current_node VARCHAR(50) NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'INTERRUPTED', -- RUNNING, INTERRUPTED, COMPLETED, SUPERSEDED, FAILED
+    interrupt_reason VARCHAR(100),
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    state_json TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (tx_id) REFERENCES card_transactions(tx_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_wf_ckpt_tx_status ON workflow_checkpoints(tx_id, status);
+
 -- Initial Seed Data for 1-Person Corporation Tax Rules (Firefly III-style expanded ruleset)
 DELETE FROM tax_classification_rules
 WHERE priority IN (10, 20, 30, 35, 38, 40);

@@ -205,3 +205,74 @@ class AppPushWebhookPayload(BaseModel):
         default=None,
         description="Fallback card last4 code (e.g. 6534) when push omits card digits",
     )
+
+
+class WorkflowRunRequest(BaseModel):
+    """Request payload for executing the Phase 8 transaction resolution state graph."""
+
+    max_retries: int = Field(
+        default=2,
+        ge=0,
+        le=5,
+        description="Max LLM retry cycles when arithmetic/checksum validation fails",
+    )
+    confidence_threshold: float = Field(
+        default=0.80,
+        ge=0.0,
+        le=1.0,
+        description="Minimum AI confidence required to auto-commit",
+    )
+    force_llm: bool = Field(
+        default=False,
+        description="Force AI inference node even when deterministic rules match",
+    )
+    item_hint: Optional[str] = Field(
+        default=None,
+        description="Optional line-item text or order memo hint",
+    )
+    llm_override: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Optional structured AI output override for deterministic testing",
+    )
+
+
+class WorkflowResumeRequest(BaseModel):
+    """Request payload for resuming an interrupted human-in-the-loop workflow checkpoint."""
+
+    account_code: Optional[str] = Field(
+        default=None,
+        description="Confirmed account code (e.g. 811, 813, 501, 830)",
+    )
+    account_name: Optional[str] = Field(
+        default=None,
+        description="Confirmed account name",
+    )
+    vat_deduction_type: Optional[str] = Field(
+        default=None,
+        description="DEDUCTIBLE, NON_DEDUCTIBLE, or EXEMPT",
+    )
+    non_deduct_reason: Optional[str] = Field(
+        default=None,
+        description="Reason code when NON_DEDUCTIBLE",
+    )
+    counterparty_info: Optional[str] = Field(
+        default=None,
+        description="Confirmed meeting attendee or item memo",
+    )
+    learn_rule: bool = Field(
+        default=False,
+        description="Persist priority-5 learned rule for single-purpose merchant",
+    )
+
+
+class TaxAuditRequest(BaseModel):
+    """Request payload for running the pre-export parallel tax audit graph."""
+
+    include_exported: bool = Field(
+        default=False,
+        description="Include already-exported rows in the audit",
+    )
+    auto_revert_unverified_to_queue: bool = Field(
+        default=False,
+        description="Mark rows with critical errors as PENDING_CHECK",
+    )

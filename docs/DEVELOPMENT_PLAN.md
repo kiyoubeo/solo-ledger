@@ -29,7 +29,7 @@ flowchart TD
     P5["Phase 5 (v1.0.0)\n경량 웹 대시보드 · CLI 관리 도구\nDocker Compose 무비용 배포 패키지 & E2E 통합 검증"]
     P6["Phase 6 (v1.1.0)\n순수 Android 네이티브 앱(Kotlin · Compose)\n원격 세무증빙 ZIP 다운로드 · 보안 인증 · 우리카드 푸시 연동"]
     P7["Phase 7 (v1.2.0)\n독립 창 Windows 데스크톱 앱(pywebview · PyInstaller)\n내장 서버 자동 기동·종료 · 무콘솔 SoloLedger.exe 패키징"]
-    P8["Phase 8 (v1.3.0 — 예정)\n코어 경량 상태 그래프 엔진(workflow_graph)\n& 세무 마감 사전 감사 병렬 그래프(audit_graph)"]
+    P8["Phase 8 (v1.3.0 — 완료)\n코어 경량 상태 그래프 엔진(workflow_graph)\n& 세무 마감 사전 감사 병렬 그래프(audit_graph)"]
     P9["Phase 9 (v1.4.0 — 예정)\nGoogle Cloud 서버리스 하이브리드(Cloud Run · GCS · Litestream)\n& Cloud Scheduler 트리거 · 로컬 NAS Pull 이중 백업"]
     P10["Phase 10 (v1.5.0 — 예정)\nBigQuery Property Graph 다년도 세무·공사원가 지식 그래프\n& GQL 리스크 감사 리포트"]
 
@@ -45,7 +45,7 @@ flowchart TD
 | **Phase 5** | `v1.0.0` | 경량 웹 대시보드(미분류·소명 관리/파일 업로드), 운영 CLI, Docker Compose 배포 및 NAS(`Z:\`) 백업 자동화 | `dashboard.py`, `cli.py`, `nas_sync.py`, `docker-compose.yml` | 8h | **완료 (`PASSED`)** |
 | **Phase 6** | `v1.1.0` | 순수 Android 전용 앱(`Kotlin + Jetpack Compose`), 원격 세무사 제출 ZIP/CSV 다운로드 API, Bearer 세션 인증 및 우리카드 푸시 수집 | `api.py`, `sms_parser.py`, `android/app/build.gradle.kts` | 12h | **완료 (`PASSED`)** |
 | **Phase 7** | `v1.2.0` | 독립 창 Windows 데스크톱 앱(`pywebview` + `PyInstaller` `SoloLedger.exe`), 내장 FastAPI 생명주기 제어 및 루프백 자동 로그인 | `desktop_app.py`, `config.py`, `scripts/build_desktop.ps1`, `assets/sololedger.ico` | 6h | **완료 (`PASSED`)** |
-| **Phase 8** | `v1.3.0` | 코어 경량 상태 그래프 엔진(전표 소명 순환 루프·체크포인트 중단/재개·세무 마감 사전 감사 병렬 그래프) | `workflow_graph.py`, `audit_graph.py` | 10h | **예정 (`PLANNED`)** |
+| **Phase 8** | `v1.3.0` | 코어 경량 상태 그래프 엔진(전표 소명 순환 루프·체크포인트 중단/재개·세무 마감 사전 감사 병렬 그래프) | `workflow_graph.py`, `audit_graph.py` | 10h | **완료 (`PASSED`)** |
 | **Phase 9** | `v1.4.0` | Google Cloud 서버리스 하이브리드 전환(`Cloud Run`·`Cloud Storage`·`Litestream`·`Cloud Scheduler`) 및 NAS Pull 백업 | `storage_backend.py`, `cloud_sync.py`, `deploy/cloudrun.yaml` | 10h | **예정 (`PLANNED`)** |
 | **Phase 10** | `v1.5.0` | `BigQuery Property Graph` 다년도 세무·공사원가 지식 그래프 적재기 및 GQL 리스크 감사 리포트 | `bq_graph_exporter.py`, `sql/bigquery_property_graph.sql` | 8h | **예정 (`PLANNED`)** |
 
@@ -185,7 +185,7 @@ flowchart TD
 
 ---
 
-### Phase 8: 코어 경량 상태 그래프 엔진 및 사전 세무 감사 그래프 (`v1.3.0` — 예정)
+### Phase 8: 코어 경량 상태 그래프 엔진 및 사전 세무 감사 그래프 (`v1.3.0` — 완료)
 - **목적**: [CLOUD_AND_GRAPH_PLAN.md](./CLOUD_AND_GRAPH_PLAN.md) 설계에 따라 외부 중량 프레임워크 없이 `Pydantic` 상태 모델과 SQLite 체크포인트 기반의 경량 그래프 엔진을 구축하여, 미분류·PG 전표의 AI 재검증 순환·소명 중단/재개와 세무 패키지 출력 전 병렬 사전 감사를 자동화합니다.
 - **세부 구현 과제**:
   1. **경량 상태 그래프 런타임 및 체크포인터 (`workflow_graph.py`, `sql/schema.sql`)**
@@ -262,7 +262,7 @@ SoloLedger/
 │   ├── tax_engine.py               # [Phase 1 완료] 세무 자동 분류 규칙 엔진
 │   ├── reconciler.py               # [Phase 1 완료] 3단계 자동 대사 엔진
 │   ├── notifier.py                 # [Phase 1 완료] 텔레그램 알림 발송기
-│   ├── api.py                      # [Phase 1~7 완료] FastAPI 라우터 및 엔드포인트
+│   ├── api.py                      # [Phase 1~8 완료] FastAPI 라우터 및 엔드포인트
 │   ├── plan_verifier.py            # [하네스 완료] 개발 계획서-코드 정합성 검증 엔진
 │   ├── nts_client.py               # [Phase 2 완료] 국세청 사업자 상태조회 API 및 체크섬 검증
 │   ├── merchant_service.py         # [Phase 2 완료] 가맹점 30일 TTL 캐시 서비스
@@ -276,8 +276,8 @@ SoloLedger/
 │   ├── nas_sync.py                 # [Phase 5 완료] ipDISK NAS(Z:\) SQLite 온라인 백업 및 증빙 미러링
 │   ├── cli.py                      # [Phase 5 완료] 운영 및 정산 CLI 도구
 │   ├── desktop_app.py              # [Phase 7 완료] pywebview 독립 창 데스크톱 실행기
-│   ├── workflow_graph.py           # [Phase 8 예정] 경량 상태 그래프 엔진 및 체크포인터
-│   ├── audit_graph.py              # [Phase 8 예정] 세무 마감 사전 감사 병렬 그래프
+│   ├── workflow_graph.py           # [Phase 8 완료] 경량 상태 그래프 엔진 및 체크포인터
+│   ├── audit_graph.py              # [Phase 8 완료] 세무 마감 사전 감사 병렬 그래프
 │   ├── storage_backend.py          # [Phase 9 예정] 로컬 / Cloud Storage 통합 스토리지 추상화
 │   ├── cloud_sync.py               # [Phase 9 예정] SQLite 스냅샷 복제 및 Cloud Scheduler 잡
 │   └── bq_graph_exporter.py        # [Phase 10 예정] BigQuery Property Graph 적재 및 GQL 분석기
@@ -297,7 +297,7 @@ SoloLedger/
     ├── test_nas_sync.py            # [Phase 5 완료] NAS(Z:\) 안전 백업 및 증빙 동기화 테스트
     ├── test_mobile_api.py          # [Phase 6 완료] 모바일 인증·우리카드 푸시·원격 ZIP 테스트
     ├── test_desktop_app.py         # [Phase 7 완료] 데스크톱 번들·루프백 자동로그인·서버 수명주기 테스트
-    ├── test_workflow_graph.py      # [Phase 8 예정] 상태 그래프 순환·체크포인트·사전 감사 테스트
+    ├── test_workflow_graph.py      # [Phase 8 완료] 상태 그래프 순환·체크포인트·사전 감사 테스트
     ├── test_cloud_storage.py       # [Phase 9 예정] 스토리지 추상화·클라우드 스케줄러 잡 테스트
     └── test_bq_graph.py            # [Phase 10 예정] BigQuery 지식 그래프 직렬화·GQL 분석 테스트
 ```

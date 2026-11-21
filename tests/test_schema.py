@@ -12,6 +12,7 @@ def test_core_tables_exist(db_conn):
         "card_transactions",
         "receipt_ocr_metadata",
         "tax_classification_rules",
+        "workflow_checkpoints",
     }
 
 
@@ -25,6 +26,15 @@ def test_indexes_exist(db_conn):
     assert "idx_tx_approval_no" in indexes
     assert "idx_tx_reconcile_status" in indexes
     assert "idx_tx_exported_ym" in indexes
+
+
+def test_workflow_checkpoint_index_exists(db_conn):
+    cur = db_conn.cursor()
+    cur.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='workflow_checkpoints'"
+    )
+    indexes = {row[0] for row in cur.fetchall()}
+    assert "idx_wf_ckpt_tx_status" in indexes
 
 
 def test_seed_tax_rules_loaded(db_conn):

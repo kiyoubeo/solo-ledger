@@ -174,7 +174,7 @@ function Invoke-HarnessVerify {
 
     # 4. SQLite DDL & Seed Rules Integrity Check
     Write-Host "`n[4/5] SQLite Schema & Seed Rules Integrity Check..." -ForegroundColor Yellow
-    $schemaOut = (uv run python -c "from sololedger.db import init_db, get_connection; import tempfile, os; fd, p = tempfile.mkstemp(suffix='.db'); os.close(fd); init_db(p); c = get_connection(p); cur = c.cursor(); cur.execute('SELECT COUNT(*) FROM tax_classification_rules WHERE is_active=1'); r = cur.fetchone()[0]; c.close(); os.remove(p); assert r >= 4; print(f'Tables=4, ActiveSeedRules={r}')" 2>&1 | Out-String)
+    $schemaOut = (uv run python -c "from sololedger.db import init_db, get_connection; import tempfile, os; fd, p = tempfile.mkstemp(suffix='.db'); os.close(fd); init_db(p); c = get_connection(p); cur = c.cursor(); cur.execute('SELECT name, type FROM sqlite_master'); t_cnt = len([row for row in cur.fetchall() if row[1] == 'table' and not row[0].startswith('sqlite_')]); cur.execute('SELECT COUNT(*) FROM tax_classification_rules WHERE is_active=1'); r = cur.fetchone()[0]; c.close(); os.remove(p); assert t_cnt >= 5 and r >= 4; print(f'Tables={t_cnt}, ActiveSeedRules={r}')" 2>&1 | Out-String)
     $schemaExit = $LASTEXITCODE
     $steps += [ordered]@{
         step   = "schema_integrity"

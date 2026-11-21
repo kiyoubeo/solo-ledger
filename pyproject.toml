@@ -1,6 +1,6 @@
 [project]
 name = "sololedger"
-version = "1.2.0"
+version = "1.3.0"
 description = "SoloLedger (1인 법인 전용 회계·경비 원장 및 실시간 법인카드 세무증빙 자동화 시스템)"
 readme = "README.md"
 requires-python = ">=3.11"
