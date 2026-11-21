@@ -520,7 +520,13 @@ async def llm_tax_inference_node(
     elif ctx.llm_override is not None:
         candidate = dict(ctx.llm_override)
     elif settings.gemini_api_key or ctx.vision_transport is not None:
-        candidate = await _call_gemini_inference(state, transport=ctx.vision_transport)
+        if ctx.vision_transport is not None:
+            candidate = await _call_gemini_inference(state, transport=ctx.vision_transport)
+        else:
+            try:
+                candidate = await _call_gemini_inference(state, transport=None)
+            except (httpx.HTTPError, ValueError, KeyError, IndexError):
+                candidate = _offline_llm_fallback(state)
     else:
         candidate = _offline_llm_fallback(state)
 
@@ -919,3 +925,98 @@ async def resume_transaction_workflow(
         )
 
     return final_state.model_dump()
+
+
+def sync_checkpoint_from_ledger(
+    cursor: sqlite3.Cursor,
+    tx_id: int,
+    graph_name: str = DEFAULT_GRAPH_NAME,
+) -> Dict[str, Any]:
+    """Synchronize workflow_checkpoints after Telegram, OCR receipt, or inline ledger edits."""
+    cursor.execute("SELECT * FROM card_transactions WHERE tx_id = ?", (tx_id,))
+    tx = cursor.fetchone()
+    if tx is None:
+        return {"status": "not_found", "checkpoint_id": None, "interrupt_reason": None}
+
+    existing_ckpt = load_active_checkpoint(cursor, tx_id, graph_name=graph_name)
+    acc_code = str(tx["account_code"] or "999")
+    acc_name = str(tx["account_name"] or ACCOUNT_CODE_NAMES.get(acc_code, "미분류"))
+    memo = str(tx["counterparty_info"] or "").strip()
+    merch = str(tx["raw_merchant_name"] or "")
+
+    needs_entertainment_memo = acc_code == "813" and not memo
+    needs_item_memo = acc_code == "999" or (
+        is_uncertain_item_merchant(merch) and not memo
+    )
+
+    if needs_entertainment_memo or needs_item_memo:
+        reason = (
+            "MISSING_ENTERTAINMENT_ATTENDEE"
+            if needs_entertainment_memo
+            else "MISSING_PG_OR_MART_ITEM_MEMO"
+        )
+        state = TxGraphState(
+            tx_id=int(tx["tx_id"]),
+            card_last4=str(tx["card_last4"] or "0000"),
+            raw_merchant_name=merch,
+            biz_reg_no=tx["biz_reg_no"],
+            total_amount=int(tx["total_amount"]),
+            supply_value=int(tx["supply_value"]),
+            vat_amount=int(tx["vat_amount"]),
+            account_code=acc_code,
+            account_name=acc_name,
+            vat_deduction_type=str(tx["vat_deduction_type"] or "PENDING"),
+            non_deduct_reason=tx["non_deduct_reason"],
+            is_vehicle_expense=bool(tx["is_vehicle_expense"]),
+            counterparty_info=tx["counterparty_info"],
+            reconcile_status=str(tx["reconcile_status"] or "SMS_ONLY"),
+            require_human_review=True,
+            interrupt_reason=reason,
+            status="INTERRUPTED",
+            current_node="human_interrupt",
+            visited_nodes=["ingest_parse", "nts_and_rule_eval", "human_interrupt"],
+            checkpoint_id=existing_ckpt.checkpoint_id if existing_ckpt else None,
+        )
+        ckpt_id = save_workflow_checkpoint(cursor, state, graph_name=graph_name)
+        return {
+            "status": "INTERRUPTED",
+            "checkpoint_id": ckpt_id,
+            "interrupt_reason": reason,
+        }
+
+    if existing_ckpt is not None:
+        existing_ckpt.biz_reg_no = tx["biz_reg_no"]
+        existing_ckpt.supply_value = int(tx["supply_value"])
+        existing_ckpt.vat_amount = int(tx["vat_amount"])
+        existing_ckpt.account_code = acc_code
+        existing_ckpt.account_name = acc_name
+        existing_ckpt.vat_deduction_type = str(tx["vat_deduction_type"] or "DEDUCTIBLE")
+        existing_ckpt.non_deduct_reason = tx["non_deduct_reason"]
+        existing_ckpt.is_vehicle_expense = bool(tx["is_vehicle_expense"])
+        existing_ckpt.counterparty_info = tx["counterparty_info"]
+        existing_ckpt.reconcile_status = str(tx["reconcile_status"] or "SMS_ONLY")
+        existing_ckpt.require_human_review = False
+        existing_ckpt.interrupt_reason = None
+        existing_ckpt.status = "COMPLETED"
+        existing_ckpt.current_node = "commit_ledger"
+        if "commit_ledger" not in existing_ckpt.visited_nodes:
+            existing_ckpt.visited_nodes.append("commit_ledger")
+        cursor.execute(
+            """
+            UPDATE workflow_checkpoints
+            SET status = 'COMPLETED',
+                current_node = 'commit_ledger',
+                interrupt_reason = NULL,
+                state_json = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE checkpoint_id = ?
+            """,
+            (existing_ckpt.model_dump_json(), existing_ckpt.checkpoint_id),
+        )
+        return {
+            "status": "COMPLETED",
+            "checkpoint_id": existing_ckpt.checkpoint_id,
+            "interrupt_reason": None,
+        }
+
+    return {"status": "COMPLETED", "checkpoint_id": None, "interrupt_reason": None}

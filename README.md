@@ -33,7 +33,8 @@
 | 명령어 | 동작 설명 |
 | :--- | :--- |
 | `powershell -ExecutionPolicy Bypass -File scripts/harness.ps1 review-plan` | **개발 계획서 추적성 검토**: `docs/DEVELOPMENT_PLAN.md`의 완료/예정 Phase 산출물·API 엔드포인트·테스트 파일·패키지 버전 정합성 감사 |
-| `powershell -ExecutionPolicy Bypass -File scripts/harness.ps1 verify` | **5단계 자동 검증 실행**: ① 계획서 정합성(`plan_review`) → ② 구문 컴파일(`compileall`) → ③ 정적 분석(`ruff check`) → ④ SQLite 스키마·시드 무결성 검사 → ⑤ 단위·통합 테스트(`pytest`). 결과를 `logs/last_verification.json` 및 `logs/verification_history.jsonl`에 기록 |
+| `powershell -ExecutionPolicy Bypass -File scripts/harness.ps1 graph` | **그래프 엔지니어링 검증**: 코드 AST 모듈 순환참조, 테스트 도달성, 런타임 자동직결(`workflow_graph`/`audit_graph`), SQLite FK 및 BigQuery 그래프 검증 후 `logs/architecture_graph.json` 저장 |
+| `powershell -ExecutionPolicy Bypass -File scripts/harness.ps1 verify` | **6단계 자동 검증 실행**: ① 계획서 정합성(`plan_review`) → ② 구문 컴파일(`compileall`) → ③ 정적 분석(`ruff check`) → ④ SQLite 스키마·시드 무결성 검사 → ⑤ 그래프 엔지니어링 무결성(`graph_engineering`) → ⑥ 단위·통합 테스트(`pytest`). 결과를 `logs/last_verification.json` 및 `logs/verification_history.jsonl`에 기록 |
 | `powershell -ExecutionPolicy Bypass -File scripts/harness.ps1 log -Message "변경 요약" -Category feat` | 변경 내역을 `CHANGELOG.md`, `CLAUDE.md`, `logs/dev_changes.jsonl`에 동시 기록 |
 | `powershell -ExecutionPolicy Bypass -File scripts/harness.ps1 commit-push -Message "변경 요약" -Category feat` | **`verify` 검증 통과 시에만** 변경 로그를 기록하고 `git commit` 및 `git push origin main`까지 원스톱 수행 |
 | `powershell -ExecutionPolicy Bypass -File scripts/harness.ps1 status` | 현재 Git 동기화 상태, 최근 검증 결과, 최근 개발 변경 로그 출력 |

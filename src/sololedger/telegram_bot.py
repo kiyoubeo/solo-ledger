@@ -138,6 +138,12 @@ def handle_telegram_callback_query(
             account_name = '기업업무추진비',
             vat_deduction_type = 'NON_DEDUCTIBLE',
             non_deduct_reason = 'ENTERTAINMENT',
+            counterparty_info = CASE
+                WHEN counterparty_info LIKE '임직원%'
+                  OR counterparty_info LIKE '현장 시공%'
+                  OR counterparty_info = '대표자 단독 식사' THEN NULL
+                ELSE counterparty_info
+            END,
             updated_at = CURRENT_TIMESTAMP
         WHERE tx_id = ?
         """,

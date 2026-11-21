@@ -26,7 +26,7 @@ from sololedger.models import OcrExtractionResult, OcrLineItem, ReconcileItem
 from sololedger.nts_client import validate_biz_reg_no_checksum
 from sololedger.reconciler import reconcile_single_item
 from sololedger.storage_backend import StorageBackend
-from sololedger.tax_engine import calculate_supply_and_vat
+from sololedger.tax_engine import calculate_supply_and_vat, generate_default_memo
 from sololedger.telegram_bot import _detect_memo_account_override
 
 
@@ -183,12 +183,23 @@ async def process_and_link_receipt(
         match_stage = "EXPLICIT_TX_ID"
         if ocr_res.total_amount > 0 and tx_row["total_amount"] != ocr_res.total_amount:
             amount_mismatch = True
+        auto_memo = generate_default_memo(
+            str(tx_row["account_code"]),
+            str(tx_row["raw_merchant_name"]),
+            False,
+        )
+        existing_memo = (tx_row["counterparty_info"] or "").strip()
+        resolved_memo = (
+            primary_item_name
+            if primary_item_name and (not existing_memo or existing_memo == (auto_memo or ""))
+            else (tx_row["counterparty_info"] or primary_item_name)
+        )
         cursor.execute(
             """
             UPDATE card_transactions
             SET biz_reg_no = COALESCE(?, biz_reg_no),
                 approval_no = COALESCE(?, approval_no),
-                counterparty_info = COALESCE(counterparty_info, ?),
+                counterparty_info = ?,
                 reconcile_status = CASE
                     WHEN reconcile_status = 'SMS_ONLY' THEN 'OCR_MATCHED'
                     ELSE reconcile_status
@@ -196,7 +207,7 @@ async def process_and_link_receipt(
                 updated_at = CURRENT_TIMESTAMP
             WHERE tx_id = ?
             """,
-            (clean_biz_no, clean_approval_no, primary_item_name, matched_tx_id),
+            (clean_biz_no, clean_approval_no, resolved_memo, matched_tx_id),
         )
     else:
         rec_item = ReconcileItem(
@@ -215,13 +226,30 @@ async def process_and_link_receipt(
         match_stage = rec_outcome["match_stage"]
         if primary_item_name:
             cursor.execute(
-                """
-                UPDATE card_transactions
-                SET counterparty_info = COALESCE(counterparty_info, ?)
-                WHERE tx_id = ?
-                """,
-                (primary_item_name, matched_tx_id),
+                "SELECT account_code, raw_merchant_name, counterparty_info "
+                "FROM card_transactions WHERE tx_id = ?",
+                (matched_tx_id,),
             )
+            matched_row = cursor.fetchone()
+            existing_memo = (matched_row["counterparty_info"] or "").strip() if matched_row else ""
+            auto_memo = (
+                generate_default_memo(
+                    str(matched_row["account_code"]),
+                    str(matched_row["raw_merchant_name"]),
+                    False,
+                )
+                if matched_row
+                else None
+            )
+            if not existing_memo or existing_memo == (auto_memo or ""):
+                cursor.execute(
+                    """
+                    UPDATE card_transactions
+                    SET counterparty_info = ?
+                    WHERE tx_id = ?
+                    """,
+                    (primary_item_name, matched_tx_id),
+                )
 
     # Apply item-based account inference when confirmed receipt line items are extracted
     if primary_item_name:

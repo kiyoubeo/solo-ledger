@@ -45,9 +45,9 @@ flowchart TD
 | **Phase 5** | `v1.0.0` | 경량 웹 대시보드(미분류·소명 관리/파일 업로드), 운영 CLI, Docker Compose 배포 및 NAS(`Z:\`) 백업 자동화 | `dashboard.py`, `cli.py`, `nas_sync.py`, `docker-compose.yml` | 8h | **완료 (`PASSED`)** |
 | **Phase 6** | `v1.1.0` | 순수 Android 전용 앱(`Kotlin + Jetpack Compose`), 원격 세무사 제출 ZIP/CSV 다운로드 API, Bearer 세션 인증 및 우리카드 푸시 수집 | `api.py`, `sms_parser.py`, `android/app/build.gradle.kts` | 12h | **완료 (`PASSED`)** |
 | **Phase 7** | `v1.2.0` | 독립 창 Windows 데스크톱 앱(`pywebview` + `PyInstaller` `SoloLedger.exe`), 내장 FastAPI 생명주기 제어 및 루프백 자동 로그인 | `desktop_app.py`, `config.py`, `scripts/build_desktop.ps1`, `assets/sololedger.ico` | 6h | **완료 (`PASSED`)** |
-| **Phase 8** | `v1.3.0` | 코어 경량 상태 그래프 엔진(전표 소명 순환 루프·체크포인트 중단/재개·세무 마감 사전 감사 병렬 그래프) | `workflow_graph.py`, `audit_graph.py` | 10h | **완료 (`PASSED`)** |
+| **Phase 8** | `v1.3.0` | 코어 경량 상태 그래프 엔진(전표 소명 순환 루프·체크포인트 중단/재개·세무 마감 사전 감사 병렬 그래프·코드/런타임 그래프 무결성 검증) | `workflow_graph.py`, `audit_graph.py`, `graph_engineering.py` | 10h | **완료 (`PASSED`)** |
 | **Phase 9** | `v1.4.0` | Google Cloud 서버리스 하이브리드 전환(`Cloud Run`·`Cloud Storage`·`Litestream`·`Cloud Scheduler`) 및 NAS Pull 백업 | `storage_backend.py`, `cloud_sync.py`, `deploy/cloudrun.yaml` | 10h | **완료 (`PASSED`)** |
-| **Phase 10** | `v1.5.0` | `BigQuery Property Graph` 다년도 세무·공사원가 지식 그래프 적재기 및 GQL 리스크 감사 리포트 | `bq_graph_exporter.py`, `sql/bigquery_property_graph.sql` | 8h | **완료 (`PASSED`)** |
+| **Phase 10** | `v1.5.0` | `BigQuery Property Graph` 다년도 세무·공사원가 지식 그래프 적재기 및 GQL 리스크 감사 리포트 | `bq_graph_exporter.py`, `sql/bigquery_property_graph.sql`, `scripts/setup_gcp_bigquery.ps1` | 8h | **완료 (`PASSED`)** |
 
 ---
 
@@ -194,11 +194,12 @@ flowchart TD
   2. **전표 처리·소명 상태 그래프 & 사전 세무 감사 병렬 그래프 (`workflow_graph.py`, `audit_graph.py`)**
      - 기존 확정 규칙(주유소·SaaS 등)은 AI 호출 없이 즉시 확정(LLM 비용 0원)하고, `999` 미분류·PG 다품목·영수증 불일치 건만 `llm_tax_inference` → `arithmetic_tax_validator` 순환 루프로 라우팅.
      - [exporters.py](../src/sololedger/exporters.py) 실행 직전 `audit_vat_status`(간이·면세·폐업 오분류), `audit_vehicle_and_card_policy`(승용차 1,500만 원 한도·개인카드 혼입), `audit_missing_evidence`(`813` 참석자·증빙 누락)를 병렬 팬아웃(`Fan-out`)으로 점검 후 조인(`Join`) 판정.
-  3. **워크플로 및 감사 API 엔드포인트 (`api.py`)**
+  3. **워크플로 및 감사 API 엔드포인트 (`api.py`, `graph_engineering.py`)**
      - `POST /api/v1/workflows/transactions/{tx_id}/run` (전표 상태 그래프 실행)
      - `POST /api/v1/workflows/transactions/{tx_id}/resume` (중단된 소명 체크포인트 재개)
      - `POST /api/v1/audits/tax-pack/{year_month}` (세무 패키지 제출 전 사전 세무 감사 실행)
-- **하네스 검증 테스트 (`tests/test_workflow_graph.py`)**:
+     - `GET /api/v1/system/engineering-graph` (코드·런타임 자동 직결·스키마·상태그래프 무결성 검증)
+- **하네스 검증 테스트 (`tests/test_workflow_graph.py`, `tests/test_graph_engineering.py`)**:
   - 확정 규칙 전표의 LLM 미호출(0-cost) 단축 경로 검증
   - 산술 불일치·사업자번호 오인식 시 재추출 순환 루프(`Cycle`) 및 최대 재시도 상한 검증
   - `human_interrupt` 체크포인트 저장 후 `RESUME` 재개 및 세무 감사 병렬 팬아웃/조인 리스크 탐지 검증
@@ -227,9 +228,9 @@ flowchart TD
 - **세부 구현 과제**:
   1. **BigQuery 그래프 스키마 및 GQL 정의 (`sql/bigquery_property_graph.sql`)**
      - `Merchant`, `CardTransaction`, `OrderLineItem`, `AccountCategory`, `ConstructionSite` 노드 테이블과 `PURCHASED_AT`, `CONTAINS_ITEM`, `CLASSIFIED_AS`, `ATTRIBUTED_TO` 엣지 관계 및 `CREATE PROPERTY GRAPH` DDL 정의.
-  2. **확정 원장 배치 적재기 및 GQL 분석 연동 (`bq_graph_exporter.py`, `api.py`)**
+  2. **확정 원장 배치 적재기 및 GQL 분석 연동 (`bq_graph_exporter.py`, `api.py`, `scripts/setup_gcp_bigquery.ps1`)**
      - 마감된 원장·품목 데이터를 BigQuery 적재 포맷(NDJSON/Parquet)으로 내보내고 그래프 기반 이상 지출 패턴·유사 품목 계정 추천 결과를 조회.
-     - `POST /api/v1/analytics/bigquery-export` 엔드포인트 구현.
+     - `GET /api/v1/analytics/bigquery-status`, `POST /api/v1/analytics/bigquery-provision`, `POST /api/v1/analytics/bigquery-export` 엔드포인트 구현.
 - **하네스 검증 테스트 (`tests/test_bq_graph.py`)**:
   - 원장·가맹점·품목 데이터의 그래프 노드/엣지 정규화 직렬화 및 무결성 검증
   - Mock BigQuery 클라이언트를 이용한 적재·GQL 리스크 요약 파싱 검증

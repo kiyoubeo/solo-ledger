@@ -1,0 +1,1839 @@
+{
+  "passed": true,
+  "errors": [],
+  "summary": {
+    "mode": "source",
+    "module_count": 30,
+    "module_edge_count": 118,
+    "cycle_count": 0,
+    "untested_module_count": 0,
+    "route_count": 56,
+    "autowire_verified_count": 5,
+    "sqlite_table_count": 5,
+    "fk_edge_count": 3,
+    "state_graph_node_count": 6,
+    "bq_table_count": 9,
+    "gql_query_count": 3,
+    "total_nodes": 125,
+    "total_edges": 198
+  },
+  "mermaid": "flowchart LR\n    MODS[\"SoloLedger Python Modules (30)\"]\n    WF[\"workflow_graph.py (StateGraph + Checkpointer)\"]\n    AUD[\"audit_graph.py (Parallel Fan-out/Join)\"]\n    BQ[\"bq_graph_exporter.py (BigQuery Property Graph)\"]\n    DB[\"SQLite Ledger (5 Tables)\"]\n    MODS --> WF\n    MODS --> AUD\n    MODS --> BQ\n    WF --> DB\n    AUD --> DB\n    R1[\"GET /api/v1/analytics/bigquery-status\"] -->|\"get_bigquery_connection_status\"| WF\n    R2[\"GET /api/v1/system/engineering-graph\"] -->|\"verify_engineering_graph\"| WF\n    R3[\"PATCH /api/v1/transactions/{tx_id}\"] -->|\"sync_checkpoint_from_ledger\"| WF\n    R4[\"POST /api/v1/analytics/bigquery-export\"] -->|\"export_ledger_graph_to_bigquery\"| WF\n    R5[\"POST /api/v1/analytics/bigquery-provision\"] -->|\"provision_bigquery_dataset_and_graph\"| WF\n    R6[\"POST /api/v1/audits/tax-pack/{year_month}\"] -->|\"run_pre_export_tax_audit\"| AUD\n    R7[\"POST /api/v1/exports/tax-pack\"] -->|\"run_pre_export_tax_audit\"| AUD\n    R8[\"POST /api/v1/receipts/upload\"] -->|\"sync_checkpoint_from_ledger\"| WF\n    R9[\"POST /api/v1/transactions/{tx_id}/statement\"] -->|\"sync_checkpoint_from_ledger\"| WF\n    R10[\"POST /api/v1/webhooks/push\"] -->|\"run_transaction_workflow\"| WF\n    R11[\"POST /api/v1/webhooks/sms\"] -->|\"run_transaction_workflow\"| WF\n    R12[\"POST /api/v1/webhooks/telegram\"] -->|\"sync_checkpoint_from_ledger\"| WF\n    R13[\"POST /api/v1/workflows/transactions/{tx_id}/resume\"] -->|\"resume_transaction_workflow\"| WF\n    R14[\"POST /api/v1/workflows/transactions/{tx_id}/run\"] -->|\"run_transaction_workflow\"| WF",
+  "graph": {
+    "nodes": [
+      {
+        "id": "sololedger.api",
+        "layer": "MODULE",
+        "label": "sololedger.api"
+      },
+      {
+        "id": "sololedger.archiver",
+        "layer": "MODULE",
+        "label": "sololedger.archiver"
+      },
+      {
+        "id": "sololedger.audit_graph",
+        "layer": "MODULE",
+        "label": "sololedger.audit_graph"
+      },
+      {
+        "id": "sololedger.bq_graph_exporter",
+        "layer": "MODULE",
+        "label": "sololedger.bq_graph_exporter"
+      },
+      {
+        "id": "sololedger.cli",
+        "layer": "MODULE",
+        "label": "sololedger.cli"
+      },
+      {
+        "id": "sololedger.cloud_sync",
+        "layer": "MODULE",
+        "label": "sololedger.cloud_sync"
+      },
+      {
+        "id": "sololedger.config",
+        "layer": "MODULE",
+        "label": "sololedger.config"
+      },
+      {
+        "id": "sololedger.dashboard",
+        "layer": "MODULE",
+        "label": "sololedger.dashboard"
+      },
+      {
+        "id": "sololedger.db",
+        "layer": "MODULE",
+        "label": "sololedger.db"
+      },
+      {
+        "id": "sololedger.desktop_app",
+        "layer": "MODULE",
+        "label": "sololedger.desktop_app"
+      },
+      {
+        "id": "sololedger.email_watcher",
+        "layer": "MODULE",
+        "label": "sololedger.email_watcher"
+      },
+      {
+        "id": "sololedger.exporters",
+        "layer": "MODULE",
+        "label": "sololedger.exporters"
+      },
+      {
+        "id": "sololedger.graph_engineering",
+        "layer": "MODULE",
+        "label": "sololedger.graph_engineering"
+      },
+      {
+        "id": "sololedger.importers",
+        "layer": "MODULE",
+        "label": "sololedger.importers"
+      },
+      {
+        "id": "sololedger.merchant_service",
+        "layer": "MODULE",
+        "label": "sololedger.merchant_service"
+      },
+      {
+        "id": "sololedger.models",
+        "layer": "MODULE",
+        "label": "sololedger.models"
+      },
+      {
+        "id": "sololedger.nas_sync",
+        "layer": "MODULE",
+        "label": "sololedger.nas_sync"
+      },
+      {
+        "id": "sololedger.notifier",
+        "layer": "MODULE",
+        "label": "sololedger.notifier"
+      },
+      {
+        "id": "sololedger.nts_client",
+        "layer": "MODULE",
+        "label": "sololedger.nts_client"
+      },
+      {
+        "id": "sololedger.ocr_engine",
+        "layer": "MODULE",
+        "label": "sololedger.ocr_engine"
+      },
+      {
+        "id": "sololedger.phone_adb",
+        "layer": "MODULE",
+        "label": "sololedger.phone_adb"
+      },
+      {
+        "id": "sololedger.plan_verifier",
+        "layer": "MODULE",
+        "label": "sololedger.plan_verifier"
+      },
+      {
+        "id": "sololedger.reconciler",
+        "layer": "MODULE",
+        "label": "sololedger.reconciler"
+      },
+      {
+        "id": "sololedger.scraper_service",
+        "layer": "MODULE",
+        "label": "sololedger.scraper_service"
+      },
+      {
+        "id": "sololedger.sms_parser",
+        "layer": "MODULE",
+        "label": "sololedger.sms_parser"
+      },
+      {
+        "id": "sololedger.storage_backend",
+        "layer": "MODULE",
+        "label": "sololedger.storage_backend"
+      },
+      {
+        "id": "sololedger.tax_engine",
+        "layer": "MODULE",
+        "label": "sololedger.tax_engine"
+      },
+      {
+        "id": "sololedger.telegram_bot",
+        "layer": "MODULE",
+        "label": "sololedger.telegram_bot"
+      },
+      {
+        "id": "sololedger.vehicle_tracker",
+        "layer": "MODULE",
+        "label": "sololedger.vehicle_tracker"
+      },
+      {
+        "id": "sololedger.workflow_graph",
+        "layer": "MODULE",
+        "label": "sololedger.workflow_graph"
+      },
+      {
+        "id": "test:test_api_webhook.py",
+        "layer": "TEST_MODULE",
+        "label": "test_api_webhook.py"
+      },
+      {
+        "id": "test:test_bq_graph.py",
+        "layer": "TEST_MODULE",
+        "label": "test_bq_graph.py"
+      },
+      {
+        "id": "test:test_cloud_storage.py",
+        "layer": "TEST_MODULE",
+        "label": "test_cloud_storage.py"
+      },
+      {
+        "id": "test:test_desktop_app.py",
+        "layer": "TEST_MODULE",
+        "label": "test_desktop_app.py"
+      },
+      {
+        "id": "test:test_e2e_lifecycle.py",
+        "layer": "TEST_MODULE",
+        "label": "test_e2e_lifecycle.py"
+      },
+      {
+        "id": "test:test_graph_engineering.py",
+        "layer": "TEST_MODULE",
+        "label": "test_graph_engineering.py"
+      },
+      {
+        "id": "test:test_import_export.py",
+        "layer": "TEST_MODULE",
+        "label": "test_import_export.py"
+      },
+      {
+        "id": "test:test_mobile_api.py",
+        "layer": "TEST_MODULE",
+        "label": "test_mobile_api.py"
+      },
+      {
+        "id": "test:test_nas_sync.py",
+        "layer": "TEST_MODULE",
+        "label": "test_nas_sync.py"
+      },
+      {
+        "id": "test:test_nts_client.py",
+        "layer": "TEST_MODULE",
+        "label": "test_nts_client.py"
+      },
+      {
+        "id": "test:test_ocr_and_bot.py",
+        "layer": "TEST_MODULE",
+        "label": "test_ocr_and_bot.py"
+      },
+      {
+        "id": "test:test_plan_verifier.py",
+        "layer": "TEST_MODULE",
+        "label": "test_plan_verifier.py"
+      },
+      {
+        "id": "test:test_receipt_dataset.py",
+        "layer": "TEST_MODULE",
+        "label": "test_receipt_dataset.py"
+      },
+      {
+        "id": "test:test_reconciler.py",
+        "layer": "TEST_MODULE",
+        "label": "test_reconciler.py"
+      },
+      {
+        "id": "test:test_schema.py",
+        "layer": "TEST_MODULE",
+        "label": "test_schema.py"
+      },
+      {
+        "id": "test:test_sms_parser.py",
+        "layer": "TEST_MODULE",
+        "label": "test_sms_parser.py"
+      },
+      {
+        "id": "test:test_tax_engine.py",
+        "layer": "TEST_MODULE",
+        "label": "test_tax_engine.py"
+      },
+      {
+        "id": "test:test_toss_email_scroll.py",
+        "layer": "TEST_MODULE",
+        "label": "test_toss_email_scroll.py"
+      },
+      {
+        "id": "test:test_workflow_graph.py",
+        "layer": "TEST_MODULE",
+        "label": "test_workflow_graph.py"
+      },
+      {
+        "id": "route:DELETE /api/v1/scraper/email-accounts/{account_id}",
+        "layer": "ROUTE",
+        "label": "DELETE /api/v1/scraper/email-accounts/{account_id}"
+      },
+      {
+        "id": "route:DELETE /api/v1/system/corp-cards/{card_last4}",
+        "layer": "ROUTE",
+        "label": "DELETE /api/v1/system/corp-cards/{card_last4}"
+      },
+      {
+        "id": "route:GET /api/v1/analytics/bigquery-status",
+        "layer": "ROUTE",
+        "label": "GET /api/v1/analytics/bigquery-status"
+      },
+      {
+        "id": "route:GET /api/v1/analytics/vehicle-limit",
+        "layer": "ROUTE",
+        "label": "GET /api/v1/analytics/vehicle-limit"
+      },
+      {
+        "id": "route:GET /api/v1/dashboard/summary",
+        "layer": "ROUTE",
+        "label": "GET /api/v1/dashboard/summary"
+      },
+      {
+        "id": "route:GET /api/v1/exports/tax-pack/{year_month}/csv",
+        "layer": "ROUTE",
+        "label": "GET /api/v1/exports/tax-pack/{year_month}/csv"
+      },
+      {
+        "id": "route:GET /api/v1/exports/tax-pack/{year_month}/download",
+        "layer": "ROUTE",
+        "label": "GET /api/v1/exports/tax-pack/{year_month}/download"
+      },
+      {
+        "id": "route:GET /api/v1/merchants",
+        "layer": "ROUTE",
+        "label": "GET /api/v1/merchants"
+      },
+      {
+        "id": "route:GET /api/v1/receipts",
+        "layer": "ROUTE",
+        "label": "GET /api/v1/receipts"
+      },
+      {
+        "id": "route:GET /api/v1/scraper/coupang-script",
+        "layer": "ROUTE",
+        "label": "GET /api/v1/scraper/coupang-script"
+      },
+      {
+        "id": "route:GET /api/v1/scraper/email-config",
+        "layer": "ROUTE",
+        "label": "GET /api/v1/scraper/email-config"
+      },
+      {
+        "id": "route:GET /api/v1/scraper/targets",
+        "layer": "ROUTE",
+        "label": "GET /api/v1/scraper/targets"
+      },
+      {
+        "id": "route:GET /api/v1/system/corp-card-policy",
+        "layer": "ROUTE",
+        "label": "GET /api/v1/system/corp-card-policy"
+      },
+      {
+        "id": "route:GET /api/v1/system/engineering-graph",
+        "layer": "ROUTE",
+        "label": "GET /api/v1/system/engineering-graph"
+      },
+      {
+        "id": "route:GET /api/v1/transactions",
+        "layer": "ROUTE",
+        "label": "GET /api/v1/transactions"
+      },
+      {
+        "id": "route:GET /api/v1/transactions/{tx_id}/receipt",
+        "layer": "ROUTE",
+        "label": "GET /api/v1/transactions/{tx_id}/receipt"
+      },
+      {
+        "id": "route:GET /api/v1/transactions/{tx_id}/receipt-file",
+        "layer": "ROUTE",
+        "label": "GET /api/v1/transactions/{tx_id}/receipt-file"
+      },
+      {
+        "id": "route:GET /dashboard",
+        "layer": "ROUTE",
+        "label": "GET /dashboard"
+      },
+      {
+        "id": "route:GET /desktop-launch",
+        "layer": "ROUTE",
+        "label": "GET /desktop-launch"
+      },
+      {
+        "id": "route:GET /download/apk",
+        "layer": "ROUTE",
+        "label": "GET /download/apk"
+      },
+      {
+        "id": "route:GET /health",
+        "layer": "ROUTE",
+        "label": "GET /health"
+      },
+      {
+        "id": "route:GET /login",
+        "layer": "ROUTE",
+        "label": "GET /login"
+      },
+      {
+        "id": "route:GET /manual",
+        "layer": "ROUTE",
+        "label": "GET /manual"
+      },
+      {
+        "id": "route:PATCH /api/v1/scraper/email-accounts/{account_id}",
+        "layer": "ROUTE",
+        "label": "PATCH /api/v1/scraper/email-accounts/{account_id}"
+      },
+      {
+        "id": "route:PATCH /api/v1/transactions/{tx_id}",
+        "layer": "ROUTE",
+        "label": "PATCH /api/v1/transactions/{tx_id}"
+      },
+      {
+        "id": "route:POST /api/v1/analytics/bigquery-export",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/analytics/bigquery-export"
+      },
+      {
+        "id": "route:POST /api/v1/analytics/bigquery-provision",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/analytics/bigquery-provision"
+      },
+      {
+        "id": "route:POST /api/v1/audits/tax-pack/{year_month}",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/audits/tax-pack/{year_month}"
+      },
+      {
+        "id": "route:POST /api/v1/auth/login",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/auth/login"
+      },
+      {
+        "id": "route:POST /api/v1/cloud/jobs/email-sync",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/cloud/jobs/email-sync"
+      },
+      {
+        "id": "route:POST /api/v1/cloud/jobs/snapshot-backup",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/cloud/jobs/snapshot-backup"
+      },
+      {
+        "id": "route:POST /api/v1/exports/tax-pack",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/exports/tax-pack"
+      },
+      {
+        "id": "route:POST /api/v1/imports/hometax-csv",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/imports/hometax-csv"
+      },
+      {
+        "id": "route:POST /api/v1/merchants/verify",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/merchants/verify"
+      },
+      {
+        "id": "route:POST /api/v1/receipts/upload",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/receipts/upload"
+      },
+      {
+        "id": "route:POST /api/v1/reconcile",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/reconcile"
+      },
+      {
+        "id": "route:POST /api/v1/scraper/coupang-auto-crawl",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/scraper/coupang-auto-crawl"
+      },
+      {
+        "id": "route:POST /api/v1/scraper/email-config",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/scraper/email-config"
+      },
+      {
+        "id": "route:POST /api/v1/scraper/email-scroll-toss",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/scraper/email-scroll-toss"
+      },
+      {
+        "id": "route:POST /api/v1/scraper/email-sync",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/scraper/email-sync"
+      },
+      {
+        "id": "route:POST /api/v1/scraper/email-webhook",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/scraper/email-webhook"
+      },
+      {
+        "id": "route:POST /api/v1/scraper/generate-slips",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/scraper/generate-slips"
+      },
+      {
+        "id": "route:POST /api/v1/scraper/ingest",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/scraper/ingest"
+      },
+      {
+        "id": "route:POST /api/v1/system/backup-nas",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/system/backup-nas"
+      },
+      {
+        "id": "route:POST /api/v1/system/corp-card-policy",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/system/corp-card-policy"
+      },
+      {
+        "id": "route:POST /api/v1/system/import-phone-sms",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/system/import-phone-sms"
+      },
+      {
+        "id": "route:POST /api/v1/system/reapply-rules",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/system/reapply-rules"
+      },
+      {
+        "id": "route:POST /api/v1/system/reset-test",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/system/reset-test"
+      },
+      {
+        "id": "route:POST /api/v1/system/seed-demo",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/system/seed-demo"
+      },
+      {
+        "id": "route:POST /api/v1/transactions/{tx_id}/statement",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/transactions/{tx_id}/statement"
+      },
+      {
+        "id": "route:POST /api/v1/webhooks/push",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/webhooks/push"
+      },
+      {
+        "id": "route:POST /api/v1/webhooks/sms",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/webhooks/sms"
+      },
+      {
+        "id": "route:POST /api/v1/webhooks/telegram",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/webhooks/telegram"
+      },
+      {
+        "id": "route:POST /api/v1/workflows/transactions/{tx_id}/resume",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/workflows/transactions/{tx_id}/resume"
+      },
+      {
+        "id": "route:POST /api/v1/workflows/transactions/{tx_id}/run",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/workflows/transactions/{tx_id}/run"
+      },
+      {
+        "id": "route:POST /login",
+        "layer": "ROUTE",
+        "label": "POST /login"
+      },
+      {
+        "id": "table:merchants",
+        "layer": "DB_TABLE",
+        "label": "merchants"
+      },
+      {
+        "id": "table:card_transactions",
+        "layer": "DB_TABLE",
+        "label": "card_transactions"
+      },
+      {
+        "id": "table:receipt_ocr_metadata",
+        "layer": "DB_TABLE",
+        "label": "receipt_ocr_metadata"
+      },
+      {
+        "id": "table:tax_classification_rules",
+        "layer": "DB_TABLE",
+        "label": "tax_classification_rules"
+      },
+      {
+        "id": "table:workflow_checkpoints",
+        "layer": "DB_TABLE",
+        "label": "workflow_checkpoints"
+      },
+      {
+        "id": "state:arithmetic_tax_validator",
+        "layer": "STATE_NODE",
+        "label": "arithmetic_tax_validator"
+      },
+      {
+        "id": "state:commit_ledger",
+        "layer": "STATE_NODE",
+        "label": "commit_ledger"
+      },
+      {
+        "id": "state:human_interrupt",
+        "layer": "STATE_NODE",
+        "label": "human_interrupt"
+      },
+      {
+        "id": "state:ingest_parse",
+        "layer": "STATE_NODE",
+        "label": "ingest_parse"
+      },
+      {
+        "id": "state:llm_tax_inference",
+        "layer": "STATE_NODE",
+        "label": "llm_tax_inference"
+      },
+      {
+        "id": "state:nts_and_rule_eval",
+        "layer": "STATE_NODE",
+        "label": "nts_and_rule_eval"
+      },
+      {
+        "id": "bq_table:merchants",
+        "layer": "BQ_GRAPH",
+        "label": "merchants"
+      },
+      {
+        "id": "bq_table:card_transactions",
+        "layer": "BQ_GRAPH",
+        "label": "card_transactions"
+      },
+      {
+        "id": "bq_table:order_line_items",
+        "layer": "BQ_GRAPH",
+        "label": "order_line_items"
+      },
+      {
+        "id": "bq_table:account_categories",
+        "layer": "BQ_GRAPH",
+        "label": "account_categories"
+      },
+      {
+        "id": "bq_table:construction_sites",
+        "layer": "BQ_GRAPH",
+        "label": "construction_sites"
+      },
+      {
+        "id": "bq_table:edge_purchased_at",
+        "layer": "BQ_GRAPH",
+        "label": "edge_purchased_at"
+      },
+      {
+        "id": "bq_table:edge_contains_item",
+        "layer": "BQ_GRAPH",
+        "label": "edge_contains_item"
+      },
+      {
+        "id": "bq_table:edge_classified_as",
+        "layer": "BQ_GRAPH",
+        "label": "edge_classified_as"
+      },
+      {
+        "id": "bq_table:edge_attributed_to",
+        "layer": "BQ_GRAPH",
+        "label": "edge_attributed_to"
+      }
+    ],
+    "edges": [
+      {
+        "source": "sololedger.api",
+        "target": "sololedger.archiver",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.api",
+        "target": "sololedger.audit_graph",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.api",
+        "target": "sololedger.bq_graph_exporter",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.api",
+        "target": "sololedger.cloud_sync",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.api",
+        "target": "sololedger.config",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.api",
+        "target": "sololedger.dashboard",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.api",
+        "target": "sololedger.db",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.api",
+        "target": "sololedger.email_watcher",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.api",
+        "target": "sololedger.exporters",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.api",
+        "target": "sololedger.graph_engineering",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.api",
+        "target": "sololedger.importers",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.api",
+        "target": "sololedger.merchant_service",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.api",
+        "target": "sololedger.models",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.api",
+        "target": "sololedger.nas_sync",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.api",
+        "target": "sololedger.notifier",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.api",
+        "target": "sololedger.ocr_engine",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.api",
+        "target": "sololedger.phone_adb",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.api",
+        "target": "sololedger.reconciler",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.api",
+        "target": "sololedger.scraper_service",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.api",
+        "target": "sololedger.sms_parser",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.api",
+        "target": "sololedger.storage_backend",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.api",
+        "target": "sololedger.tax_engine",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.api",
+        "target": "sololedger.telegram_bot",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.api",
+        "target": "sololedger.vehicle_tracker",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.api",
+        "target": "sololedger.workflow_graph",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.archiver",
+        "target": "sololedger.config",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.archiver",
+        "target": "sololedger.sms_parser",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.archiver",
+        "target": "sololedger.storage_backend",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.audit_graph",
+        "target": "sololedger.models",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.audit_graph",
+        "target": "sololedger.nts_client",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.audit_graph",
+        "target": "sololedger.sms_parser",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.audit_graph",
+        "target": "sololedger.tax_engine",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.audit_graph",
+        "target": "sololedger.vehicle_tracker",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.bq_graph_exporter",
+        "target": "sololedger.config",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.bq_graph_exporter",
+        "target": "sololedger.merchant_service",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.bq_graph_exporter",
+        "target": "sololedger.models",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.bq_graph_exporter",
+        "target": "sololedger.storage_backend",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.cli",
+        "target": "sololedger.config",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.cli",
+        "target": "sololedger.dashboard",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.cli",
+        "target": "sololedger.db",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.cli",
+        "target": "sololedger.desktop_app",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.cli",
+        "target": "sololedger.exporters",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.cli",
+        "target": "sololedger.importers",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.cli",
+        "target": "sololedger.nas_sync",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.cli",
+        "target": "sololedger.phone_adb",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.cloud_sync",
+        "target": "sololedger.config",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.cloud_sync",
+        "target": "sololedger.db",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.cloud_sync",
+        "target": "sololedger.email_watcher",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.cloud_sync",
+        "target": "sololedger.storage_backend",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.dashboard",
+        "target": "sololedger.archiver",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.dashboard",
+        "target": "sololedger.config",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.dashboard",
+        "target": "sololedger.sms_parser",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.dashboard",
+        "target": "sololedger.tax_engine",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.dashboard",
+        "target": "sololedger.telegram_bot",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.dashboard",
+        "target": "sololedger.vehicle_tracker",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.db",
+        "target": "sololedger.config",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.desktop_app",
+        "target": "sololedger.api",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.desktop_app",
+        "target": "sololedger.config",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.email_watcher",
+        "target": "sololedger.config",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.email_watcher",
+        "target": "sololedger.importers",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.email_watcher",
+        "target": "sololedger.nts_client",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.email_watcher",
+        "target": "sololedger.scraper_service",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.email_watcher",
+        "target": "sololedger.sms_parser",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.email_watcher",
+        "target": "sololedger.tax_engine",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.exporters",
+        "target": "sololedger.config",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.exporters",
+        "target": "sololedger.sms_parser",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.exporters",
+        "target": "sololedger.storage_backend",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.graph_engineering",
+        "target": "sololedger.config",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.graph_engineering",
+        "target": "sololedger.workflow_graph",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.importers",
+        "target": "sololedger.models",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.importers",
+        "target": "sololedger.reconciler",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.importers",
+        "target": "sololedger.sms_parser",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.merchant_service",
+        "target": "sololedger.config",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.merchant_service",
+        "target": "sololedger.models",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.merchant_service",
+        "target": "sololedger.nts_client",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.nas_sync",
+        "target": "sololedger.config",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.nas_sync",
+        "target": "sololedger.db",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.notifier",
+        "target": "sololedger.config",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.notifier",
+        "target": "sololedger.models",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.nts_client",
+        "target": "sololedger.config",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.nts_client",
+        "target": "sololedger.models",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.ocr_engine",
+        "target": "sololedger.archiver",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.ocr_engine",
+        "target": "sololedger.config",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.ocr_engine",
+        "target": "sololedger.merchant_service",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.ocr_engine",
+        "target": "sololedger.models",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.ocr_engine",
+        "target": "sololedger.nts_client",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.ocr_engine",
+        "target": "sololedger.reconciler",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.ocr_engine",
+        "target": "sololedger.storage_backend",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.ocr_engine",
+        "target": "sololedger.tax_engine",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.ocr_engine",
+        "target": "sololedger.telegram_bot",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.phone_adb",
+        "target": "sololedger.sms_parser",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.phone_adb",
+        "target": "sololedger.tax_engine",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.plan_verifier",
+        "target": "sololedger.api",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.plan_verifier",
+        "target": "sololedger.config",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.reconciler",
+        "target": "sololedger.models",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.reconciler",
+        "target": "sololedger.tax_engine",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.scraper_service",
+        "target": "sololedger.archiver",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.scraper_service",
+        "target": "sololedger.config",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.scraper_service",
+        "target": "sololedger.importers",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.scraper_service",
+        "target": "sololedger.merchant_service",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.scraper_service",
+        "target": "sololedger.models",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.scraper_service",
+        "target": "sololedger.nts_client",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.scraper_service",
+        "target": "sololedger.reconciler",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.scraper_service",
+        "target": "sololedger.sms_parser",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.scraper_service",
+        "target": "sololedger.tax_engine",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.scraper_service",
+        "target": "sololedger.telegram_bot",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.sms_parser",
+        "target": "sololedger.config",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.sms_parser",
+        "target": "sololedger.models",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.storage_backend",
+        "target": "sololedger.config",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.tax_engine",
+        "target": "sololedger.merchant_service",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.telegram_bot",
+        "target": "sololedger.archiver",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.workflow_graph",
+        "target": "sololedger.config",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.workflow_graph",
+        "target": "sololedger.merchant_service",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.workflow_graph",
+        "target": "sololedger.models",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.workflow_graph",
+        "target": "sololedger.nts_client",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.workflow_graph",
+        "target": "sololedger.ocr_engine",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.workflow_graph",
+        "target": "sololedger.tax_engine",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "sololedger.workflow_graph",
+        "target": "sololedger.telegram_bot",
+        "type": "IMPORTS"
+      },
+      {
+        "source": "test:test_bq_graph.py",
+        "target": "sololedger.bq_graph_exporter",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_bq_graph.py",
+        "target": "sololedger.models",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_bq_graph.py",
+        "target": "sololedger.storage_backend",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_cloud_storage.py",
+        "target": "sololedger.api",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_cloud_storage.py",
+        "target": "sololedger.archiver",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_cloud_storage.py",
+        "target": "sololedger.cloud_sync",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_cloud_storage.py",
+        "target": "sololedger.db",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_cloud_storage.py",
+        "target": "sololedger.exporters",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_cloud_storage.py",
+        "target": "sololedger.models",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_cloud_storage.py",
+        "target": "sololedger.ocr_engine",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_cloud_storage.py",
+        "target": "sololedger.storage_backend",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_desktop_app.py",
+        "target": "sololedger.api",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_desktop_app.py",
+        "target": "sololedger.cli",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_desktop_app.py",
+        "target": "sololedger.config",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_desktop_app.py",
+        "target": "sololedger.desktop_app",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_e2e_lifecycle.py",
+        "target": "sololedger.cli",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_e2e_lifecycle.py",
+        "target": "sololedger.config",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_graph_engineering.py",
+        "target": "sololedger.api",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_graph_engineering.py",
+        "target": "sololedger.bq_graph_exporter",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_graph_engineering.py",
+        "target": "sololedger.db",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_graph_engineering.py",
+        "target": "sololedger.graph_engineering",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_graph_engineering.py",
+        "target": "sololedger.workflow_graph",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_import_export.py",
+        "target": "sololedger.importers",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_import_export.py",
+        "target": "sololedger.vehicle_tracker",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_mobile_api.py",
+        "target": "sololedger.api",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_nas_sync.py",
+        "target": "sololedger.cli",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_nas_sync.py",
+        "target": "sololedger.config",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_nts_client.py",
+        "target": "sololedger.merchant_service",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_nts_client.py",
+        "target": "sololedger.nts_client",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_nts_client.py",
+        "target": "sololedger.tax_engine",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_ocr_and_bot.py",
+        "target": "sololedger.archiver",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_ocr_and_bot.py",
+        "target": "sololedger.models",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_ocr_and_bot.py",
+        "target": "sololedger.notifier",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_ocr_and_bot.py",
+        "target": "sololedger.ocr_engine",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_plan_verifier.py",
+        "target": "sololedger.plan_verifier",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_receipt_dataset.py",
+        "target": "sololedger.config",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_receipt_dataset.py",
+        "target": "sololedger.db",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_reconciler.py",
+        "target": "sololedger.models",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_reconciler.py",
+        "target": "sololedger.reconciler",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_sms_parser.py",
+        "target": "sololedger.email_watcher",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_sms_parser.py",
+        "target": "sololedger.scraper_service",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_sms_parser.py",
+        "target": "sololedger.sms_parser",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_tax_engine.py",
+        "target": "sololedger.dashboard",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_tax_engine.py",
+        "target": "sololedger.scraper_service",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_tax_engine.py",
+        "target": "sololedger.tax_engine",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_toss_email_scroll.py",
+        "target": "sololedger.api",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_toss_email_scroll.py",
+        "target": "sololedger.config",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_toss_email_scroll.py",
+        "target": "sololedger.db",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_toss_email_scroll.py",
+        "target": "sololedger.email_watcher",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_toss_email_scroll.py",
+        "target": "sololedger.sms_parser",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_workflow_graph.py",
+        "target": "sololedger.audit_graph",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_workflow_graph.py",
+        "target": "sololedger.models",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "test:test_workflow_graph.py",
+        "target": "sololedger.workflow_graph",
+        "type": "TESTS_IMPORT"
+      },
+      {
+        "source": "route:GET /api/v1/analytics/bigquery-status",
+        "target": "symbol:get_bigquery_connection_status",
+        "type": "CALLS"
+      },
+      {
+        "source": "route:GET /api/v1/system/engineering-graph",
+        "target": "symbol:verify_engineering_graph",
+        "type": "CALLS"
+      },
+      {
+        "source": "route:PATCH /api/v1/transactions/{tx_id}",
+        "target": "symbol:sync_checkpoint_from_ledger",
+        "type": "CALLS"
+      },
+      {
+        "source": "route:POST /api/v1/analytics/bigquery-export",
+        "target": "symbol:export_ledger_graph_to_bigquery",
+        "type": "CALLS"
+      },
+      {
+        "source": "route:POST /api/v1/analytics/bigquery-provision",
+        "target": "symbol:provision_bigquery_dataset_and_graph",
+        "type": "CALLS"
+      },
+      {
+        "source": "route:POST /api/v1/audits/tax-pack/{year_month}",
+        "target": "symbol:run_pre_export_tax_audit",
+        "type": "CALLS"
+      },
+      {
+        "source": "route:POST /api/v1/exports/tax-pack",
+        "target": "symbol:run_pre_export_tax_audit",
+        "type": "CALLS"
+      },
+      {
+        "source": "route:POST /api/v1/receipts/upload",
+        "target": "symbol:sync_checkpoint_from_ledger",
+        "type": "CALLS"
+      },
+      {
+        "source": "route:POST /api/v1/transactions/{tx_id}/statement",
+        "target": "symbol:sync_checkpoint_from_ledger",
+        "type": "CALLS"
+      },
+      {
+        "source": "route:POST /api/v1/webhooks/push",
+        "target": "symbol:run_transaction_workflow",
+        "type": "CALLS"
+      },
+      {
+        "source": "route:POST /api/v1/webhooks/sms",
+        "target": "symbol:run_transaction_workflow",
+        "type": "CALLS"
+      },
+      {
+        "source": "route:POST /api/v1/webhooks/telegram",
+        "target": "symbol:sync_checkpoint_from_ledger",
+        "type": "CALLS"
+      },
+      {
+        "source": "route:POST /api/v1/workflows/transactions/{tx_id}/resume",
+        "target": "symbol:resume_transaction_workflow",
+        "type": "CALLS"
+      },
+      {
+        "source": "route:POST /api/v1/workflows/transactions/{tx_id}/run",
+        "target": "symbol:run_transaction_workflow",
+        "type": "CALLS"
+      },
+      {
+        "source": "table:card_transactions",
+        "target": "table:merchants",
+        "type": "FK_REFERENCES",
+        "column": "biz_reg_no"
+      },
+      {
+        "source": "table:receipt_ocr_metadata",
+        "target": "table:card_transactions",
+        "type": "FK_REFERENCES",
+        "column": "tx_id"
+      },
+      {
+        "source": "table:workflow_checkpoints",
+        "target": "table:card_transactions",
+        "type": "FK_REFERENCES",
+        "column": "tx_id"
+      },
+      {
+        "source": "state:ingest_parse",
+        "target": "state:nts_and_rule_eval",
+        "type": "DIRECT"
+      },
+      {
+        "source": "state:llm_tax_inference",
+        "target": "state:arithmetic_tax_validator",
+        "type": "DIRECT"
+      },
+      {
+        "source": "state:human_interrupt",
+        "target": "state:__INTERRUPT__",
+        "type": "DIRECT"
+      },
+      {
+        "source": "state:commit_ledger",
+        "target": "state:__END__",
+        "type": "DIRECT"
+      },
+      {
+        "source": "state:nts_and_rule_eval",
+        "target": "state:llm_tax_inference",
+        "type": "CONDITIONAL",
+        "router": "_route_after_rule_eval"
+      },
+      {
+        "source": "state:nts_and_rule_eval",
+        "target": "state:human_interrupt",
+        "type": "CONDITIONAL",
+        "router": "_route_after_rule_eval"
+      },
+      {
+        "source": "state:nts_and_rule_eval",
+        "target": "state:commit_ledger",
+        "type": "CONDITIONAL",
+        "router": "_route_after_rule_eval"
+      },
+      {
+        "source": "state:arithmetic_tax_validator",
+        "target": "state:llm_tax_inference",
+        "type": "CONDITIONAL",
+        "router": "_route_after_validator"
+      },
+      {
+        "source": "state:arithmetic_tax_validator",
+        "target": "state:human_interrupt",
+        "type": "CONDITIONAL",
+        "router": "_route_after_validator"
+      },
+      {
+        "source": "state:arithmetic_tax_validator",
+        "target": "state:commit_ledger",
+        "type": "CONDITIONAL",
+        "router": "_route_after_validator"
+      }
+    ],
+    "cycles": [],
+    "untested_modules": [],
+    "route_calls": {
+      "POST /api/v1/auth/login": [],
+      "GET /login": [],
+      "POST /login": [],
+      "GET /health": [],
+      "POST /api/v1/webhooks/sms": [
+        "run_transaction_workflow"
+      ],
+      "POST /api/v1/webhooks/push": [
+        "run_transaction_workflow"
+      ],
+      "POST /api/v1/webhooks/telegram": [
+        "sync_checkpoint_from_ledger"
+      ],
+      "POST /api/v1/receipts/upload": [
+        "sync_checkpoint_from_ledger"
+      ],
+      "GET /api/v1/receipts": [],
+      "POST /api/v1/merchants/verify": [],
+      "GET /api/v1/merchants": [],
+      "POST /api/v1/reconcile": [],
+      "POST /api/v1/imports/hometax-csv": [],
+      "GET /api/v1/analytics/vehicle-limit": [],
+      "POST /api/v1/audits/tax-pack/{year_month}": [
+        "run_pre_export_tax_audit"
+      ],
+      "POST /api/v1/workflows/transactions/{tx_id}/run": [
+        "run_transaction_workflow"
+      ],
+      "POST /api/v1/workflows/transactions/{tx_id}/resume": [
+        "resume_transaction_workflow"
+      ],
+      "GET /api/v1/analytics/bigquery-status": [
+        "get_bigquery_connection_status"
+      ],
+      "POST /api/v1/analytics/bigquery-provision": [
+        "provision_bigquery_dataset_and_graph"
+      ],
+      "POST /api/v1/analytics/bigquery-export": [
+        "export_ledger_graph_to_bigquery"
+      ],
+      "POST /api/v1/exports/tax-pack": [
+        "run_pre_export_tax_audit"
+      ],
+      "GET /api/v1/exports/tax-pack/{year_month}/download": [],
+      "GET /api/v1/exports/tax-pack/{year_month}/csv": [],
+      "GET /api/v1/transactions": [],
+      "PATCH /api/v1/transactions/{tx_id}": [
+        "sync_checkpoint_from_ledger"
+      ],
+      "GET /api/v1/transactions/{tx_id}/receipt": [],
+      "POST /api/v1/transactions/{tx_id}/statement": [
+        "sync_checkpoint_from_ledger"
+      ],
+      "GET /api/v1/transactions/{tx_id}/receipt-file": [],
+      "GET /api/v1/dashboard/summary": [],
+      "POST /api/v1/cloud/jobs/email-sync": [],
+      "POST /api/v1/cloud/jobs/snapshot-backup": [],
+      "POST /api/v1/system/backup-nas": [],
+      "POST /api/v1/system/seed-demo": [],
+      "POST /api/v1/system/reset-test": [],
+      "POST /api/v1/system/import-phone-sms": [],
+      "POST /api/v1/system/reapply-rules": [],
+      "GET /api/v1/system/corp-card-policy": [],
+      "POST /api/v1/system/corp-card-policy": [],
+      "DELETE /api/v1/system/corp-cards/{card_last4}": [],
+      "GET /api/v1/system/engineering-graph": [
+        "verify_engineering_graph"
+      ],
+      "GET /api/v1/scraper/targets": [],
+      "GET /api/v1/scraper/coupang-script": [],
+      "POST /api/v1/scraper/coupang-auto-crawl": [],
+      "GET /api/v1/scraper/email-config": [],
+      "POST /api/v1/scraper/email-config": [],
+      "PATCH /api/v1/scraper/email-accounts/{account_id}": [],
+      "DELETE /api/v1/scraper/email-accounts/{account_id}": [],
+      "POST /api/v1/scraper/email-sync": [],
+      "POST /api/v1/scraper/email-scroll-toss": [],
+      "POST /api/v1/scraper/email-webhook": [],
+      "POST /api/v1/scraper/ingest": [],
+      "POST /api/v1/scraper/generate-slips": [],
+      "GET /dashboard": [],
+      "GET /desktop-launch": [],
+      "GET /manual": [],
+      "GET /download/apk": []
+    },
+    "state_graph": {
+      "entry_point": "ingest_parse",
+      "nodes": [
+        "arithmetic_tax_validator",
+        "commit_ledger",
+        "human_interrupt",
+        "ingest_parse",
+        "llm_tax_inference",
+        "nts_and_rule_eval"
+      ],
+      "edges": [
+        {
+          "source": "state:ingest_parse",
+          "target": "state:nts_and_rule_eval",
+          "type": "DIRECT"
+        },
+        {
+          "source": "state:llm_tax_inference",
+          "target": "state:arithmetic_tax_validator",
+          "type": "DIRECT"
+        },
+        {
+          "source": "state:human_interrupt",
+          "target": "state:__INTERRUPT__",
+          "type": "DIRECT"
+        },
+        {
+          "source": "state:commit_ledger",
+          "target": "state:__END__",
+          "type": "DIRECT"
+        },
+        {
+          "source": "state:nts_and_rule_eval",
+          "target": "state:llm_tax_inference",
+          "type": "CONDITIONAL",
+          "router": "_route_after_rule_eval"
+        },
+        {
+          "source": "state:nts_and_rule_eval",
+          "target": "state:human_interrupt",
+          "type": "CONDITIONAL",
+          "router": "_route_after_rule_eval"
+        },
+        {
+          "source": "state:nts_and_rule_eval",
+          "target": "state:commit_ledger",
+          "type": "CONDITIONAL",
+          "router": "_route_after_rule_eval"
+        },
+        {
+          "source": "state:arithmetic_tax_validator",
+          "target": "state:llm_tax_inference",
+          "type": "CONDITIONAL",
+          "router": "_route_after_validator"
+        },
+        {
+          "source": "state:arithmetic_tax_validator",
+          "target": "state:human_interrupt",
+          "type": "CONDITIONAL",
+          "router": "_route_after_validator"
+        },
+        {
+          "source": "state:arithmetic_tax_validator",
+          "target": "state:commit_ledger",
+          "type": "CONDITIONAL",
+          "router": "_route_after_validator"
+        }
+      ],
+      "reachable_nodes": [
+        "arithmetic_tax_validator",
+        "commit_ledger",
+        "human_interrupt",
+        "ingest_parse",
+        "llm_tax_inference",
+        "nts_and_rule_eval"
+      ],
+      "unreachable_nodes": []
+    },
+    "bigquery_graph": {
+      "exists": true,
+      "tables": [
+        "merchants",
+        "card_transactions",
+        "order_line_items",
+        "account_categories",
+        "construction_sites",
+        "edge_purchased_at",
+        "edge_contains_item",
+        "edge_classified_as",
+        "edge_attributed_to"
+      ],
+      "property_graphs": [
+        "{{PROJECT_ID}}.{{DATASET_ID}}.sololedger_tax_graph"
+      ],
+      "gql_queries": [
+        "mixed_welfare_entertainment_merchants",
+        "item_keyword_account_recommendation",
+        "construction_site_cost_rollup"
+      ]
+    }
+  }
+}

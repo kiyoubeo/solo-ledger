@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import quote
 
+import httpx
 from fastapi import BackgroundTasks, Body, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -21,7 +22,11 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sololedger import __version__
 from sololedger.archiver import DuplicateReceiptError, build_receipt_print_title
 from sololedger.audit_graph import run_pre_export_tax_audit
-from sololedger.bq_graph_exporter import export_ledger_graph_to_bigquery
+from sololedger.bq_graph_exporter import (
+    export_ledger_graph_to_bigquery,
+    get_bigquery_connection_status,
+    provision_bigquery_dataset_and_graph,
+)
 from sololedger.cloud_sync import (
     backup_sqlite_snapshot_to_storage,
     restore_sqlite_snapshot_from_storage,
@@ -48,6 +53,7 @@ from sololedger.email_watcher import (
     update_email_account_entry,
 )
 from sololedger.exporters import generate_tax_accountant_pack
+from sololedger.graph_engineering import verify_engineering_graph
 from sololedger.importers import decode_csv_bytes, import_and_reconcile_hometax_csv
 from sololedger.merchant_service import (
     apply_merchant_tax_status_to_ledger,
@@ -56,6 +62,7 @@ from sololedger.merchant_service import (
 from sololedger.models import (
     AppPushWebhookPayload,
     BigQueryGraphExportRequest,
+    BigQueryProvisionRequest,
     CloudEmailSyncJobRequest,
     CloudSnapshotBackupRequest,
     HometaxCsvImportRequest,
@@ -97,12 +104,18 @@ from sololedger.sms_parser import (
     save_corp_card_policy,
 )
 from sololedger.storage_backend import get_storage_backend
-from sololedger.tax_engine import calculate_supply_and_vat, evaluate_tax_rules
+from sololedger.tax_engine import (
+    calculate_supply_and_vat,
+    evaluate_tax_rules,
+    is_uncertain_item_merchant,
+)
 from sololedger.telegram_bot import handle_telegram_update
 from sololedger.vehicle_tracker import get_vehicle_expense_summary
 from sololedger.workflow_graph import (
+    _offline_llm_fallback,
     resume_transaction_workflow,
     run_transaction_workflow,
+    sync_checkpoint_from_ledger,
 )
 
 
@@ -472,7 +485,18 @@ async def receive_card_sms_webhook(
                 status_code,
             ),
         )
-        tx_id = cursor.lastrowid
+        tx_id = int(cursor.lastrowid)
+        wf: Optional[Dict[str, Any]] = None
+        if not parsed.is_cancel:
+            wf = await run_transaction_workflow(
+                cursor,
+                tx_id=tx_id,
+                llm_infer_fn=(
+                    _offline_llm_fallback
+                    if is_uncertain_item_merchant(parsed.raw_merchant_name)
+                    else None
+                ),
+            )
         conn.commit()
 
         if rule_result["require_memo_prompt"] and not parsed.is_cancel:
@@ -483,11 +507,18 @@ async def receive_card_sms_webhook(
             "tx_id": tx_id,
             "merchant": parsed.raw_merchant_name,
             "amount": parsed.total_amount,
-            "account_code": rule_result["account_code"],
-            "account_name": rule_result["account_name"],
-            "vat_deduction_type": rule_result["vat_deduction_type"],
-            "is_vehicle_expense": rule_result["is_vehicle_expense"],
+            "account_code": wf["account_code"] if wf else rule_result["account_code"],
+            "account_name": wf["account_name"] if wf else rule_result["account_name"],
+            "vat_deduction_type": (
+                wf["vat_deduction_type"] if wf else rule_result["vat_deduction_type"]
+            ),
+            "is_vehicle_expense": (
+                wf["is_vehicle_expense"] if wf else rule_result["is_vehicle_expense"]
+            ),
             "reconcile_status": status_code,
+            "workflow_status": wf["status"] if wf else "CANCELED",
+            "workflow_nodes": wf["visited_nodes"] if wf else [],
+            "checkpoint_id": wf["checkpoint_id"] if wf else None,
         }
     finally:
         conn.close()
@@ -569,7 +600,18 @@ async def receive_card_app_push_webhook(
                 status_code,
             ),
         )
-        tx_id = cursor.lastrowid
+        tx_id = int(cursor.lastrowid)
+        wf: Optional[Dict[str, Any]] = None
+        if not parsed.is_cancel:
+            wf = await run_transaction_workflow(
+                cursor,
+                tx_id=tx_id,
+                llm_infer_fn=(
+                    _offline_llm_fallback
+                    if is_uncertain_item_merchant(parsed.raw_merchant_name)
+                    else None
+                ),
+            )
         conn.commit()
 
         if rule_result["require_memo_prompt"] and not parsed.is_cancel:
@@ -581,11 +623,18 @@ async def receive_card_app_push_webhook(
             "card_last4": parsed.card_last4,
             "merchant": parsed.raw_merchant_name,
             "amount": parsed.total_amount,
-            "account_code": rule_result["account_code"],
-            "account_name": rule_result["account_name"],
-            "vat_deduction_type": rule_result["vat_deduction_type"],
-            "is_vehicle_expense": rule_result["is_vehicle_expense"],
+            "account_code": wf["account_code"] if wf else rule_result["account_code"],
+            "account_name": wf["account_name"] if wf else rule_result["account_name"],
+            "vat_deduction_type": (
+                wf["vat_deduction_type"] if wf else rule_result["vat_deduction_type"]
+            ),
+            "is_vehicle_expense": (
+                wf["is_vehicle_expense"] if wf else rule_result["is_vehicle_expense"]
+            ),
             "reconcile_status": status_code,
+            "workflow_status": wf["status"] if wf else "CANCELED",
+            "workflow_nodes": wf["visited_nodes"] if wf else [],
+            "checkpoint_id": wf["checkpoint_id"] if wf else None,
         }
     finally:
         conn.close()
@@ -604,6 +653,10 @@ async def receive_telegram_webhook(
     cursor = conn.cursor()
     try:
         result = handle_telegram_update(cursor, update)
+        if result.get("tx_id"):
+            result["workflow_checkpoint"] = sync_checkpoint_from_ledger(
+                cursor, int(result["tx_id"])
+            )
         conn.commit()
         return result
     finally:
@@ -636,8 +689,9 @@ async def upload_receipt_endpoint(
                 explicit_tx_id=request.tx_id,
                 ocr_override=request.ocr_override,
             )
+            wf_ckpt = sync_checkpoint_from_ledger(cursor, int(result["tx_id"]))
             conn.commit()
-            return {"status": "archived", **result}
+            return {"status": "archived", **result, "workflow_checkpoint": wf_ckpt}
         except DuplicateReceiptError as dup_err:
             raise HTTPException(
                 status_code=409,
@@ -863,6 +917,34 @@ async def resume_transaction_workflow_endpoint(
         conn.close()
 
 
+@app.get("/api/v1/analytics/bigquery-status")
+async def bigquery_status_endpoint():
+    """Return BigQuery project configuration and local ADC / gcloud readiness."""
+    _verify_read_access()
+    return get_bigquery_connection_status()
+
+
+@app.post("/api/v1/analytics/bigquery-provision")
+async def provision_bigquery_endpoint(
+    request: Optional[BigQueryProvisionRequest] = Body(default=None),
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Provision BigQuery dataset and execute Property Graph DDL via ADC/gcloud token."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    req = request or BigQueryProvisionRequest()
+    try:
+        return provision_bigquery_dataset_and_graph(
+            project_id=req.project_id,
+            dataset_id=req.dataset_id,
+            location=req.location,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except (RuntimeError, httpx.HTTPError) as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
+
 @app.post("/api/v1/analytics/bigquery-export")
 async def export_bigquery_property_graph_endpoint(
     request: Optional[BigQueryGraphExportRequest] = Body(default=None),
@@ -879,6 +961,8 @@ async def export_bigquery_property_graph_endpoint(
             return export_ledger_graph_to_bigquery(cursor, request=request)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
+        except (RuntimeError, httpx.HTTPError) as e:
+            raise HTTPException(status_code=502, detail=str(e)) from e
     finally:
         conn.close()
 
@@ -889,17 +973,46 @@ async def export_tax_pack_endpoint(
     x_api_key: Optional[str] = Header(default=None),
     sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
 ):
-    """Generate tax accountant standard CSV and normalized receipt ZIP archive for YYYYMM."""
+    """Run pre-export tax audit graph and generate CSV + normalized receipt ZIP bundle."""
     _verify_api_key(x_api_key, sololedger_api_key)
     init_db()
     conn = get_connection()
     cursor = conn.cursor()
     try:
-        outcome = generate_tax_accountant_pack(
-            cursor,
-            year_month=request.year_month,
-            force_reexport=request.force_reexport,
-        )
+        pre_audit: Optional[Dict[str, Any]] = None
+        try:
+            if request.run_pre_audit:
+                pre_audit = await run_pre_export_tax_audit(
+                    cursor,
+                    year_month=request.year_month,
+                    request=TaxAuditRequest(
+                        include_exported=request.force_reexport,
+                        auto_revert_unverified_to_queue=request.strict_audit,
+                    ),
+                )
+                if request.strict_audit and not pre_audit["ready_for_export"]:
+                    conn.commit()
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "error": "tax_audit_blocked",
+                            "message": (
+                                f"Pre-export tax audit detected "
+                                f"{pre_audit['error_count']} error(s)."
+                            ),
+                            "pre_audit": pre_audit,
+                        },
+                    )
+            outcome = generate_tax_accountant_pack(
+                cursor,
+                year_month=request.year_month,
+                force_reexport=request.force_reexport,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+
+        if pre_audit is not None:
+            outcome["pre_audit"] = pre_audit
         conn.commit()
         return outcome
     finally:
@@ -1040,6 +1153,7 @@ async def patch_transaction_endpoint(
                 counterparty_info=request.counterparty_info,
                 apply_to_same_merchant=request.apply_to_same_merchant,
             )
+            sync_checkpoint_from_ledger(cursor, tx_id)
             conn.commit()
             return {"status": "updated", "transaction": updated}
         except ValueError as e:
@@ -1186,6 +1300,7 @@ async def save_transaction_statement_endpoint(
                 file_bytes=file_bytes,
                 file_name=file_name,
             )
+            sync_checkpoint_from_ledger(cursor, tx_id)
             conn.commit()
             return outcome
         except ValueError as e:
@@ -1498,6 +1613,22 @@ async def delete_corp_card_endpoint(
         **policy,
         "issuer_presets": CORP_CARD_ISSUER_PREFIX,
     }
+
+
+@app.get("/api/v1/system/engineering-graph")
+async def engineering_graph_status_endpoint(full: bool = Query(default=False)):
+    """Verify and return SoloLedger multi-layer code/runtime/schema/graph integrity."""
+    _verify_read_access()
+    report = verify_engineering_graph()
+    payload: Dict[str, Any] = {
+        "passed": report["passed"],
+        "errors": report["errors"],
+        "summary": report["summary"],
+        "mermaid": report["mermaid"],
+    }
+    if full:
+        payload["graph"] = report["graph"]
+    return payload
 
 
 @app.get("/api/v1/scraper/targets")

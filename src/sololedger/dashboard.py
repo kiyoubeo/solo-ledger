@@ -2498,6 +2498,10 @@ def render_dashboard_html(
                   onclick="runSnapshotBackupNow()">☁️ SQLite 스냅샷 백업</button>
           <button id="btn-run-bq-export" style="background:#1d4ed8;"
                   onclick="runBigQueryGraphExport()">🕸️ BigQuery 지식그래프 분석</button>
+          <button id="btn-run-bq-cloud-sync" style="background:#0369a1;"
+                  onclick="runBigQueryCloudSync()">🚀 BigQuery 실서버 적재(ADC)</button>
+          <button id="btn-run-eng-graph" style="background:#475569;"
+                  onclick="runEngineeringGraphCheck()">🏗️ 파이프라인·코드 그래프 검증</button>
         </div>
         <div id="bq-graph-results" style="margin-top:8px; font-size:12px; color:#334155;">
           스냅샷 백업 결과 및 다년도 BigQuery 지식그래프 분석 요약이 표시됩니다.
@@ -3199,10 +3203,41 @@ def render_dashboard_html(
       reader.readAsDataURL(file);
     }}
     async function exportTaxPack(yearMonth) {{
+      const ymInput = document.getElementById('audit-year-month');
+      let targetYm = String(yearMonth || '').replace(/\\D/g, '');
+      if (targetYm.length !== 6 && ymInput) {{
+        targetYm = String(ymInput.value || '').replace(/\\D/g, '');
+      }}
+      if (targetYm.length === 6) {{
+        try {{
+          const auditRes = await fetch('/api/v1/audits/tax-pack/' + encodeURIComponent(targetYm), {{
+            method: 'POST',
+            headers: API_HEADERS,
+            body: JSON.stringify({{ include_exported: true }})
+          }});
+          if (auditRes.ok) {{
+            const auditData = await auditRes.json();
+            if (!auditData.ready_for_export && Number(auditData.error_count || 0) > 0) {{
+              const proceed = window.confirm(
+                '사전 세무감사 결과 [' + targetYm + '] 미분류/증빙 누락 오류 '
+                + auditData.error_count + '건이 발견되었습니다.\\n'
+                + '확인: 무시하고 세무 패키지 생성 계속\\n'
+                + '취소: 세무감사·지식그래프 창에서 먼저 소명하기'
+              );
+              if (!proceed) {{
+                if (ymInput) ymInput.value = targetYm;
+                openGraphAuditModal();
+                await runPreExportTaxAudit();
+                return;
+              }}
+            }}
+          }}
+        }} catch (e) {{}}
+      }}
       await fetch('/api/v1/exports/tax-pack', {{
         method: 'POST',
         headers: API_HEADERS,
-        body: JSON.stringify({{ year_month: yearMonth, force_reexport: true }})
+        body: JSON.stringify({{ year_month: targetYm || yearMonth, force_reexport: true, run_pre_audit: true }})
       }});
       window.location.reload();
     }}
@@ -4873,6 +4908,112 @@ def render_dashboard_html(
             + ' · 품목-계정 추천 <strong>' + recs.length + '건</strong>'
             + ' · 공사현장 집계 <strong>' + sites.length + '건</strong></div>'
             + extra + '</div>';
+        }}
+      }} catch (err) {{
+        if (outEl) outEl.textContent = '요청 실패: ' + err;
+      }}
+    }}
+
+    async function runBigQueryCloudSync() {{
+      const outEl = document.getElementById('bq-graph-results');
+      if (outEl) outEl.textContent = '로컬 ADC / gcloud 연결 상태를 확인하는 중...';
+      try {{
+        const stRes = await fetch('/api/v1/analytics/bigquery-status', {{ headers: API_HEADERS }});
+        const stData = await stRes.json();
+        if (!stData.ready_for_cloud_load) {{
+          if (outEl) {{
+            outEl.innerHTML = '<div style="background:#fffbeb; border:1px solid #fcd34d; '
+              + 'border-radius:6px; padding:8px;">'
+              + '<div><strong>⚠️ BigQuery 실서버 인증(ADC) 미설정</strong></div>'
+              + '<div>ADC 파일: <strong>' + (stData.adc_found ? '확인됨' : '미설치')
+              + '</strong> · gcloud CLI: <strong>' + (stData.gcloud_cli_found ? '설치됨' : '미설치')
+              + '</strong> · 프로젝트: <code>' + escHtml(stData.configured_project_id || '미지정')
+              + '</code></div>'
+              + '<div style="margin-top:4px; color:#92400e;">PowerShell에서 '
+              + '<code>scripts/setup_gcp_bigquery.ps1 -InstallSdk -ProjectId &lt;GCP프로젝트ID&gt;</code>'
+              + ' 실행 후 다시 시도해 주세요.</div></div>';
+          }}
+          return;
+        }}
+        if (outEl) outEl.textContent = 'BigQuery 데이터셋/DDL 프로비저닝 및 실서버 적재 중...';
+        const provRes = await fetch('/api/v1/analytics/bigquery-provision', {{
+          method: 'POST',
+          headers: API_HEADERS,
+          body: JSON.stringify({{}})
+        }});
+        const provData = await provRes.json();
+        if (!provRes.ok) {{
+          if (outEl) {{
+            outEl.innerHTML = '<span style="color:#b91c1c;">프로비저닝 오류: '
+              + escHtml(provData.detail || provRes.statusText) + '</span>';
+          }}
+          return;
+        }}
+        const expRes = await fetch('/api/v1/analytics/bigquery-export', {{
+          method: 'POST',
+          headers: API_HEADERS,
+          body: JSON.stringify({{ execute_bigquery_load: true, run_gql_audit: true }})
+        }});
+        const expData = await expRes.json();
+        if (!expRes.ok) {{
+          if (outEl) {{
+            outEl.innerHTML = '<span style="color:#b91c1c;">적재 오류: '
+              + escHtml(expData.detail || expRes.statusText) + '</span>';
+          }}
+          return;
+        }}
+        const bqLoad = expData.bigquery_load || {{}};
+        const loadedTbls = bqLoad.loaded_counts ? Object.keys(bqLoad.loaded_counts).length : 0;
+        const gqlRows = Array.isArray(expData.gql_audit_rows) ? expData.gql_audit_rows : [];
+        if (outEl) {{
+          outEl.innerHTML = '<div style="background:#f0fdf4; border:1px solid #86efac; '
+            + 'border-radius:6px; padding:8px;">'
+            + '<div><strong>🚀 BigQuery 실서버 적재 및 GQL 감사 완료</strong></div>'
+            + '<div>대상: <code>' + escHtml(provData.project_id + '.' + provData.dataset_id)
+            + '</code> (데이터셋: ' + escHtml(provData.dataset_status)
+            + ', DDL ' + Number(provData.ddl_statements_executed || 0) + '문 실행)</div>'
+            + '<div>적재 테이블: <strong>' + loadedTbls + '개</strong>'
+            + ' · 원격 GQL 감사 결과: <strong>' + gqlRows.length + '건</strong></div></div>';
+        }}
+      }} catch (err) {{
+        if (outEl) outEl.textContent = '요청 실패: ' + err;
+      }}
+    }}
+
+    async function runEngineeringGraphCheck() {{
+      const outEl = document.getElementById('bq-graph-results');
+      if (outEl) outEl.textContent = '코드·런타임·스키마·상태그래프 무결성을 검증 중...';
+      try {{
+        const res = await fetch('/api/v1/system/engineering-graph', {{ headers: API_HEADERS }});
+        const d = await res.json();
+        if (!res.ok) {{
+          if (outEl) {{
+            outEl.innerHTML = '<span style="color:#b91c1c;">오류: '
+              + escHtml(d.detail || res.statusText) + '</span>';
+          }}
+          return;
+        }}
+        const sm = d.summary || {{}};
+        const statusBadge = d.passed
+          ? '<span style="color:#166534; font-weight:800;">✅ PASS (무결성 검증 통과)</span>'
+          : '<span style="color:#b91c1c; font-weight:800;">❌ FAIL ('
+            + (Array.isArray(d.errors) ? d.errors.length : 0) + '건 오류)</span>';
+        const errBlock = (!d.passed && Array.isArray(d.errors))
+          ? ('<div style="color:#b91c1c; margin-top:4px;">'
+            + d.errors.map((e) => escHtml(e)).join('<br/>') + '</div>')
+          : '';
+        if (outEl) {{
+          outEl.innerHTML = '<div style="background:#f8fafc; border:1px solid #cbd5e1; '
+            + 'border-radius:6px; padding:8px;">'
+            + '<div><strong>🏗️ 파이프라인·코드 그래프 검증: </strong>' + statusBadge + '</div>'
+            + '<div>모듈: <strong>' + Number(sm.module_count || 0) + '개</strong>'
+            + ' · 순환참조: <strong>' + Number(sm.cycle_count || 0) + '건</strong>'
+            + ' · 미테스트 모듈: <strong>' + Number(sm.untested_module_count || 0) + '개</strong></div>'
+            + '<div>자동직결 라우트: <strong>' + Number(sm.autowire_verified_count || 0) + '/5개</strong>'
+            + ' · StateGraph 노드: <strong>' + Number(sm.state_graph_node_count || 0) + '개</strong>'
+            + ' · DB 테이블: <strong>' + Number(sm.sqlite_table_count || 0) + '개</strong>'
+            + ' · BQ 테이블: <strong>' + Number(sm.bq_table_count || 0) + '개</strong></div>'
+            + errBlock + '</div>';
         }}
       }} catch (err) {{
         if (outEl) outEl.textContent = '요청 실패: ' + err;

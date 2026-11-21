@@ -23,7 +23,7 @@ Use `scripts/harness.ps1` to verify changes, record development logs, and commit
    - Add or update unit/integration tests in `tests/`.
    - Update `docs/DEVELOPMENT_PLAN.md` when completing a Phase.
 
-2. **Run 5-Stage Harness Verification**:
+2. **Run 6-Stage Harness Verification**:
    ```powershell
    powershell -ExecutionPolicy Bypass -File scripts/harness.ps1 verify
    ```
@@ -32,8 +32,10 @@ Use `scripts/harness.ps1` to verify changes, record development logs, and commit
      2. `compileall` (Python syntax & bytecode check)
      3. `ruff check src tests` (Static lint analysis)
      4. `schema_integrity` (SQLite DDL & seed rules verification)
-     5. `pytest` (Unit & FastAPI integration test suite)
-   - Inspect `logs/last_verification.json` if any check fails.
+     5. `graph_engineering` (Code AST dependency cycles, test reachability, runtime auto-wiring, SQLite FK graph, StateGraph topology & BigQuery Property Graph verification -> saves `logs/architecture_graph.json`)
+     6. `pytest` (Unit & FastAPI integration test suite)
+   - Inspect `logs/last_verification.json` or `logs/architecture_graph.json` if any check fails.
+   - Run `powershell -ExecutionPolicy Bypass -File scripts/harness.ps1 graph` to audit the engineering graph standalone.
 
 3. **Log, Commit, and Push (Atomic Execution)**:
    ```powershell

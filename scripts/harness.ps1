@@ -11,7 +11,7 @@
 #>
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("verify", "review-plan", "log", "commit-push", "status")]
+    [ValidateSet("verify", "review-plan", "graph", "log", "commit-push", "status")]
     [string]$Action = "status",
 
     [Parameter(Position = 1)]
@@ -38,6 +38,7 @@ if (-not (Test-Path $LogsDir)) {
 
 $LastVerifyFile = Join-Path $LogsDir "last_verification.json"
 $VerifyHistoryFile = Join-Path $LogsDir "verification_history.jsonl"
+$ArchGraphFile = Join-Path $LogsDir "architecture_graph.json"
 $DevChangesFile = Join-Path $LogsDir "dev_changes.jsonl"
 $ChangelogFile = Join-Path $RepoRoot "CHANGELOG.md"
 $ClaudeFile = Join-Path $RepoRoot "CLAUDE.md"
@@ -110,9 +111,64 @@ print(json.dumps({'plan': plan, 'report': rep}, ensure_ascii=False))
     }
 }
 
+function Invoke-GraphEngineeringReport {
+    Write-Host "==========================================================" -ForegroundColor Cyan
+    Write-Host " [SoloLedger Graph] Multi-Layer Engineering Graph Audit" -ForegroundColor Cyan
+    Write-Host "==========================================================" -ForegroundColor Cyan
+
+    $ErrorActionPreference = "Continue"
+    $graphPy = @'
+import json
+from pathlib import Path
+from sololedger.graph_engineering import verify_engineering_graph
+
+rep = verify_engineering_graph()
+out_path = Path("logs/architecture_graph.json")
+out_path.parent.mkdir(parents=True, exist_ok=True)
+snapshot = {
+    "passed": rep["passed"],
+    "errors": rep["errors"],
+    "summary": rep["summary"],
+    "mermaid": rep["mermaid"],
+    "graph": rep["graph"],
+}
+out_path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+print(json.dumps({"passed": rep["passed"], "errors": rep["errors"], "summary": rep["summary"]}, ensure_ascii=False))
+'@
+    $graphOut = ($graphPy | uv run python - 2>&1 | Out-String).Trim()
+    $graphExit = $LASTEXITCODE
+    $ErrorActionPreference = "Stop"
+
+    if ($graphExit -ne 0) {
+        Write-Host "Failed to execute graph_engineering:" -ForegroundColor Red
+        Write-Host $graphOut
+        exit 1
+    }
+
+    $data = $graphOut | ConvertFrom-Json
+    $sm = $data.summary
+    Write-Host "Modules / Edges      : $($sm.module_count) modules / $($sm.module_edge_count) import edges"
+    Write-Host "Circular Imports     : $($sm.cycle_count)"
+    Write-Host "Untested Modules     : $($sm.untested_module_count)"
+    Write-Host "Runtime Auto-Wires   : $($sm.autowire_verified_count)/5 verified"
+    Write-Host "SQLite Tables / FKs  : $($sm.sqlite_table_count) tables / $($sm.fk_edge_count) foreign keys"
+    Write-Host "StateGraph Nodes     : $($sm.state_graph_node_count) nodes"
+    Write-Host "BigQuery Graph       : $($sm.bq_table_count) tables / $($sm.gql_query_count) GQL queries"
+    Write-Host "Snapshot Saved       : $ArchGraphFile"
+
+    if (-not $data.passed) {
+        Write-Host "`n[GRAPH ENGINEERING FAILED] Invariant Violations:" -ForegroundColor Red
+        foreach ($err in $data.errors) {
+            Write-Host "  - $err" -ForegroundColor Red
+        }
+        exit 1
+    }
+    Write-Host "`n[GRAPH ENGINEERING PASSED] All 6 architectural & runtime graph invariants satisfied." -ForegroundColor Green
+}
+
 function Invoke-HarnessVerify {
     Write-Host "==========================================================" -ForegroundColor Cyan
-    Write-Host " [SoloLedger Harness] Running 5-Stage Verification..." -ForegroundColor Cyan
+    Write-Host " [SoloLedger Harness] Running 6-Stage Verification..." -ForegroundColor Cyan
     Write-Host "==========================================================" -ForegroundColor Cyan
 
     $startTime = Get-Date
@@ -121,7 +177,7 @@ function Invoke-HarnessVerify {
     $ErrorActionPreference = "Continue"
 
     # 1. Development Plan & Spec Traceability Review
-    Write-Host "`n[1/5] Development Plan & Spec Traceability Check (plan_review)..." -ForegroundColor Yellow
+    Write-Host "`n[1/6] Development Plan & Spec Traceability Check (plan_review)..." -ForegroundColor Yellow
     $planCheckCode = "from sololedger.plan_verifier import verify_plan_traceability; r = verify_plan_traceability(); assert r['passed'], 'Plan errors: ' + '; '.join(r['errors']); nxt = r['next_phase']['phase'] if r['next_phase'] else 'NONE'; print('Completed=' + ','.join(r['completed_phases']) + ', Next=' + nxt + ', Version=v' + r['package_version'])"
     $planOut = (uv run python -c $planCheckCode 2>&1 | Out-String)
     $planExit = $LASTEXITCODE
@@ -139,7 +195,7 @@ function Invoke-HarnessVerify {
     }
 
     # 2. Python Bytecode & Syntax Compilation Check
-    Write-Host "`n[2/5] Syntax & Bytecode Compilation Check (compileall)..." -ForegroundColor Yellow
+    Write-Host "`n[2/6] Syntax & Bytecode Compilation Check (compileall)..." -ForegroundColor Yellow
     $compileOut = (uv run python -m compileall -q src tests 2>&1 | Out-String)
     $compileExit = $LASTEXITCODE
     $steps += [ordered]@{
@@ -156,7 +212,7 @@ function Invoke-HarnessVerify {
     }
 
     # 3. Static Analysis (Ruff Linter)
-    Write-Host "`n[3/5] Static Code Analysis (ruff check)..." -ForegroundColor Yellow
+    Write-Host "`n[3/6] Static Code Analysis (ruff check)..." -ForegroundColor Yellow
     $ruffOut = (uv run ruff check src tests 2>&1 | Out-String)
     $ruffExit = $LASTEXITCODE
     $steps += [ordered]@{
@@ -173,7 +229,7 @@ function Invoke-HarnessVerify {
     }
 
     # 4. SQLite DDL & Seed Rules Integrity Check
-    Write-Host "`n[4/5] SQLite Schema & Seed Rules Integrity Check..." -ForegroundColor Yellow
+    Write-Host "`n[4/6] SQLite Schema & Seed Rules Integrity Check..." -ForegroundColor Yellow
     $schemaOut = (uv run python -c "from sololedger.db import init_db, get_connection; import tempfile, os; fd, p = tempfile.mkstemp(suffix='.db'); os.close(fd); init_db(p); c = get_connection(p); cur = c.cursor(); cur.execute('SELECT name, type FROM sqlite_master'); t_cnt = len([row for row in cur.fetchall() if row[1] == 'table' and not row[0].startswith('sqlite_')]); cur.execute('SELECT COUNT(*) FROM tax_classification_rules WHERE is_active=1'); r = cur.fetchone()[0]; c.close(); os.remove(p); assert t_cnt >= 5 and r >= 4; print(f'Tables={t_cnt}, ActiveSeedRules={r}')" 2>&1 | Out-String)
     $schemaExit = $LASTEXITCODE
     $steps += [ordered]@{
@@ -189,8 +245,37 @@ function Invoke-HarnessVerify {
         Write-Host "  -> PASSED ($($schemaOut.Trim()))" -ForegroundColor Green
     }
 
-    # 5. Automated Unit & Integration Tests (Pytest)
-    Write-Host "`n[5/5] Automated Unit & Integration Test Suite (pytest)..." -ForegroundColor Yellow
+    # 5. Multi-Layer Graph Engineering Integrity Check
+    Write-Host "`n[5/6] Multi-Layer Code, Runtime & Domain Graph Check (graph_engineering)..." -ForegroundColor Yellow
+    $graphCheckPy = @'
+import json
+from pathlib import Path
+from sololedger.graph_engineering import verify_engineering_graph
+rep = verify_engineering_graph()
+p = Path("logs/architecture_graph.json")
+p.parent.mkdir(parents=True, exist_ok=True)
+p.write_text(json.dumps({"passed": rep["passed"], "errors": rep["errors"], "summary": rep["summary"], "mermaid": rep["mermaid"], "graph": rep["graph"]}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+assert rep["passed"], "Graph errors: " + "; ".join(rep["errors"])
+s = rep["summary"]
+print(f"Modules={s['module_count']}, Cycles={s['cycle_count']}, Untested={s['untested_module_count']}, AutoWires={s['autowire_verified_count']}/5, StateNodes={s['state_graph_node_count']}, BqTables={s['bq_table_count']}")
+'@
+    $graphOut = ($graphCheckPy | uv run python - 2>&1 | Out-String)
+    $graphExit = $LASTEXITCODE
+    $steps += [ordered]@{
+        step   = "graph_engineering"
+        passed = ($graphExit -eq 0)
+        output = $graphOut.Trim()
+    }
+    if ($graphExit -ne 0) {
+        $overallPassed = $false
+        Write-Host "  -> FAILED: Graph engineering invariant check failed." -ForegroundColor Red
+        Write-Host $graphOut
+    } else {
+        Write-Host "  -> PASSED ($($graphOut.Trim()))" -ForegroundColor Green
+    }
+
+    # 6. Automated Unit & Integration Tests (Pytest)
+    Write-Host "`n[6/6] Automated Unit & Integration Test Suite (pytest)..." -ForegroundColor Yellow
     $pytestOut = (uv run pytest -q 2>&1 | Out-String)
     $pytestExit = $LASTEXITCODE
     $steps += [ordered]@{
@@ -319,6 +404,9 @@ function Add-DevelopmentLogEntry {
 switch ($Action) {
     "review-plan" {
         Invoke-PlanReview
+    }
+    "graph" {
+        Invoke-GraphEngineeringReport
     }
     "verify" {
         Invoke-HarnessVerify

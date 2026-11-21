@@ -152,6 +152,14 @@ class TaxPackExportRequest(BaseModel):
         default=False,
         description="Include transactions that were already exported in a previous run",
     )
+    run_pre_audit: bool = Field(
+        default=True,
+        description="Automatically run pre-export parallel tax audit graph",
+    )
+    strict_audit: bool = Field(
+        default=False,
+        description="Block export with HTTP 409 when pre-audit finds ERROR-level issues",
+    )
 
 
 class TransactionUpdateRequest(BaseModel):
@@ -315,3 +323,11 @@ class BigQueryGraphExportRequest(BaseModel):
         default=True,
         description="Execute GQL risk query when execute_bigquery_load is True",
     )
+
+
+class BigQueryProvisionRequest(BaseModel):
+    """Request payload for provisioning BigQuery dataset and Property Graph DDL."""
+
+    project_id: Optional[str] = Field(default=None, description="GCP Project ID")
+    dataset_id: Optional[str] = Field(default=None, description="BigQuery Dataset ID")
+    location: str = Field(default="asia-northeast3", description="BigQuery dataset region")

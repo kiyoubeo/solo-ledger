@@ -2,8 +2,12 @@
 
 import hashlib
 import json
+import os
 import re
+import shutil
 import sqlite3
+import subprocess
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
@@ -13,6 +17,8 @@ from sololedger.config import resolve_bundled_path, settings
 from sololedger.merchant_service import ACCOUNT_CODE_NAMES
 from sololedger.models import BigQueryGraphExportRequest
 from sololedger.storage_backend import METADATA_TOKEN_URL, StorageBackend, get_storage_backend
+
+OAUTH2_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
 _BQ_IDENT_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 _SITE_BRACKET_RE = re.compile(r"\[([^\[\]]+)\]")
@@ -568,6 +574,45 @@ def analyze_graph_risks_and_recommendations(
     }
 
 
+def _find_adc_credentials_path() -> Optional[Path]:
+    """Locate local Google Application Default Credentials JSON if present."""
+    candidates: List[Path] = []
+    explicit_gac = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+    if explicit_gac:
+        candidates.append(Path(explicit_gac))
+    appdata = os.getenv("APPDATA", "").strip()
+    if appdata:
+        candidates.append(Path(appdata) / "gcloud" / "application_default_credentials.json")
+    candidates.append(
+        Path.home() / "AppData" / "Roaming" / "gcloud" / "application_default_credentials.json"
+    )
+    candidates.append(
+        Path.home() / ".config" / "gcloud" / "application_default_credentials.json"
+    )
+    for cand in candidates:
+        if cand.exists() and cand.is_file():
+            return cand
+    return None
+
+
+def _read_adc_json() -> Optional[Dict[str, Any]]:
+    adc_path = _find_adc_credentials_path()
+    if adc_path is None:
+        return None
+    try:
+        parsed = json.loads(adc_path.read_text(encoding="utf-8"))
+        return parsed if isinstance(parsed, dict) else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _detect_adc_project_id() -> str:
+    data = _read_adc_json()
+    if not data:
+        return ""
+    return str(data.get("quota_project_id") or data.get("project_id") or "").strip()
+
+
 def _resolve_bq_token(
     access_token: Optional[str] = None,
     transport: Optional[httpx.BaseTransport] = None,
@@ -581,13 +626,157 @@ def _resolve_bq_token(
     if explicit:
         return explicit
 
-    with httpx.Client(transport=transport, timeout=5.0) as client:
-        resp = client.get(METADATA_TOKEN_URL, headers={"Metadata-Flavor": "Google"})
-        resp.raise_for_status()
-        token = str(resp.json().get("access_token") or "").strip()
+    adc_data = _read_adc_json()
+    if (
+        adc_data
+        and adc_data.get("type") == "authorized_user"
+        and adc_data.get("client_id")
+        and adc_data.get("client_secret")
+        and adc_data.get("refresh_token")
+    ):
+        with httpx.Client(transport=transport, timeout=10.0) as client:
+            resp = client.post(
+                OAUTH2_TOKEN_URL,
+                data={
+                    "client_id": str(adc_data["client_id"]),
+                    "client_secret": str(adc_data["client_secret"]),
+                    "refresh_token": str(adc_data["refresh_token"]),
+                    "grant_type": "refresh_token",
+                },
+            )
+            resp.raise_for_status()
+            refreshed = str(resp.json().get("access_token") or "").strip()
+        if refreshed:
+            return refreshed
+
+    if transport is None:
+        gcloud_bin = shutil.which("gcloud")
+        if gcloud_bin:
+            proc = subprocess.run(
+                [gcloud_bin, "auth", "print-access-token"],
+                capture_output=True,
+                text=True,
+                timeout=8,
+                check=False,
+            )
+            cli_token = (proc.stdout or "").strip()
+            if proc.returncode == 0 and cli_token:
+                return cli_token
+
+    try:
+        with httpx.Client(transport=transport, timeout=5.0) as client:
+            resp = client.get(METADATA_TOKEN_URL, headers={"Metadata-Flavor": "Google"})
+            resp.raise_for_status()
+            token = str(resp.json().get("access_token") or "").strip()
+    except httpx.HTTPError as exc:
+        raise RuntimeError(
+            "Failed to obtain OAuth2 access token from ADC, gcloud CLI, or GCP Metadata Server."
+        ) from exc
     if not token:
         raise RuntimeError("Failed to obtain OAuth2 access token for BigQuery REST API.")
     return token
+
+
+def get_bigquery_connection_status() -> Dict[str, Any]:
+    """Report BigQuery project configuration and local ADC / gcloud readiness."""
+    configured_proj = settings.bq_project_id or _detect_adc_project_id()
+    adc_path = _find_adc_credentials_path()
+    gcloud_path = shutil.which("gcloud")
+    explicit_token = bool((settings.bq_access_token or settings.gcs_access_token).strip())
+    return {
+        "project_id": configured_proj or "sololedger-analytics",
+        "configured_project_id": configured_proj,
+        "dataset_id": settings.bq_dataset_id,
+        "adc_found": adc_path is not None,
+        "adc_path": str(adc_path) if adc_path else None,
+        "gcloud_cli_found": gcloud_path is not None,
+        "explicit_token_set": explicit_token,
+        "ready_for_cloud_load": bool(
+            configured_proj and (adc_path is not None or gcloud_path is not None or explicit_token)
+        ),
+    }
+
+
+def _split_ddl_statements(ddl_sql: str) -> List[str]:
+    stmts: List[str] = []
+    for chunk in ddl_sql.split(";"):
+        non_comment = [
+            ln for ln in chunk.splitlines() if ln.strip() and not ln.strip().startswith("--")
+        ]
+        if non_comment:
+            stmts.append(chunk.strip() + ";")
+    return stmts
+
+
+def provision_bigquery_dataset_and_graph(
+    project_id: Optional[str] = None,
+    dataset_id: Optional[str] = None,
+    location: str = "asia-northeast3",
+    bq_transport: Optional[httpx.BaseTransport] = None,
+    access_token: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Ensure BigQuery dataset exists and execute node/edge/Property Graph DDL statements."""
+    raw_project = project_id or settings.bq_project_id or _detect_adc_project_id()
+    if not raw_project:
+        raise ValueError(
+            "GCP project_id is required (set SOLOLEDGER_BQ_PROJECT_ID or ADC quota_project_id)."
+        )
+    clean_proj = validate_bq_identifier(raw_project, "project_id")
+    clean_ds = validate_bq_identifier(dataset_id or settings.bq_dataset_id, "dataset_id")
+    clean_loc = (location or "asia-northeast3").strip()
+
+    token = _resolve_bq_token(access_token=access_token, transport=bq_transport)
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+    ddl_sql = render_bigquery_graph_ddl(project_id=clean_proj, dataset_id=clean_ds)
+    stmts = _split_ddl_statements(ddl_sql)
+
+    ds_url = (
+        f"https://bigquery.googleapis.com/bigquery/v2/projects/"
+        f"{quote(clean_proj, safe='')}/datasets"
+    )
+    q_url = (
+        f"https://bigquery.googleapis.com/bigquery/v2/projects/"
+        f"{quote(clean_proj, safe='')}/queries"
+    )
+
+    with httpx.Client(transport=bq_transport, timeout=30.0) as client:
+        ds_resp = client.post(
+            ds_url,
+            headers=headers,
+            json={
+                "datasetReference": {"projectId": clean_proj, "datasetId": clean_ds},
+                "location": clean_loc,
+            },
+        )
+        if ds_resp.status_code in (200, 201):
+            ds_status = "created"
+        elif ds_resp.status_code == 409:
+            ds_status = "already_exists"
+        else:
+            ds_resp.raise_for_status()
+            ds_status = "created"
+
+        for stmt in stmts:
+            q_resp = client.post(
+                q_url,
+                headers=headers,
+                json={
+                    "query": stmt,
+                    "useLegacySql": False,
+                    "location": clean_loc,
+                },
+            )
+            q_resp.raise_for_status()
+
+    return {
+        "status": "provisioned",
+        "project_id": clean_proj,
+        "dataset_id": clean_ds,
+        "location": clean_loc,
+        "dataset_status": ds_status,
+        "ddl_statements_executed": len(stmts),
+    }
 
 
 def _parse_bq_query_response(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -682,7 +871,7 @@ def export_ledger_graph_to_bigquery(
     raw_project = (
         req.project_id
         if req.project_id is not None
-        else (settings.bq_project_id or "sololedger-analytics")
+        else (settings.bq_project_id or _detect_adc_project_id() or "sololedger-analytics")
     )
     raw_dataset = (
         req.dataset_id

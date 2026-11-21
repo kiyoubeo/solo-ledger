@@ -82,3 +82,4 @@
 | 2026-11-21 | deploy/cloudrun.yaml, logs/last_verification.json, logs/verification_history.jsonl, scripts/pull_from_gcs_to_nas.ps1 | [fix] Cloud Run 포트(8000) 정합성 및 NAS Pull 스크립트 버킷 접두어 파싱 보완 |
 | 2026-11-21 | .env.example, docs/DEVELOPMENT_PLAN.md, logs/last_verification.json, logs/verification_history.jsonl (+11 files) | [feat] Phase 10(v1.5.0) BigQuery Property Graph 다년도 세무·공사원가 지식 그래프 적재기 및 GQL 분석 구현 |
 | 2026-11-21 | logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/dashboard.py, tests/test_desktop_app.py | [feat] 데스크톱·웹 대시보드에 v1.5 세무감사·상태그래프·BigQuery 지식그래프 통합 모달 추가 |
+| 2026-11-21 | .agents/rules/harness-policy.md, .agents/skills/sololedger-harness/SKILL.md, AGENTS.md, README.md (+17 files) | [feat] 런타임 그래프 자동 직결, 6단계 하네스 그래프 엔지니어링 구축 및 BigQuery ADC 프로비저닝 완성 |
