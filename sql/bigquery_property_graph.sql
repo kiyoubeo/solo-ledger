@@ -167,10 +167,12 @@ GRAPH `{{PROJECT_ID}}.{{DATASET_ID}}.sololedger_tax_graph`
 MATCH (tx:CardTransaction)-[:PURCHASED_AT]->(m:Merchant)
 FILTER EXISTS {
   GRAPH `{{PROJECT_ID}}.{{DATASET_ID}}.sololedger_tax_graph`
-  MATCH (tx1:CardTransaction {account_code: '811'})-[:PURCHASED_AT]->(m)
+  MATCH (tx1:CardTransaction {account_code: '811'})-[:PURCHASED_AT]->(m1:Merchant)
+  FILTER m1.biz_reg_no = m.biz_reg_no
 } AND EXISTS {
   GRAPH `{{PROJECT_ID}}.{{DATASET_ID}}.sololedger_tax_graph`
-  MATCH (tx2:CardTransaction {account_code: '813'})-[:PURCHASED_AT]->(m)
+  MATCH (tx2:CardTransaction {account_code: '813'})-[:PURCHASED_AT]->(m2:Merchant)
+  FILTER m2.biz_reg_no = m.biz_reg_no
 }
 RETURN m.biz_reg_no AS biz_reg_no, m.merchant_name AS merchant_name, COUNT(tx) AS tx_count, SUM(tx.total_amount) AS total_spend
 ORDER BY total_spend DESC

@@ -378,3 +378,125 @@ def test_provision_bigquery_dataset_uses_project_special_groups_access():
     assert all(q.get("timeoutMs") == 25000 for q in query_payloads)
     assert len(poll_calls) == 1
     assert "timeoutMs=25000" in poll_calls[0]
+
+
+def test_bigquery_load_deduplicates_existing_pks_and_falls_back_on_org_policy_403(
+    db_conn, tmp_path
+):
+    cur = db_conn.cursor()
+    _seed_sample_ledger(cur)
+    db_conn.commit()
+
+    cur.execute(
+        "SELECT tx_id FROM card_transactions WHERE reconcile_status != 'CANCELED' ORDER BY tx_id ASC"
+    )
+    all_tx_ids = [str(r[0]) for r in cur.fetchall()]
+    assert len(all_tx_ids) == 4
+    existing_tx_ids = all_tx_ids[:3]
+
+    streamed_tables: Dict[str, List[Dict[str, Any]]] = {}
+    job_payloads: List[Dict[str, Any]] = []
+
+    def _mock_fallback_handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "GET" and path.endswith("/tables/card_transactions/data"):
+            return httpx.Response(
+                200,
+                json={"rows": [{"f": [{"v": tid}]} for tid in existing_tx_ids]},
+            )
+        if request.method == "GET" and path.endswith("/data"):
+            return httpx.Response(200, json={"rows": []})
+
+        if request.method == "POST" and path.endswith("/insertAll"):
+            table_name = path.split("/tables/")[1].split("/insertAll")[0]
+            payload = json.loads(request.content.decode("utf-8"))
+            streamed_tables[table_name] = [row["json"] for row in payload["rows"]]
+            return httpx.Response(200, json={"kind": "bigquery#tableDataInsertAllResponse"})
+
+        if request.method == "POST" and path.endswith("/queries"):
+            return httpx.Response(
+                403,
+                json={
+                    "error": {
+                        "code": 403,
+                        "message": (
+                            "IAM setPolicy failed for Dataset proj:_anon: "
+                            "One or more users named in the policy do not belong to a "
+                            "permitted customer."
+                        ),
+                        "errors": [{"reason": "policyViolation"}],
+                    }
+                },
+            )
+
+        if request.method == "POST" and path.endswith("/jobs"):
+            payload = json.loads(request.content.decode("utf-8"))
+            job_payloads.append(payload)
+            return httpx.Response(
+                200,
+                json={
+                    "jobReference": {
+                        "jobId": "job-gql-403-fallback",
+                        "location": "asia-northeast3",
+                    }
+                },
+            )
+
+        if request.method == "GET" and path.endswith("/queries/job-gql-403-fallback"):
+            return httpx.Response(
+                200,
+                json={
+                    "jobComplete": True,
+                    "schema": {
+                        "fields": [
+                            {"name": "biz_reg_no", "type": "STRING"},
+                            {"name": "merchant_name", "type": "STRING"},
+                            {"name": "tx_count", "type": "INT64"},
+                            {"name": "total_spend", "type": "INT64"},
+                        ]
+                    },
+                    "rows": [
+                        {
+                            "f": [
+                                {"v": VALID_BIZ_NO_DINING},
+                                {"v": "청담한정식"},
+                                {"v": "2"},
+                                {"v": "264000"},
+                            ]
+                        }
+                    ],
+                },
+            )
+
+        return httpx.Response(404, json={"error": f"Unhandled route: {request.method} {path}"})
+
+    storage = LocalStorageBackend(archive_dir=tmp_path / "bq_archive_dedup")
+    res = export_ledger_graph_to_bigquery(
+        cur,
+        request=BigQueryGraphExportRequest(
+            project_id="my-org-proj",
+            dataset_id="sololedger_analytics",
+            year=2026,
+            execute_bigquery_load=True,
+            run_gql_audit=True,
+        ),
+        storage=storage,
+        bq_transport=httpx.MockTransport(_mock_fallback_handler),
+        access_token="mock-bq-token",
+    )
+
+    assert res["bigquery_load"]["loaded_counts"]["card_transactions"] == 1
+    assert len(streamed_tables["card_transactions"]) == 1
+    assert str(streamed_tables["card_transactions"][0]["tx_id"]) == all_tx_ids[3]
+    assert len(job_payloads) == 1
+    q_cfg = job_payloads[0]["configuration"]["query"]
+    assert q_cfg["destinationTable"]["tableId"] == "gql_audit_mixed_811_813"
+    assert q_cfg["writeDisposition"] == "WRITE_TRUNCATE"
+    assert res["gql_audit_rows"] == [
+        {
+            "biz_reg_no": VALID_BIZ_NO_DINING,
+            "merchant_name": "청담한정식",
+            "tx_count": 2,
+            "total_spend": 264_000,
+        }
+    ]

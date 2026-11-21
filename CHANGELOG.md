@@ -73,3 +73,4 @@
 | 2026-11-21 | `feat` | `.agents/rules/harness-policy.md, .agents/skills/sololedger-harness/SKILL.md, AGENTS.md, README.md (+17 files)` | 런타임 그래프 자동 직결, 6단계 하네스 그래프 엔지니어링 구축 및 BigQuery ADC 프로비저닝 완성 | `PASSED` |
 | 2026-11-21 | `fix` | `logs/last_verification.json, logs/verification_history.jsonl, scripts/setup_gcp_bigquery.ps1, src/sololedger/bq_graph_exporter.py (+1 files)` | 신규 PC 환경 GCP CLI·ADC 통합 인증 및 BigQuery 프로비저닝 스크립트 안정화 | `PASSED` |
 | 2026-11-21 | `fix` | `logs/last_verification.json, logs/verification_history.jsonl, scripts/setup_gcp_bigquery.ps1, src/sololedger/bq_graph_exporter.py (+1 files)` | GCP 조직 정책(allowedPolicyMemberDomains) 호환 BigQuery 데이터셋 ACL 및 PowerShell 호출 보완 | `PASSED` |
+| 2026-11-21 | `fix` | `logs/last_verification.json, logs/verification_history.jsonl, sql/bigquery_property_graph.sql, src/sololedger/bq_graph_exporter.py (+1 files)` | BigQuery GQL 서브쿼리 변수 바인딩 수정, 중복 적재 방지 및 조직 정책 쿼리 폴백 구현 | `PASSED` |
