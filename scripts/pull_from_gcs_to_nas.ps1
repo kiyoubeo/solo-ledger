@@ -19,7 +19,7 @@ param(
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-$cleanBucket = $Bucket.Trim().TrimStart("gs://").Trim("/")
+$cleanBucket = ($Bucket.Trim() -replace '^gs://', '').Trim("/")
 $cleanPrefix = $Prefix.Trim().Replace("\", "/").Trim("/")
 $sourceUri = if ($cleanPrefix) { "gs://$cleanBucket/$cleanPrefix" } else { "gs://$cleanBucket" }
 

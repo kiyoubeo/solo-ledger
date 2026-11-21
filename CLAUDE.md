@@ -79,3 +79,4 @@
 | 2026-11-21 | README.md, docs/DEVELOPMENT_PLAN.md, logs/last_verification.json, logs/verification_history.jsonl (+3 files) | [docs] 그래프 엔지니어링 및 Google Cloud 하이브리드 전환 설계서(CLOUD_AND_GRAPH_PLAN.md) 작성 및 Phase 8~10 로드맵 반영 |
 | 2026-11-21 | docs/DEVELOPMENT_PLAN.md, logs/last_verification.json, logs/verification_history.jsonl, pyproject.toml (+11 files) | [feat] Phase 8(v1.3.0) 코어 경량 상태 그래프 엔진(workflow_graph) 및 세무 마감 사전 감사 병렬 그래프(audit_graph) 구현 |
 | 2026-11-21 | .env.example, docs/DEVELOPMENT_PLAN.md, logs/last_verification.json, logs/verification_history.jsonl (+15 files) | [feat] Phase 9(v1.4.0) Google Cloud 서버리스 하이브리드 전환(스토리지 추상화·SQLite 스냅샷 복제·스케줄러 잡·Cloud Run 배포구성) 구현 |
+| 2026-11-21 | deploy/cloudrun.yaml, logs/last_verification.json, logs/verification_history.jsonl, scripts/pull_from_gcs_to_nas.ps1 | [fix] Cloud Run 포트(8000) 정합성 및 NAS Pull 스크립트 버킷 접두어 파싱 보완 |

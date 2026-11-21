@@ -22,7 +22,7 @@ spec:
         - name: sololedger-api
           image: asia-northeast3-docker.pkg.dev/PROJECT_ID/sololedger/sololedger-api:v1.4.0
           ports:
-            - containerPort: 8080
+            - containerPort: 8000
           resources:
             limits:
               cpu: "1"
@@ -75,14 +75,14 @@ spec:
           startupProbe:
             httpGet:
               path: /health
-              port: 8080
+              port: 8000
             initialDelaySeconds: 2
             periodSeconds: 5
             failureThreshold: 6
           livenessProbe:
             httpGet:
               path: /health
-              port: 8080
+              port: 8000
             periodSeconds: 30
 
 # ---------------------------------------------------------------------------
