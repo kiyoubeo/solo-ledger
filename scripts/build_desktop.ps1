@@ -51,6 +51,7 @@ if ($wasAppRunning) {
 $modeFlag = if ($Mode -eq "onefile") { "--onefile" } else { "--onedir" }
 
 $SchemaFile = Join-Path $RepoRoot "sql\schema.sql"
+$BqGraphFile = Join-Path $RepoRoot "sql\bigquery_property_graph.sql"
 $ManualFile = Join-Path $RepoRoot "docs\USER_MANUAL.html"
 
 $pyiArgs = @(
@@ -65,6 +66,7 @@ $pyiArgs = @(
     "--workpath", (Join-Path $BuildDir "pyinstaller"),
     "--distpath", $DistDir,
     "--add-data", "${SchemaFile};sql",
+    "--add-data", "${BqGraphFile};sql",
     "--add-data", "${ManualFile};docs",
     "--add-data", "${IconPath};assets",
     "--hidden-import", "webview.platforms.edgechromium",

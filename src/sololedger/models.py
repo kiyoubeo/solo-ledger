@@ -290,3 +290,28 @@ class CloudSnapshotBackupRequest(BaseModel):
     """Request payload for Cloud Scheduler triggered SQLite snapshot backup job."""
 
     verify_archive_keys: bool = Field(default=True)
+
+
+class BigQueryGraphExportRequest(BaseModel):
+    """Request payload for Phase 10 BigQuery Property Graph export and GQL analytics."""
+
+    project_id: Optional[str] = Field(default=None, description="GCP Project ID")
+    dataset_id: Optional[str] = Field(default=None, description="BigQuery Dataset ID")
+    year: Optional[int] = Field(
+        default=None,
+        ge=2000,
+        le=2100,
+        description="Optional 4-digit tax year filter",
+    )
+    year_month: Optional[str] = Field(
+        default=None,
+        description="Optional YYYYMM filter",
+    )
+    execute_bigquery_load: bool = Field(
+        default=False,
+        description="Stream NDJSON rows to BigQuery REST API v2",
+    )
+    run_gql_audit: bool = Field(
+        default=True,
+        description="Execute GQL risk query when execute_bigquery_load is True",
+    )

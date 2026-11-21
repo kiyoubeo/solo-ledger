@@ -21,6 +21,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sololedger import __version__
 from sololedger.archiver import DuplicateReceiptError, build_receipt_print_title
 from sololedger.audit_graph import run_pre_export_tax_audit
+from sololedger.bq_graph_exporter import export_ledger_graph_to_bigquery
 from sololedger.cloud_sync import (
     backup_sqlite_snapshot_to_storage,
     restore_sqlite_snapshot_from_storage,
@@ -54,6 +55,7 @@ from sololedger.merchant_service import (
 )
 from sololedger.models import (
     AppPushWebhookPayload,
+    BigQueryGraphExportRequest,
     CloudEmailSyncJobRequest,
     CloudSnapshotBackupRequest,
     HometaxCsvImportRequest,
@@ -857,6 +859,26 @@ async def resume_transaction_workflow_endpoint(
             return outcome
         except ValueError as e:
             raise HTTPException(status_code=404, detail=str(e)) from e
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/analytics/bigquery-export")
+async def export_bigquery_property_graph_endpoint(
+    request: Optional[BigQueryGraphExportRequest] = Body(default=None),
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Export ledger entities to BigQuery Property Graph NDJSON and run GQL risk analytics."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        try:
+            return export_ledger_graph_to_bigquery(cursor, request=request)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
     finally:
         conn.close()
 

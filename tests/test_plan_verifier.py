@@ -18,7 +18,7 @@ def test_parse_development_plan_structure():
     assert parsed["phases"][8]["phase"] == "Phase 9"
     assert parsed["phases"][8]["is_completed"] is True
     assert parsed["phases"][9]["phase"] == "Phase 10"
-    assert parsed["phases"][9]["is_completed"] is False
+    assert parsed["phases"][9]["is_completed"] is True
 
 
 def test_verify_plan_traceability_passes_on_current_repo():
@@ -30,9 +30,9 @@ def test_verify_plan_traceability_passes_on_current_repo():
     assert "Phase 4" in report["completed_phases"]
     assert "Phase 8" in report["completed_phases"]
     assert "Phase 9" in report["completed_phases"]
-    assert report["upcoming_phases"] == ["Phase 10"]
-    assert report["next_phase"] is not None
-    assert report["next_phase"]["phase"] == "Phase 10"
+    assert "Phase 10" in report["completed_phases"]
+    assert report["upcoming_phases"] == []
+    assert report["next_phase"] is None
 
 
 def test_verify_plan_detects_missing_deliverable(tmp_path):

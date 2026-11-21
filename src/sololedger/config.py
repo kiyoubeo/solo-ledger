@@ -206,5 +206,20 @@ class Settings:
     def scheduler_secret(self) -> str:
         return os.getenv("SOLOLEDGER_SCHEDULER_SECRET", "").strip()
 
+    @property
+    def bq_project_id(self) -> str:
+        return os.getenv(
+            "SOLOLEDGER_BQ_PROJECT_ID",
+            os.getenv("GOOGLE_CLOUD_PROJECT", ""),
+        ).strip()
+
+    @property
+    def bq_dataset_id(self) -> str:
+        return os.getenv("SOLOLEDGER_BQ_DATASET_ID", "sololedger_analytics").strip()
+
+    @property
+    def bq_access_token(self) -> str:
+        return os.getenv("SOLOLEDGER_BQ_ACCESS_TOKEN", "").strip()
+
 
 settings = Settings()
