@@ -765,6 +765,7 @@ def provision_bigquery_dataset_and_graph(
                     "query": stmt,
                     "useLegacySql": False,
                     "location": clean_loc,
+                    "timeoutMs": 25000,
                 },
             )
             q_resp.raise_for_status()
@@ -851,6 +852,7 @@ def _stream_and_query_bigquery(
                 json={
                     "query": gql_queries["mixed_welfare_entertainment_merchants"],
                     "useLegacySql": False,
+                    "timeoutMs": 25000,
                 },
             )
             q_resp.raise_for_status()

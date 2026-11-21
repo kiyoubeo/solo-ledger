@@ -211,6 +211,7 @@ def test_export_ndjson_and_mock_bigquery_rest_load_and_gql(db_conn, tmp_path):
 
         if request.method == "POST" and path.endswith("/queries"):
             q_payload = json.loads(request.content.decode("utf-8"))
+            assert q_payload.get("timeoutMs") == 25000
             executed_queries.append(q_payload["query"])
             return httpx.Response(
                 200,
