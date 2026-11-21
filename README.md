@@ -53,7 +53,8 @@ SoloLedger/
 ├── .githooks/                  # Git pre-commit 무결성 검증 훅
 ├── docs/
 │   ├── ARCHITECTURE_SPEC.md    # 전체 시스템 아키텍처 및 도메인 설계 명세서
-│   ├── DEVELOPMENT_PLAN.md     # 단계별(Phase 1~5) 마스터 개발 계획서
+│   ├── CLOUD_AND_GRAPH_PLAN.md # 그래프 엔지니어링 및 Google Cloud 하이브리드 전환 설계서
+│   ├── DEVELOPMENT_PLAN.md     # 단계별(Phase 1~10) 마스터 개발 계획서
 │   ├── USER_MANUAL.md          # SoloLedger 사용자 사용 매뉴얼 가이드 (Markdown)
 │   ├── USER_MANUAL.html        # SoloLedger 사용자 사용 매뉴얼 가이드 (웹 브라우저용 HTML)
 │   └── SERVER_SETUP_GUIDE.md   # 중고 노트북 / 미니 PC 24시간 무인 서버 구축 가이드

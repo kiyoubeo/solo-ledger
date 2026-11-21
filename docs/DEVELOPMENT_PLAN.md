@@ -1,8 +1,8 @@
 # SoloLedger 마스터 개발 계획서 (Development Plan)
 
-> **문서 버전**: `v1.0` (작성일: 2026-10-27)
+> **문서 버전**: `v1.1` (최초 작성: 2026-10-27 · 확장 갱신: 2026-11-21)
 > **대상 시스템**: `SoloLedger` (`solo-ledger`) — 1인 법인 전용 회계·경비 원장 및 실시간 법인카드 세무증빙 자동화 시스템
-> **설계 기준 문서**: [docs/ARCHITECTURE_SPEC.md](./ARCHITECTURE_SPEC.md)
+> **설계 기준 문서**: [docs/ARCHITECTURE_SPEC.md](./ARCHITECTURE_SPEC.md) · [docs/CLOUD_AND_GRAPH_PLAN.md](./CLOUD_AND_GRAPH_PLAN.md)
 > **원격 저장소**: `https://github.com/kiyoubeo/solo-ledger.git` (`main`)
 
 ---
@@ -29,8 +29,11 @@ flowchart TD
     P5["Phase 5 (v1.0.0)\n경량 웹 대시보드 · CLI 관리 도구\nDocker Compose 무비용 배포 패키지 & E2E 통합 검증"]
     P6["Phase 6 (v1.1.0)\n순수 Android 네이티브 앱(Kotlin · Compose)\n원격 세무증빙 ZIP 다운로드 · 보안 인증 · 우리카드 푸시 연동"]
     P7["Phase 7 (v1.2.0)\n독립 창 Windows 데스크톱 앱(pywebview · PyInstaller)\n내장 서버 자동 기동·종료 · 무콘솔 SoloLedger.exe 패키징"]
+    P8["Phase 8 (v1.3.0 — 예정)\n코어 경량 상태 그래프 엔진(workflow_graph)\n& 세무 마감 사전 감사 병렬 그래프(audit_graph)"]
+    P9["Phase 9 (v1.4.0 — 예정)\nGoogle Cloud 서버리스 하이브리드(Cloud Run · GCS · Litestream)\n& Cloud Scheduler 트리거 · 로컬 NAS Pull 이중 백업"]
+    P10["Phase 10 (v1.5.0 — 예정)\nBigQuery Property Graph 다년도 세무·공사원가 지식 그래프\n& GQL 리스크 감사 리포트"]
 
-    P1 --> P2 --> P3 --> P4 --> P5 --> P6 --> P7
+    P1 --> P2 --> P3 --> P4 --> P5 --> P6 --> P7 --> P8 --> P9 --> P10
 ```
 
 | 단계 | 목표 버전 | 핵심 개발 범위 | 주요 산출물 (`src/sololedger/`) | 예상 공수 | 현재 상태 |
@@ -42,6 +45,9 @@ flowchart TD
 | **Phase 5** | `v1.0.0` | 경량 웹 대시보드(미분류·소명 관리/파일 업로드), 운영 CLI, Docker Compose 배포 및 NAS(`Z:\`) 백업 자동화 | `dashboard.py`, `cli.py`, `nas_sync.py`, `docker-compose.yml` | 8h | **완료 (`PASSED`)** |
 | **Phase 6** | `v1.1.0` | 순수 Android 전용 앱(`Kotlin + Jetpack Compose`), 원격 세무사 제출 ZIP/CSV 다운로드 API, Bearer 세션 인증 및 우리카드 푸시 수집 | `api.py`, `sms_parser.py`, `android/app/build.gradle.kts` | 12h | **완료 (`PASSED`)** |
 | **Phase 7** | `v1.2.0` | 독립 창 Windows 데스크톱 앱(`pywebview` + `PyInstaller` `SoloLedger.exe`), 내장 FastAPI 생명주기 제어 및 루프백 자동 로그인 | `desktop_app.py`, `config.py`, `scripts/build_desktop.ps1`, `assets/sololedger.ico` | 6h | **완료 (`PASSED`)** |
+| **Phase 8** | `v1.3.0` | 코어 경량 상태 그래프 엔진(전표 소명 순환 루프·체크포인트 중단/재개·세무 마감 사전 감사 병렬 그래프) | `workflow_graph.py`, `audit_graph.py` | 10h | **예정 (`PLANNED`)** |
+| **Phase 9** | `v1.4.0` | Google Cloud 서버리스 하이브리드 전환(`Cloud Run`·`Cloud Storage`·`Litestream`·`Cloud Scheduler`) 및 NAS Pull 백업 | `storage_backend.py`, `cloud_sync.py`, `deploy/cloudrun.yaml` | 10h | **예정 (`PLANNED`)** |
+| **Phase 10** | `v1.5.0` | `BigQuery Property Graph` 다년도 세무·공사원가 지식 그래프 적재기 및 GQL 리스크 감사 리포트 | `bq_graph_exporter.py`, `sql/bigquery_property_graph.sql` | 8h | **예정 (`PLANNED`)** |
 
 ---
 
@@ -179,20 +185,74 @@ flowchart TD
 
 ---
 
+### Phase 8: 코어 경량 상태 그래프 엔진 및 사전 세무 감사 그래프 (`v1.3.0` — 예정)
+- **목적**: [CLOUD_AND_GRAPH_PLAN.md](./CLOUD_AND_GRAPH_PLAN.md) 설계에 따라 외부 중량 프레임워크 없이 `Pydantic` 상태 모델과 SQLite 체크포인트 기반의 경량 그래프 엔진을 구축하여, 미분류·PG 전표의 AI 재검증 순환·소명 중단/재개와 세무 패키지 출력 전 병렬 사전 감사를 자동화합니다.
+- **세부 구현 과제**:
+  1. **경량 상태 그래프 런타임 및 체크포인터 (`workflow_graph.py`, `sql/schema.sql`)**
+     - `GraphState` 공유 상태 모델, 결정론적/AI `Node`, 조건부 라우팅(`ConditionalEdge`) 및 최대 재시도 제한을 포함한 순환(`Cycle`) 실행기 구현.
+     - `workflow_checkpoints` 테이블 추가로 `human_interrupt`(텔레그램·대시보드 소명 대기) 시점 상태 영속화 및 응답 수신 시 `RESUME` 복원 지원.
+  2. **전표 처리·소명 상태 그래프 & 사전 세무 감사 병렬 그래프 (`workflow_graph.py`, `audit_graph.py`)**
+     - 기존 확정 규칙(주유소·SaaS 등)은 AI 호출 없이 즉시 확정(LLM 비용 0원)하고, `999` 미분류·PG 다품목·영수증 불일치 건만 `llm_tax_inference` → `arithmetic_tax_validator` 순환 루프로 라우팅.
+     - [exporters.py](../src/sololedger/exporters.py) 실행 직전 `audit_vat_status`(간이·면세·폐업 오분류), `audit_vehicle_and_card_policy`(승용차 1,500만 원 한도·개인카드 혼입), `audit_missing_evidence`(`813` 참석자·증빙 누락)를 병렬 팬아웃(`Fan-out`)으로 점검 후 조인(`Join`) 판정.
+  3. **워크플로 및 감사 API 엔드포인트 (`api.py`)**
+     - `POST /api/v1/workflows/transactions/{tx_id}/run` (전표 상태 그래프 실행)
+     - `POST /api/v1/workflows/transactions/{tx_id}/resume` (중단된 소명 체크포인트 재개)
+     - `POST /api/v1/audits/tax-pack/{year_month}` (세무 패키지 제출 전 사전 세무 감사 실행)
+- **하네스 검증 테스트 (`tests/test_workflow_graph.py`)**:
+  - 확정 규칙 전표의 LLM 미호출(0-cost) 단축 경로 검증
+  - 산술 불일치·사업자번호 오인식 시 재추출 순환 루프(`Cycle`) 및 최대 재시도 상한 검증
+  - `human_interrupt` 체크포인트 저장 후 `RESUME` 재개 및 세무 감사 병렬 팬아웃/조인 리스크 탐지 검증
+
+---
+
+### Phase 9: Google Cloud 서버리스 하이브리드 전환 및 스토리지 추상화 (`v1.4.0` — 예정)
+- **목적**: 로컬 PC를 24시간 켜 두지 않아도 모바일 푸시·SMS·텔레그램 웹훅과 정기 IMAP 주문 수집이 중단 없이 동작하도록 `Cloud Run (max-instances=1) + Cloud Storage + Litestream + Secret Manager + Cloud Scheduler` 기반 서버리스 허브를 구축하고, 로컬 PC/NAS(`Z:\`) Pull 이중 백업과 공존시킵니다.
+- **세부 구현 과제**:
+  1. **스토리지 백엔드 추상화 (`storage_backend.py`)**
+     - 로컬 파일시스템(`archive/`)과 Google `Cloud Storage` 버킷을 단일 인터페이스로 추상화하여 영수증 원본·정규화 파일·세무 ZIP 패키지의 저장·조회·서명 URL 생성을 투명하게 지원 (`SoloLedger.exe` 로컬 동작 100% 유지).
+  2. **SQLite 서버리스 영속화 및 클라우드 스케줄러 잡 (`cloud_sync.py`, `api.py`, `deploy/cloudrun.yaml`)**
+     - `Cloud Run` `max-instances=1` + `/tmp` SQLite 구동 + `Litestream` 실시간 GCS WAL 복제(또는 기동 스냅샷 복원/업로드) 구성으로 GCS FUSE 잠금 충돌 원천 방지.
+     - `SOLOLEDGER_CLOUD_MODE=true` 시 내부 `while True` 이메일 폴링 루프를 비활성화하고 `Cloud Scheduler` OIDC 호출용 잡 엔드포인트 제공:
+       - `POST /api/v1/cloud/jobs/email-sync` (정기 IMAP 주문/결제 메일 스캔)
+       - `POST /api/v1/cloud/jobs/snapshot-backup` (SQLite 핫 스냅샷 및 GCS 아카이브 검증)
+     - 로컬 엣지 수집기(`phone_adb.py`, Chrome CDP 크롤러) → Cloud Hub 업로드 및 로컬 NAS(`Z:\SoloLedger`) Pull 동기화 스크립트 제공.
+- **하네스 검증 테스트 (`tests/test_cloud_storage.py`)**:
+  - `StorageBackend` 로컬 ↔ Mock GCS 전환 시 증빙 저장·SHA-256 중복 차단·ZIP 다운로드 정합성 검증
+  - `SOLOLEDGER_CLOUD_MODE=true` 환경에서의 스케줄러 잡 인증 및 스냅샷 복원/백업 시뮬레이션 검증
+
+---
+
+### Phase 10: BigQuery Property Graph 다년도 세무·원가 지식 그래프 (`v1.5.0` — 예정)
+- **목적**: 월별·분기별 확정 원장 및 품목 상세 내역이 다년간 축적됨에 따라, Google Cloud `BigQuery` 위에 표준 SQL 기반 속성 그래프(`CREATE PROPERTY GRAPH`)를 구축하여 공사원가(`501`·`511`) 계정 추천 정확도와 다중 홉 세무 리스크 감사 역량을 고도화합니다.
+- **세부 구현 과제**:
+  1. **BigQuery 그래프 스키마 및 GQL 정의 (`sql/bigquery_property_graph.sql`)**
+     - `Merchant`, `CardTransaction`, `OrderLineItem`, `AccountCategory`, `ConstructionSite` 노드 테이블과 `PURCHASED_AT`, `CONTAINS_ITEM`, `CLASSIFIED_AS`, `ATTRIBUTED_TO` 엣지 관계 및 `CREATE PROPERTY GRAPH` DDL 정의.
+  2. **확정 원장 배치 적재기 및 GQL 분석 연동 (`bq_graph_exporter.py`, `api.py`)**
+     - 마감된 원장·품목 데이터를 BigQuery 적재 포맷(NDJSON/Parquet)으로 내보내고 그래프 기반 이상 지출 패턴·유사 품목 계정 추천 결과를 조회.
+     - `POST /api/v1/analytics/bigquery-export` 엔드포인트 구현.
+- **하네스 검증 테스트 (`tests/test_bq_graph.py`)**:
+  - 원장·가맹점·품목 데이터의 그래프 노드/엣지 정규화 직렬화 및 무결성 검증
+  - Mock BigQuery 클라이언트를 이용한 적재·GQL 리스크 요약 파싱 검증
+
+---
+
 ## 4. 디렉토리 및 모듈 확장 설계도
 
 ```text
 SoloLedger/
 ├── .agents/                        # [구축완료] 에이전트 훅(PostToolUse/Stop), 규칙, 하네스 스킬
 ├── .githooks/                      # [구축완료] Git pre-commit 검증 가드
+├── deploy/                         # [Phase 9 예정] Google Cloud Run · Litestream · Scheduler 배포 정의
 ├── docs/
 │   ├── ARCHITECTURE_SPEC.md        # [구축완료] 아키텍처 및 도메인 설계 원본 명세
+│   ├── CLOUD_AND_GRAPH_PLAN.md     # [구축완료] 그래프 엔지니어링 & Google Cloud 하이브리드 전환 설계서
 │   └── DEVELOPMENT_PLAN.md         # [본 문서] 단계별 마스터 개발 계획서
 ├── logs/                           # [구축완료] 변경 로그(dev_changes.jsonl) 및 검증 리포트
 ├── scripts/
 │   └── harness.ps1                 # [구축완료] 통합 하네스 CLI (verify / log / commit-push / status)
 ├── sql/
-│   └── schema.sql                  # [구축완료] 4대 핵심 테이블 DDL 및 세무 규칙 시드
+│   ├── schema.sql                  # [구축완료] 4대 핵심 테이블 DDL 및 세무 규칙 시드
+│   └── bigquery_property_graph.sql # [Phase 10 예정] BigQuery Property Graph DDL 및 GQL 감사 쿼리
 ├── src/sololedger/
 │   ├── __init__.py                 # [Phase 1 완료] 패키지 버전 정의
 │   ├── config.py                   # [Phase 1 완료] 환경변수 및 경로 설정
@@ -202,7 +262,7 @@ SoloLedger/
 │   ├── tax_engine.py               # [Phase 1 완료] 세무 자동 분류 규칙 엔진
 │   ├── reconciler.py               # [Phase 1 완료] 3단계 자동 대사 엔진
 │   ├── notifier.py                 # [Phase 1 완료] 텔레그램 알림 발송기
-│   ├── api.py                      # [Phase 1~5 완료] FastAPI 라우터 및 엔드포인트
+│   ├── api.py                      # [Phase 1~7 완료] FastAPI 라우터 및 엔드포인트
 │   ├── plan_verifier.py            # [하네스 완료] 개발 계획서-코드 정합성 검증 엔진
 │   ├── nts_client.py               # [Phase 2 완료] 국세청 사업자 상태조회 API 및 체크섬 검증
 │   ├── merchant_service.py         # [Phase 2 완료] 가맹점 30일 TTL 캐시 서비스
@@ -214,7 +274,13 @@ SoloLedger/
 │   ├── exporters.py                # [Phase 4 완료] 세무사 제출용 CSV 및 증빙 ZIP 생성기
 │   ├── dashboard.py                # [Phase 5 완료] 경량 웹 대시보드 뷰 및 인라인 전표 수정
 │   ├── nas_sync.py                 # [Phase 5 완료] ipDISK NAS(Z:\) SQLite 온라인 백업 및 증빙 미러링
-│   └── cli.py                      # [Phase 5 완료] 운영 및 정산 CLI 도구
+│   ├── cli.py                      # [Phase 5 완료] 운영 및 정산 CLI 도구
+│   ├── desktop_app.py              # [Phase 7 완료] pywebview 독립 창 데스크톱 실행기
+│   ├── workflow_graph.py           # [Phase 8 예정] 경량 상태 그래프 엔진 및 체크포인터
+│   ├── audit_graph.py              # [Phase 8 예정] 세무 마감 사전 감사 병렬 그래프
+│   ├── storage_backend.py          # [Phase 9 예정] 로컬 / Cloud Storage 통합 스토리지 추상화
+│   ├── cloud_sync.py               # [Phase 9 예정] SQLite 스냅샷 복제 및 Cloud Scheduler 잡
+│   └── bq_graph_exporter.py        # [Phase 10 예정] BigQuery Property Graph 적재 및 GQL 분석기
 └── tests/
     ├── conftest.py                 # [Phase 1 완료] 격리된 테스트 DB 픽스처
     ├── test_schema.py              # [Phase 1 완료] 스키마 및 시드 검증
@@ -228,7 +294,12 @@ SoloLedger/
     ├── test_receipt_dataset.py     # [Phase 3 완료] 한국형 영수증 8대 변칙 골든 데이터셋 테스트
     ├── test_import_export.py       # [Phase 4 완료] 홈택스 임포트·차량한도·세무팩 익스포트 테스트
     ├── test_e2e_lifecycle.py       # [Phase 5 완료] 전 주기 End-to-End 통합 테스트
-    └── test_nas_sync.py            # [Phase 5 완료] NAS(Z:\) 안전 백업 및 증빙 동기화 테스트
+    ├── test_nas_sync.py            # [Phase 5 완료] NAS(Z:\) 안전 백업 및 증빙 동기화 테스트
+    ├── test_mobile_api.py          # [Phase 6 완료] 모바일 인증·우리카드 푸시·원격 ZIP 테스트
+    ├── test_desktop_app.py         # [Phase 7 완료] 데스크톱 번들·루프백 자동로그인·서버 수명주기 테스트
+    ├── test_workflow_graph.py      # [Phase 8 예정] 상태 그래프 순환·체크포인트·사전 감사 테스트
+    ├── test_cloud_storage.py       # [Phase 9 예정] 스토리지 추상화·클라우드 스케줄러 잡 테스트
+    └── test_bq_graph.py            # [Phase 10 예정] BigQuery 지식 그래프 직렬화·GQL 분석 테스트
 ```
 
 ---

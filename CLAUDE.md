@@ -76,3 +76,4 @@
 | 2026-11-12 | docs/USER_MANUAL.html, docs/USER_MANUAL.md, logs/last_verification.json, logs/verification_history.jsonl (+3 files) | [feat] 데스크톱 앱(WebView2) 및 대시보드·매뉴얼에 Ctrl+F 빠른 검색 및 전표 실시간 필터 기능 추가 |
 | 2026-11-12 | docs/USER_MANUAL.html, docs/USER_MANUAL.md, logs/last_verification.json, logs/verification_history.jsonl (+2 files) | [feat] 대시보드 및 데스크톱 원장 스크롤 시 상단 항목 헤더 고정 및 엑셀식 기준행 고정 기능 구현 |
 | 2026-11-12 | logs/last_verification.json, logs/verification_history.jsonl, sql/schema.sql, src/sololedger/dashboard.py (+7 files) | [fix] 거래품목 불확실 가맹점(마트·백화점·PG 등) 미분류 전환 및 주유소 등 특정 사업장 자동분류 정교화 |
+| 2026-11-21 | README.md, docs/DEVELOPMENT_PLAN.md, logs/last_verification.json, logs/verification_history.jsonl (+3 files) | [docs] 그래프 엔지니어링 및 Google Cloud 하이브리드 전환 설계서(CLOUD_AND_GRAPH_PLAN.md) 작성 및 Phase 8~10 로드맵 반영 |

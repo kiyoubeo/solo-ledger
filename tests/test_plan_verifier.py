@@ -6,13 +6,19 @@ from sololedger.plan_verifier import parse_development_plan, verify_plan_traceab
 def test_parse_development_plan_structure():
     parsed = parse_development_plan()
     assert parsed["missing_sections"] == []
-    assert len(parsed["phases"]) == 7
+    assert len(parsed["phases"]) == 10
     assert parsed["phases"][0]["phase"] == "Phase 1"
     assert parsed["phases"][0]["is_completed"] is True
     assert parsed["phases"][5]["phase"] == "Phase 6"
     assert parsed["phases"][5]["is_completed"] is True
     assert parsed["phases"][6]["phase"] == "Phase 7"
     assert parsed["phases"][6]["is_completed"] is True
+    assert parsed["phases"][7]["phase"] == "Phase 8"
+    assert parsed["phases"][7]["is_completed"] is False
+    assert parsed["phases"][8]["phase"] == "Phase 9"
+    assert parsed["phases"][8]["is_completed"] is False
+    assert parsed["phases"][9]["phase"] == "Phase 10"
+    assert parsed["phases"][9]["is_completed"] is False
 
 
 def test_verify_plan_traceability_passes_on_current_repo():
@@ -22,6 +28,9 @@ def test_verify_plan_traceability_passes_on_current_repo():
     assert "Phase 2" in report["completed_phases"]
     assert "Phase 3" in report["completed_phases"]
     assert "Phase 4" in report["completed_phases"]
+    assert report["upcoming_phases"] == ["Phase 8", "Phase 9", "Phase 10"]
+    assert report["next_phase"] is not None
+    assert report["next_phase"]["phase"] == "Phase 8"
 
 
 def test_verify_plan_detects_missing_deliverable(tmp_path):
