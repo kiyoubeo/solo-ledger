@@ -747,6 +747,11 @@ def provision_bigquery_dataset_and_graph(
             json={
                 "datasetReference": {"projectId": clean_proj, "datasetId": clean_ds},
                 "location": clean_loc,
+                "access": [
+                    {"role": "OWNER", "specialGroup": "projectOwners"},
+                    {"role": "WRITER", "specialGroup": "projectWriters"},
+                    {"role": "READER", "specialGroup": "projectReaders"},
+                ],
             },
         )
         if ds_resp.status_code in (200, 201):
@@ -769,6 +774,17 @@ def provision_bigquery_dataset_and_graph(
                 },
             )
             q_resp.raise_for_status()
+            q_data = q_resp.json()
+            job_id = str((q_data.get("jobReference") or {}).get("jobId") or "")
+            loc_ref = str((q_data.get("jobReference") or {}).get("location") or clean_loc)
+            while q_data.get("jobComplete") is False and job_id:
+                poll_resp = client.get(
+                    f"{q_url}/{quote(job_id, safe='')}",
+                    headers=headers,
+                    params={"location": loc_ref, "timeoutMs": 25000},
+                )
+                poll_resp.raise_for_status()
+                q_data = poll_resp.json()
 
     return {
         "status": "provisioned",

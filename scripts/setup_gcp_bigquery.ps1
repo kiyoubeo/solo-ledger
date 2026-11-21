@@ -44,6 +44,31 @@ function Resolve-GcloudBin {
     return $null
 }
 
+function Invoke-Gcloud {
+    param(
+        [Parameter(Mandatory = $true)][string]$ExePath,
+        [Parameter(Mandatory = $true)][string[]]$CommandArgs,
+        [switch]$Quiet,
+        [switch]$AllowFailure
+    )
+    $prevPref = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        if ($Quiet) {
+            & $ExePath @CommandArgs 2>&1 | Out-Null
+        } else {
+            & $ExePath @CommandArgs 2>&1 | ForEach-Object { "$_" }
+        }
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevPref
+    }
+    if (-not $AllowFailure -and $code -ne 0) {
+        throw "gcloud command failed (exit $code): gcloud $($CommandArgs -join ' ')"
+    }
+    return $code
+}
+
 function Set-EnvFileKey([string]$EnvPath, [string]$Key, [string]$Value) {
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     $lines = @()
@@ -107,34 +132,40 @@ $ErrorActionPreference = "Stop"
 $AdcPath = Join-Path $env:APPDATA "gcloud\application_default_credentials.json"
 if ((-not $activeAccount) -and (-not (Test-Path $AdcPath))) {
     Write-Host "[3/6] Launching browser login for gcloud account & Application Default Credentials (ADC)..." -ForegroundColor Yellow
+    $ErrorActionPreference = "Continue"
     & $gcloudExe auth login --update-adc
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $AdcPath)) {
+    $loginExit = $LASTEXITCODE
+    $ErrorActionPreference = "Stop"
+    if ($loginExit -ne 0 -or -not (Test-Path $AdcPath)) {
         throw "gcloud & ADC login failed or credentials file not created at $AdcPath."
     }
 } elseif (-not $activeAccount) {
     Write-Host "[3/6] Launching browser login for gcloud CLI account..." -ForegroundColor Yellow
+    $ErrorActionPreference = "Continue"
     & $gcloudExe auth login
-    if ($LASTEXITCODE -ne 0) {
+    $loginExit = $LASTEXITCODE
+    $ErrorActionPreference = "Stop"
+    if ($loginExit -ne 0) {
         throw "gcloud auth login failed."
     }
 } elseif (-not (Test-Path $AdcPath)) {
     Write-Host "[3/6] Launching browser login for Application Default Credentials (ADC)..." -ForegroundColor Yellow
+    $ErrorActionPreference = "Continue"
     & $gcloudExe auth application-default login
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $AdcPath)) {
+    $loginExit = $LASTEXITCODE
+    $ErrorActionPreference = "Stop"
+    if ($loginExit -ne 0 -or -not (Test-Path $AdcPath)) {
         throw "ADC login failed or credentials file not created at $AdcPath."
     }
 } else {
     Write-Host "[3/6] gcloud account ($activeAccount) & ADC credentials found." -ForegroundColor Green
 }
 
-& $gcloudExe config set project $ProjectId 2>$null | Out-Null
+Invoke-Gcloud -ExePath $gcloudExe -CommandArgs @("config", "set", "project", $ProjectId) -Quiet -AllowFailure | Out-Null
 
 Write-Host "[4/6] Enabling bigquery.googleapis.com API..." -ForegroundColor Yellow
-& $gcloudExe services enable bigquery.googleapis.com --project $ProjectId
-if ($LASTEXITCODE -ne 0) {
-    throw "Failed to enable bigquery.googleapis.com on project $ProjectId."
-}
-& $gcloudExe auth application-default set-quota-project $ProjectId 2>$null | Out-Null
+Invoke-Gcloud -ExePath $gcloudExe -CommandArgs @("services", "enable", "bigquery.googleapis.com", "--project", $ProjectId) | Out-Null
+Invoke-Gcloud -ExePath $gcloudExe -CommandArgs @("auth", "application-default", "set-quota-project", $ProjectId) -Quiet -AllowFailure | Out-Null
 
 Write-Host "[5/6] Updating .env configuration..." -ForegroundColor Yellow
 $RootEnv = Join-Path $RepoRoot ".env"
@@ -209,8 +240,11 @@ except httpx.HTTPStatusError as exc:
     sys.exit(1)
 '@
 
+$ErrorActionPreference = "Continue"
 $pyScript | & $PythonExe -
-if ($LASTEXITCODE -ne 0) {
+$pyExit = $LASTEXITCODE
+$ErrorActionPreference = "Stop"
+if ($pyExit -ne 0) {
     throw "BigQuery provisioning/export python script failed."
 }
 

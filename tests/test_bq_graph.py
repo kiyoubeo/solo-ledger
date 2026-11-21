@@ -11,6 +11,7 @@ from sololedger.bq_graph_exporter import (
     export_ledger_graph_to_bigquery,
     extract_property_graph_entities,
     load_named_gql_queries,
+    provision_bigquery_dataset_and_graph,
     render_bigquery_graph_ddl,
     validate_bq_identifier,
     verify_graph_referential_integrity,
@@ -316,3 +317,64 @@ def test_bigquery_export_api_endpoint(client, db_conn):
     assert body["node_counts"]["card_transactions"] == 4
     assert body["edge_counts"]["edge_attributed_to"] == 2
     assert body["analytics"]["mixed_account_merchants"][0]["merchant_name"] == "청담한정식"
+
+
+def test_provision_bigquery_dataset_uses_project_special_groups_access():
+    dataset_payloads: List[Dict[str, Any]] = []
+    query_payloads: List[Dict[str, Any]] = []
+    poll_calls: List[str] = []
+
+    def _mock_provision_handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "POST" and path.endswith("/datasets"):
+            payload = json.loads(request.content.decode("utf-8"))
+            dataset_payloads.append(payload)
+            return httpx.Response(200, json={"kind": "bigquery#dataset"})
+
+        if request.method == "POST" and path.endswith("/queries"):
+            payload = json.loads(request.content.decode("utf-8"))
+            query_payloads.append(payload)
+            idx = len(query_payloads)
+            if idx == 1:
+                return httpx.Response(
+                    200,
+                    json={
+                        "jobComplete": False,
+                        "jobReference": {"jobId": "job-ddl-1", "location": "asia-northeast3"},
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "jobComplete": True,
+                    "jobReference": {"jobId": f"job-ddl-{idx}", "location": "asia-northeast3"},
+                },
+            )
+
+        if request.method == "GET" and path.endswith("/queries/job-ddl-1"):
+            poll_calls.append(str(request.url))
+            return httpx.Response(200, json={"jobComplete": True})
+
+        return httpx.Response(404, json={"error": f"Unhandled route: {request.method} {path}"})
+
+    res = provision_bigquery_dataset_and_graph(
+        project_id="my-org-proj",
+        dataset_id="sololedger_analytics",
+        location="asia-northeast3",
+        bq_transport=httpx.MockTransport(_mock_provision_handler),
+        access_token="mock-bq-token",
+    )
+
+    assert res["status"] == "provisioned"
+    assert res["dataset_status"] == "created"
+    assert res["ddl_statements_executed"] == 10
+    assert len(dataset_payloads) == 1
+    assert dataset_payloads[0]["access"] == [
+        {"role": "OWNER", "specialGroup": "projectOwners"},
+        {"role": "WRITER", "specialGroup": "projectWriters"},
+        {"role": "READER", "specialGroup": "projectReaders"},
+    ]
+    assert len(query_payloads) == 10
+    assert all(q.get("timeoutMs") == 25000 for q in query_payloads)
+    assert len(poll_calls) == 1
+    assert "timeoutMs=25000" in poll_calls[0]

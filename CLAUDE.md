@@ -84,3 +84,4 @@
 | 2026-11-21 | logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/dashboard.py, tests/test_desktop_app.py | [feat] 데스크톱·웹 대시보드에 v1.5 세무감사·상태그래프·BigQuery 지식그래프 통합 모달 추가 |
 | 2026-11-21 | .agents/rules/harness-policy.md, .agents/skills/sololedger-harness/SKILL.md, AGENTS.md, README.md (+17 files) | [feat] 런타임 그래프 자동 직결, 6단계 하네스 그래프 엔지니어링 구축 및 BigQuery ADC 프로비저닝 완성 |
 | 2026-11-21 | logs/last_verification.json, logs/verification_history.jsonl, scripts/setup_gcp_bigquery.ps1, src/sololedger/bq_graph_exporter.py (+1 files) | [fix] 신규 PC 환경 GCP CLI·ADC 통합 인증 및 BigQuery 프로비저닝 스크립트 안정화 |
+| 2026-11-21 | logs/last_verification.json, logs/verification_history.jsonl, scripts/setup_gcp_bigquery.ps1, src/sololedger/bq_graph_exporter.py (+1 files) | [fix] GCP 조직 정책(allowedPolicyMemberDomains) 호환 BigQuery 데이터셋 ACL 및 PowerShell 호출 보완 |
