@@ -391,3 +391,45 @@ def test_dashboard_sticky_header_and_excel_row_freeze() -> None:
     assert manual_resp.status_code == 200
     assert "thead th {" in manual_resp.text
     assert "position: sticky;" in manual_resp.text
+
+
+def test_dashboard_v15_graph_audit_and_bigquery_modal() -> None:
+    """Verify v1.5.0 dashboard button, Phase 8~10 audit/graph/backup modal, and JS wiring."""
+    from sololedger import __version__
+
+    client = TestClient(app)
+    dash_resp = client.get("/dashboard?year_month=ALL")
+    assert dash_resp.status_code == 200
+    html_text = dash_resp.text
+
+    assert f"SoloLedger 경비·세무증빙 대시보드 (v{__version__})" in html_text
+    assert "🕸️ 세무감사·지식그래프" in html_text
+    assert 'id="graph-audit-modal-backdrop"' in html_text
+    assert 'id="audit-year-month"' in html_text
+    assert 'id="audit-include-exported-chk"' in html_text
+    assert 'id="audit-graph-results"' in html_text
+    assert 'id="wf-tx-id"' in html_text
+    assert 'id="wf-item-hint"' in html_text
+    assert 'id="wf-resume-acc"' in html_text
+    assert 'id="wf-resume-memo"' in html_text
+    assert 'id="wf-graph-results"' in html_text
+    assert 'id="bq-graph-results"' in html_text
+
+    for js_token in (
+        "function openGraphAuditModal(",
+        "function closeGraphAuditModal(",
+        "function onGraphAuditBackdropClick(",
+        "function runPreExportTaxAudit(",
+        "function runTxWorkflowGraph(",
+        "function runTxWorkflowFromModal(",
+        "function resumeTxWorkflowFromModal(",
+        "function runSnapshotBackupNow(",
+        "function runBigQueryGraphExport(",
+        "closeGraphAuditModal();",
+    ):
+        assert js_token in html_text
+
+    assert "{{" not in html_text
+    assert "}}" not in html_text
+    assert html_text.count('class="section-sticky-bar"') == 4
+

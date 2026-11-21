@@ -1405,6 +1405,15 @@ def render_dashboard_html(
     else:
         corp_banner_html = ""
 
+    raw_ym = str(summary.get("year_month") or "").strip()
+    default_audit_ym = (
+        raw_ym
+        if len(raw_ym) == 6 and raw_ym.isdigit()
+        else str(summary.get("end_date") or "")[:7].replace("-", "")
+    )
+    if len(default_audit_ym) != 6 or not default_audit_ym.isdigit():
+        default_audit_ym = datetime.now().strftime("%Y%m")
+
     return f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -1732,6 +1741,8 @@ def render_dashboard_html(
         <button class="secondary" onclick="seedDemoData()">샘플 데이터 생성</button>
         <button class="danger" onclick="resetTestLedger()">테스트 DB 초기화</button>
         <button onclick="backupToNas()">NAS(Z:\\) 백업 동기화</button>
+        <button style="background:#7c3aed; font-weight:700;"
+                onclick="openGraphAuditModal()">🕸️ 세무감사·지식그래프</button>
         <button onclick="exportTaxPack('{summary['year_month']}')">세무사 제출용 ZIP+CSV 생성</button>
       </div>
     </div>
@@ -2414,6 +2425,82 @@ def render_dashboard_html(
           <button class="secondary" onclick="importPhoneSms()">
             📱 USB 휴대폰에서 등록 법인카드 문자만 가져오기
           </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="graph-audit-modal-backdrop" class="modal-backdrop" onclick="onGraphAuditBackdropClick(event)">
+    <div class="modal-card" style="max-width:780px;">
+      <div class="modal-header">
+        <strong>🕸️ v1.5 세무감사 · 상태그래프 소명 · BigQuery 지식그래프</strong>
+        <button class="secondary" onclick="closeGraphAuditModal()">✕ 닫기</button>
+      </div>
+
+      <div class="slip-box" style="background:#faf5ff; border-color:#d8b4fe; margin-bottom:12px;">
+        <div style="font-weight:800; color:#5b21b6; margin-bottom:8px;">
+          🛡️ 세무 마감 사전 감사 그래프 (Phase 8)
+        </div>
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+          <label style="font-size:12px; font-weight:700;">귀속연월:</label>
+          <input type="text" id="audit-year-month" value="{html.escape(default_audit_ym)}"
+                 style="width:95px;" placeholder="YYYYMM" />
+          <label style="display:inline-flex; align-items:center; gap:4px; font-size:12px; cursor:pointer;">
+            <input type="checkbox" id="audit-include-exported-chk" /> 기출고 포함
+          </label>
+          <button id="btn-run-pre-audit" style="background:#7c3aed; font-weight:700;"
+                  onclick="runPreExportTaxAudit()">🔍 사전 세무감사 실행</button>
+        </div>
+        <div id="audit-graph-results" style="margin-top:8px; font-size:12px; color:#334155;">
+          실행 버튼을 누르면 부가세 공제·차량한도·증빙누락 병렬 감사를 수행합니다.
+        </div>
+      </div>
+
+      <div class="slip-box" style="margin-bottom:12px;">
+        <div style="font-weight:800; color:#0f172a; margin-bottom:8px;">
+          🔄 전표 상태그래프 소명 &amp; 체크포인트 재개 (Phase 8)
+        </div>
+        <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">
+          <label style="font-size:12px; font-weight:700;">전표 #:</label>
+          <input type="text" id="wf-tx-id" style="width:85px;" placeholder="예: 12" />
+          <input type="text" id="wf-item-hint" style="width:200px;"
+                 placeholder="품목 또는 미팅 참석자 힌트(선택)" />
+          <button id="btn-run-wf-graph" onclick="runTxWorkflowFromModal()">▶ 상태그래프 실행</button>
+        </div>
+        <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+          <label style="font-size:12px; font-weight:700;">체크포인트 재개:</label>
+          <select id="wf-resume-acc">
+            <option value="501">501 원재료비</option>
+            <option value="511">511 외주용역비</option>
+            <option value="811">811 복리후생비</option>
+            <option value="812">812 여비교통비</option>
+            <option value="813">813 기업업무추진비</option>
+            <option value="822">822 차량유지비</option>
+            <option value="830">830 소모품비</option>
+            <option value="831">831 지급수수료</option>
+            <option value="212">212 비품</option>
+          </select>
+          <input type="text" id="wf-resume-memo" style="width:180px;" placeholder="소명 적요 입력" />
+          <button id="btn-resume-wf-graph" class="secondary"
+                  onclick="resumeTxWorkflowFromModal()">⏯️ 중단 체크포인트 재개</button>
+        </div>
+        <div id="wf-graph-results" style="margin-top:8px; font-size:12px; color:#334155;">
+          전표 번호(#tx_id)를 입력하여 상태그래프 소명을 실행하거나 중단된 체크포인트를 재개할 수 있습니다.
+        </div>
+      </div>
+
+      <div class="slip-box" style="background:#eff6ff; border-color:#93c5fd;">
+        <div style="font-weight:800; color:#1e3a8a; margin-bottom:8px;">
+          ☁️ 스냅샷 백업 &amp; 🕸️ BigQuery 지식그래프 분석 (Phase 9~10)
+        </div>
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+          <button id="btn-run-snapshot-backup" style="background:#0f766e;"
+                  onclick="runSnapshotBackupNow()">☁️ SQLite 스냅샷 백업</button>
+          <button id="btn-run-bq-export" style="background:#1d4ed8;"
+                  onclick="runBigQueryGraphExport()">🕸️ BigQuery 지식그래프 분석</button>
+        </div>
+        <div id="bq-graph-results" style="margin-top:8px; font-size:12px; color:#334155;">
+          스냅샷 백업 결과 및 다년도 BigQuery 지식그래프 분석 요약이 표시됩니다.
         </div>
       </div>
     </div>
@@ -4135,6 +4222,7 @@ def render_dashboard_html(
         closeCoupangModal();
         closeEmailOrderModal();
         closeCorpCardModal();
+        closeGraphAuditModal();
       }}
     }});
 
@@ -4504,6 +4592,291 @@ def render_dashboard_html(
         window.location.href = '/dashboard?year_month=ALL';
       }};
       reader.readAsDataURL(file);
+    }}
+
+    function openGraphAuditModal() {{
+      const bd = document.getElementById('graph-audit-modal-backdrop');
+      if (bd) bd.classList.add('open');
+    }}
+
+    function closeGraphAuditModal() {{
+      const bd = document.getElementById('graph-audit-modal-backdrop');
+      if (bd) bd.classList.remove('open');
+    }}
+
+    function onGraphAuditBackdropClick(ev) {{
+      if (ev.target && ev.target.id === 'graph-audit-modal-backdrop') {{
+        closeGraphAuditModal();
+      }}
+    }}
+
+    async function runPreExportTaxAudit() {{
+      const ymInput = document.getElementById('audit-year-month');
+      const incChk = document.getElementById('audit-include-exported-chk');
+      const outEl = document.getElementById('audit-graph-results');
+      const ym = ymInput ? String(ymInput.value || '').replace(/\\D/g, '') : '';
+      if (ym.length !== 6) {{
+        if (outEl) {{
+          outEl.innerHTML = '<span style="color:#b91c1c; font-weight:700;">'
+            + '⚠️ 귀속연월 6자리(예: 202611)를 입력해 주세요.</span>';
+        }}
+        return;
+      }}
+      if (ymInput) ymInput.value = ym;
+      if (outEl) outEl.textContent = '병렬 세무감사 그래프를 실행하는 중...';
+      try {{
+        const res = await fetch('/api/v1/audits/tax-pack/' + encodeURIComponent(ym), {{
+          method: 'POST',
+          headers: API_HEADERS,
+          body: JSON.stringify({{
+            include_exported: !!(incChk && incChk.checked),
+            auto_revert_unverified_to_queue: false
+          }})
+        }});
+        const d = await res.json();
+        if (!res.ok) {{
+          if (outEl) {{
+            outEl.innerHTML = '<span style="color:#b91c1c;">오류: '
+              + escHtml(d.detail || res.statusText) + '</span>';
+          }}
+          return;
+        }}
+        const badge = d.ready_for_export
+          ? '<span style="background:#dcfce7; color:#166534; padding:2px 7px; border-radius:4px; '
+            + 'font-weight:700;">✅ 세무 제출 준비 완료</span>'
+          : '<span style="background:#fee2e2; color:#b91c1c; padding:2px 7px; border-radius:4px; '
+            + 'font-weight:700;">⚠️ 보완 필요 (' + Number(d.error_count || 0) + '건)</span>';
+        const nodesTxt = Array.isArray(d.visited_nodes) ? d.visited_nodes.join(' → ') : '';
+        let htmlOut = '<div style="margin-bottom:6px;">' + badge
+          + ' · 스캔: <strong>' + Number(d.scanned_count || 0) + '건</strong>'
+          + ' · 오류: <strong>' + Number(d.error_count || 0) + '건</strong>'
+          + ' · 경고: <strong>' + Number(d.warning_count || 0) + '건</strong></div>'
+          + '<div style="font-size:11px; color:#64748b; margin-bottom:6px;">경로: '
+          + escHtml(nodesTxt) + '</div>';
+        const issues = Array.isArray(d.issues) ? d.issues : [];
+        if (issues.length === 0) {{
+          htmlOut += '<div style="color:#166534; font-weight:700;">'
+            + '적발된 세무 리스크 또는 증빙 누락 항목이 없습니다.</div>';
+        }} else {{
+          htmlOut += '<div style="max-height:170px; overflow-y:auto; border:1px solid #e2e8f0; '
+            + 'border-radius:6px; background:#fff; padding:6px;">';
+          issues.slice(0, 30).forEach((iss) => {{
+            const isErr = iss.severity === 'ERROR';
+            const sevColor = isErr ? '#b91c1c' : '#b45309';
+            const txBtn = iss.tx_id
+              ? (' <a href="javascript:void(0)" class="tx-date-link" onclick="openReceiptModal('
+                + Number(iss.tx_id) + ')">#' + Number(iss.tx_id) + '</a>'
+                + ' <button type="button" class="secondary" style="padding:2px 6px; font-size:11px;" '
+                + 'onclick="runTxWorkflowGraph(' + Number(iss.tx_id) + ')">🔄 그래프 소명</button>')
+              : '';
+            htmlOut += '<div style="padding:4px 2px; border-bottom:1px dashed #e2e8f0;">'
+              + '<strong style="color:' + sevColor + ';">[' + escHtml(iss.severity) + '/'
+              + escHtml(iss.category) + ']</strong> '
+              + escHtml(iss.message) + txBtn + '</div>';
+          }});
+          if (issues.length > 30) {{
+            htmlOut += '<div style="color:#64748b; padding:4px;">외 ' + (issues.length - 30) + '건 더 있음</div>';
+          }}
+          htmlOut += '</div>';
+        }}
+        if (outEl) outEl.innerHTML = htmlOut;
+      }} catch (err) {{
+        if (outEl) outEl.textContent = '요청 실패: ' + err;
+      }}
+    }}
+
+    function renderWorkflowResultHtml(d) {{
+      const nodesTxt = Array.isArray(d.visited_nodes) ? d.visited_nodes.join(' → ') : '';
+      const stColor = d.status === 'COMPLETED' ? '#166534' : '#b45309';
+      return '<div style="background:#f8fafc; border:1px solid #cbd5e1; border-radius:6px; padding:8px;">'
+        + '<div>전표 <strong>#' + escHtml(d.tx_id) + '</strong> · 상태: '
+        + '<strong style="color:' + stColor + ';">' + escHtml(d.status) + '</strong>'
+        + (d.checkpoint_id ? ' (체크포인트 #' + escHtml(d.checkpoint_id) + ')' : '') + '</div>'
+        + '<div>분류 계정: <strong>' + escHtml(d.account_code) + ' ' + escHtml(d.account_name) + '</strong>'
+        + ' · VAT: <strong>' + escHtml(d.vat_deduction_type) + '</strong></div>'
+        + (d.interrupt_reason
+            ? '<div style="color:#b45309;">중단 사유: ' + escHtml(d.interrupt_reason) + '</div>'
+            : '')
+        + '<div style="font-size:11px; color:#64748b;">경로: ' + escHtml(nodesTxt) + '</div>'
+        + '</div>';
+    }}
+
+    async function runTxWorkflowGraph(txId, itemHint) {{
+      const txEl = document.getElementById('wf-tx-id');
+      const outEl = document.getElementById('wf-graph-results');
+      if (txEl) txEl.value = String(txId);
+      if (outEl) outEl.textContent = '전표 #' + txId + ' 상태그래프 실행 중...';
+      try {{
+        const bodyObj = {{}};
+        if (itemHint && String(itemHint).trim()) {{
+          bodyObj.item_hint = String(itemHint).trim();
+        }}
+        const res = await fetch('/api/v1/workflows/transactions/' + encodeURIComponent(txId) + '/run', {{
+          method: 'POST',
+          headers: API_HEADERS,
+          body: JSON.stringify(bodyObj)
+        }});
+        const d = await res.json();
+        if (!res.ok) {{
+          if (outEl) {{
+            outEl.innerHTML = '<span style="color:#b91c1c;">오류: '
+              + escHtml(d.detail || res.statusText) + '</span>';
+          }}
+          return;
+        }}
+        if (outEl) outEl.innerHTML = renderWorkflowResultHtml(d);
+      }} catch (err) {{
+        if (outEl) outEl.textContent = '요청 실패: ' + err;
+      }}
+    }}
+
+    async function runTxWorkflowFromModal() {{
+      const txEl = document.getElementById('wf-tx-id');
+      const hintEl = document.getElementById('wf-item-hint');
+      const outEl = document.getElementById('wf-graph-results');
+      const rawId = txEl ? String(txEl.value || '').replace(/[^0-9]/g, '') : '';
+      if (!rawId) {{
+        if (outEl) {{
+          outEl.innerHTML = '<span style="color:#b91c1c;">⚠️ 실행할 전표 번호(#tx_id)를 입력하세요.</span>';
+        }}
+        return;
+      }}
+      await runTxWorkflowGraph(parseInt(rawId, 10), hintEl ? hintEl.value : '');
+    }}
+
+    async function resumeTxWorkflowFromModal() {{
+      const txEl = document.getElementById('wf-tx-id');
+      const accEl = document.getElementById('wf-resume-acc');
+      const memoEl = document.getElementById('wf-resume-memo');
+      const outEl = document.getElementById('wf-graph-results');
+      const rawId = txEl ? String(txEl.value || '').replace(/[^0-9]/g, '') : '';
+      if (!rawId) {{
+        if (outEl) {{
+          outEl.innerHTML = '<span style="color:#b91c1c;">⚠️ 재개할 전표 번호(#tx_id)를 입력하세요.</span>';
+        }}
+        return;
+      }}
+      if (outEl) outEl.textContent = '전표 #' + rawId + ' 체크포인트 재개 중...';
+      try {{
+        const res = await fetch('/api/v1/workflows/transactions/' + encodeURIComponent(rawId) + '/resume', {{
+          method: 'POST',
+          headers: API_HEADERS,
+          body: JSON.stringify({{
+            account_code: accEl ? accEl.value : '830',
+            counterparty_info: memoEl && memoEl.value.trim() ? memoEl.value.trim() : null,
+            learn_rule: false
+          }})
+        }});
+        const d = await res.json();
+        if (!res.ok) {{
+          if (outEl) {{
+            outEl.innerHTML = '<span style="color:#b91c1c;">오류: '
+              + escHtml(d.detail || res.statusText) + '</span>';
+          }}
+          return;
+        }}
+        if (outEl) {{
+          outEl.innerHTML = renderWorkflowResultHtml(d)
+            + '<div style="margin-top:4px; color:#0f766e;">✅ 재개 반영 완료 (새로고침 시 원장에 표시)</div>';
+        }}
+      }} catch (err) {{
+        if (outEl) outEl.textContent = '요청 실패: ' + err;
+      }}
+    }}
+
+    async function runSnapshotBackupNow() {{
+      const outEl = document.getElementById('bq-graph-results');
+      if (outEl) outEl.textContent = 'SQLite 핫 스냅샷 백업을 실행 중...';
+      try {{
+        const res = await fetch('/api/v1/cloud/jobs/snapshot-backup', {{
+          method: 'POST',
+          headers: API_HEADERS,
+          body: JSON.stringify({{ verify_archive_keys: true }})
+        }});
+        const d = await res.json();
+        if (!res.ok) {{
+          if (outEl) {{
+            outEl.innerHTML = '<span style="color:#b91c1c;">오류: '
+              + escHtml(d.detail || res.statusText) + '</span>';
+          }}
+          return;
+        }}
+        const backendName = d.backend || d.storage_backend || 'local';
+        const snapUri = d.latest_uri || d.snapshot_key || '-';
+        const sizeKb = (Number(d.size_bytes || 0) / 1024).toFixed(1);
+        if (outEl) {{
+          outEl.innerHTML = '<div style="background:#f0fdf4; border:1px solid #86efac; '
+            + 'border-radius:6px; padding:8px;">'
+            + '<div><strong>✅ SQLite 스냅샷 백업 완료</strong></div>'
+            + '<div>백엔드: <code>' + escHtml(backendName) + '</code>'
+            + ' · 크기: <strong>' + sizeKb + ' KB</strong>'
+            + ' · 아카이브 키: <strong>' + Number(d.archive_keys_count || 0) + '건</strong></div>'
+            + '<div style="font-size:11px; color:#475569;">경로: <code>'
+            + escHtml(snapUri) + '</code></div></div>';
+        }}
+      }} catch (err) {{
+        if (outEl) outEl.textContent = '요청 실패: ' + err;
+      }}
+    }}
+
+    async function runBigQueryGraphExport() {{
+      const outEl = document.getElementById('bq-graph-results');
+      if (outEl) outEl.textContent = 'BigQuery Property Graph 엔티티 추출 및 리스크 분석 중...';
+      try {{
+        const res = await fetch('/api/v1/analytics/bigquery-export', {{
+          method: 'POST',
+          headers: API_HEADERS,
+          body: JSON.stringify({{ execute_bigquery_load: false }})
+        }});
+        const d = await res.json();
+        if (!res.ok) {{
+          if (outEl) {{
+            outEl.innerHTML = '<span style="color:#b91c1c;">오류: '
+              + escHtml(d.detail || res.statusText) + '</span>';
+          }}
+          return;
+        }}
+        const nc = d.node_counts || {{}};
+        const ec = d.edge_counts || {{}};
+        const nodeSum = Object.values(nc).reduce((a, b) => a + Number(b || 0), 0);
+        const edgeSum = Object.values(ec).reduce((a, b) => a + Number(b || 0), 0);
+        const an = d.analytics || {{}};
+        const mixed = Array.isArray(an.mixed_account_merchants) ? an.mixed_account_merchants : [];
+        const recs = Array.isArray(an.item_account_recommendations) ? an.item_account_recommendations : [];
+        const sites = Array.isArray(an.construction_site_rollup) ? an.construction_site_rollup : [];
+        let extra = '';
+        if (mixed.length > 0) {{
+          extra += '<div>• 혼재 가맹점 예시: '
+            + mixed.slice(0, 3).map((m) => escHtml(m.merchant_name || m.biz_reg_no)).join(', ')
+            + '</div>';
+        }}
+        if (recs.length > 0) {{
+          extra += '<div>• 품목 추천 예시: '
+            + recs.slice(0, 3).map((r) => escHtml(r.normalized_keyword + '→' + r.account_name)).join(', ')
+            + '</div>';
+        }}
+        if (sites.length > 0) {{
+          extra += '<div>• 현장 원가 집계: '
+            + sites.slice(0, 3).map((s) => escHtml(s.site_name) + '('
+              + Number(s.total_site_cost || 0).toLocaleString('ko-KR') + '원)').join(', ')
+            + '</div>';
+        }}
+        if (outEl) {{
+          outEl.innerHTML = '<div style="background:#f8fafc; border:1px solid #93c5fd; '
+            + 'border-radius:6px; padding:8px;">'
+            + '<div><strong>🕸️ BigQuery 지식그래프 내보내기 완료</strong>'
+            + ' (무결성: <strong>' + (d.referential_integrity_ok ? 'PASS' : 'FAIL') + '</strong>)</div>'
+            + '<div>노드: <strong>' + nodeSum + '개</strong> (가맹점 ' + Number(nc.merchants || 0)
+            + ' · 전표 ' + Number(nc.card_transactions || 0) + ' · 품목 '
+            + Number(nc.order_line_items || 0) + ') · 엣지: <strong>' + edgeSum + '개</strong></div>'
+            + '<div>혼재 가맹점 <strong>' + mixed.length + '곳</strong>'
+            + ' · 품목-계정 추천 <strong>' + recs.length + '건</strong>'
+            + ' · 공사현장 집계 <strong>' + sites.length + '건</strong></div>'
+            + extra + '</div>';
+        }}
+      }} catch (err) {{
+        if (outEl) outEl.textContent = '요청 실패: ' + err;
+      }}
     }}
   </script>
 </body>

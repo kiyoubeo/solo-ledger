@@ -69,3 +69,4 @@
 | 2026-11-21 | `feat` | `.env.example, docs/DEVELOPMENT_PLAN.md, logs/last_verification.json, logs/verification_history.jsonl (+15 files)` | Phase 9(v1.4.0) Google Cloud 서버리스 하이브리드 전환(스토리지 추상화·SQLite 스냅샷 복제·스케줄러 잡·Cloud Run 배포구성) 구현 | `PASSED` |
 | 2026-11-21 | `fix` | `deploy/cloudrun.yaml, logs/last_verification.json, logs/verification_history.jsonl, scripts/pull_from_gcs_to_nas.ps1` | Cloud Run 포트(8000) 정합성 및 NAS Pull 스크립트 버킷 접두어 파싱 보완 | `PASSED` |
 | 2026-11-21 | `feat` | `.env.example, docs/DEVELOPMENT_PLAN.md, logs/last_verification.json, logs/verification_history.jsonl (+11 files)` | Phase 10(v1.5.0) BigQuery Property Graph 다년도 세무·공사원가 지식 그래프 적재기 및 GQL 분석 구현 | `PASSED` |
+| 2026-11-21 | `feat` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/dashboard.py, tests/test_desktop_app.py` | 데스크톱·웹 대시보드에 v1.5 세무감사·상태그래프·BigQuery 지식그래프 통합 모달 추가 | `PASSED` |
