@@ -25,6 +25,7 @@ from sololedger.merchant_service import (
 from sololedger.models import OcrExtractionResult, OcrLineItem, ReconcileItem
 from sololedger.nts_client import validate_biz_reg_no_checksum
 from sololedger.reconciler import reconcile_single_item
+from sololedger.storage_backend import StorageBackend
 from sololedger.tax_engine import calculate_supply_and_vat
 from sololedger.telegram_bot import _detect_memo_account_override
 
@@ -140,6 +141,7 @@ async def process_and_link_receipt(
     archive_dir: Optional[Path] = None,
     vision_transport: Optional[httpx.AsyncBaseTransport] = None,
     nts_transport: Optional[httpx.AsyncBaseTransport] = None,
+    storage: Optional[StorageBackend] = None,
 ) -> Dict[str, Any]:
     """Full receipt processing pipeline:
     1. Compute SHA-256 hash and block duplicate uploads.
@@ -361,6 +363,7 @@ async def process_and_link_receipt(
         archived_file_name=archived_file_name,
         archive_dir=archive_dir,
         card_last4=final_tx["card_last4"],
+        storage=storage,
     )
 
     line_items_str = json.dumps(

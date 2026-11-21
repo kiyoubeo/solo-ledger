@@ -1,0 +1,118 @@
+# Google Cloud Run Service Manifest for SoloLedger (Phase 9 Hybrid Hub)
+# - Enforces maxScale=1 so SQLite runs safely on container local /tmp disk without GCS FUSE lock conflicts.
+# - Syncs receipts, exports, and SQLite snapshots to Google Cloud Storage.
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: sololedger-api
+  labels:
+    app: sololedger-api
+    cloud.googleapis.com/location: asia-northeast3
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "1"
+        run.googleapis.com/startup-cpu-boost: "true"
+    spec:
+      containerConcurrency: 20
+      timeoutSeconds: 300
+      containers:
+        - name: sololedger-api
+          image: asia-northeast3-docker.pkg.dev/PROJECT_ID/sololedger/sololedger-api:v1.4.0
+          ports:
+            - containerPort: 8080
+          resources:
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          env:
+            - name: SOLOLEDGER_ENV
+              value: production
+            - name: SOLOLEDGER_CLOUD_MODE
+              value: "true"
+            - name: SOLOLEDGER_STORAGE_BACKEND
+              value: gcs
+            - name: SOLOLEDGER_GCS_BUCKET
+              value: REPLACE_WITH_SOLOLEDGER_BUCKET
+            - name: SOLOLEDGER_GCS_PREFIX
+              value: sololedger
+            - name: SOLOLEDGER_DB_PATH
+              value: /tmp/sololedger_prod.db
+            - name: SOLOLEDGER_ARCHIVE_DIR
+              value: /tmp/archive
+            - name: SOLOLEDGER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sololedger-api-key
+                  key: latest
+            - name: SOLOLEDGER_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: sololedger-admin-password
+                  key: latest
+            - name: SOLOLEDGER_SCHEDULER_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: sololedger-scheduler-secret
+                  key: latest
+            - name: TELEGRAM_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: sololedger-telegram-bot-token
+                  key: latest
+            - name: NTS_API_SERVICE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sololedger-nts-api-key
+                  key: latest
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sololedger-gemini-api-key
+                  key: latest
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 30
+
+# ---------------------------------------------------------------------------
+# Optional Litestream Real-Time WAL Replication Sidecar (uncomment for continuous WAL streaming)
+# ---------------------------------------------------------------------------
+#         - name: litestream
+#           image: litestream/litestream:0.3
+#           args:
+#             - replicate
+#             - /tmp/sololedger_prod.db
+#             - gcs://REPLACE_WITH_SOLOLEDGER_BUCKET/sololedger/litestream/sololedger_prod.db
+#
+# ---------------------------------------------------------------------------
+# Cloud Scheduler Setup Commands (Free Tier: up to 3 jobs/month per account)
+# ---------------------------------------------------------------------------
+# 1) IMAP Order Email Sync every 10 minutes:
+# gcloud scheduler jobs create http sololedger-email-sync \
+#   --location=asia-northeast3 \
+#   --schedule="*/10 * * * *" \
+#   --uri="https://REPLACE_WITH_SERVICE_URL/api/v1/cloud/jobs/email-sync" \
+#   --http-method=POST \
+#   --headers="Content-Type=application/json,X-CloudScheduler-Secret=REPLACE_WITH_SCHEDULER_SECRET" \
+#   --message-body='{"lookback_days":14,"max_messages":200,"backup_after_sync":true}'
+#
+# 2) Daily SQLite Hot Snapshot & Archive Verification (03:00 KST):
+# gcloud scheduler jobs create http sololedger-snapshot-backup \
+#   --location=asia-northeast3 \
+#   --schedule="0 3 * * *" \
+#   --time-zone="Asia/Seoul" \
+#   --uri="https://REPLACE_WITH_SERVICE_URL/api/v1/cloud/jobs/snapshot-backup" \
+#   --http-method=POST \
+#   --headers="Content-Type=application/json,X-CloudScheduler-Secret=REPLACE_WITH_SCHEDULER_SECRET" \
+#   --message-body='{"verify_archive_keys":true}'

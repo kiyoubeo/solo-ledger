@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from sololedger.config import settings
 from sololedger.sms_parser import format_card_label, sanitize_card_folder_name
+from sololedger.storage_backend import StorageBackend, get_storage_backend
 
 CSV_HEADERS = [
     "전표번호",
@@ -37,6 +38,7 @@ def generate_tax_accountant_pack(
     year_month: str,
     force_reexport: bool = False,
     archive_dir: Optional[Path] = None,
+    storage: Optional[StorageBackend] = None,
 ) -> Dict[str, Any]:
     """Generate a monthly CSV ledger + normalized receipt ZIP bundle for the tax accountant.
 
@@ -150,6 +152,12 @@ def generate_tax_accountant_pack(
     zip_path = export_dir / zip_filename
     norm_dir = base_archive / "normalized"
 
+    active_storage = storage or (
+        get_storage_backend(archive_dir=base_archive)
+        if settings.storage_backend_type == "gcs"
+        else None
+    )
+
     bundled_receipts_count = 0
     seen_flat_receipts = set()
     seen_card_receipts = set()
@@ -168,6 +176,11 @@ def generate_tax_accountant_pack(
 
         for c_last4, arch_name in attached_receipt_files:
             candidate = norm_dir / arch_name
+            if not candidate.exists() and active_storage is not None:
+                rel_key = f"normalized/{arch_name}"
+                if active_storage.exists(rel_key):
+                    candidate.parent.mkdir(parents=True, exist_ok=True)
+                    candidate.write_bytes(active_storage.get_bytes(rel_key))
             if candidate.exists():
                 if arch_name not in seen_flat_receipts:
                     zf.write(candidate, arcname=f"receipts/{arch_name}")
@@ -178,6 +191,22 @@ def generate_tax_accountant_pack(
                 if card_arcname not in seen_card_receipts:
                     zf.write(candidate, arcname=card_arcname)
                     seen_card_receipts.add(card_arcname)
+
+    remote_csv_uri: Optional[str] = None
+    remote_zip_uri: Optional[str] = None
+    if active_storage is not None and (
+        storage is not None or active_storage.backend_name == "gcs"
+    ):
+        remote_csv_uri = active_storage.put_bytes(
+            f"exports/{csv_filename}",
+            csv_bytes,
+            content_type="text/csv; charset=utf-8",
+        )
+        remote_zip_uri = active_storage.put_bytes(
+            f"exports/{zip_filename}",
+            zip_path.read_bytes(),
+            content_type="application/zip",
+        )
 
     if exported_tx_ids:
         placeholders = ",".join("?" for _ in exported_tx_ids)
@@ -191,7 +220,7 @@ def generate_tax_accountant_pack(
             [year_month, *exported_tx_ids],
         )
 
-    return {
+    result: Dict[str, Any] = {
         "status": "exported",
         "year_month": year_month,
         "exported_count": len(exported_tx_ids),
@@ -204,3 +233,8 @@ def generate_tax_accountant_pack(
         "zip_file_path": str(zip_path),
         "card_breakdown": list(card_stats_map.values()),
     }
+    if remote_csv_uri:
+        result["remote_csv_uri"] = remote_csv_uri
+    if remote_zip_uri:
+        result["remote_zip_uri"] = remote_zip_uri
+    return result

@@ -276,3 +276,17 @@ class TaxAuditRequest(BaseModel):
         default=False,
         description="Mark rows with critical errors as PENDING_CHECK",
     )
+
+
+class CloudEmailSyncJobRequest(BaseModel):
+    """Request payload for Cloud Scheduler triggered IMAP email sync job."""
+
+    lookback_days: int = Field(default=14, ge=1, le=365)
+    max_messages: int = Field(default=200, ge=1, le=1000)
+    backup_after_sync: bool = Field(default=True)
+
+
+class CloudSnapshotBackupRequest(BaseModel):
+    """Request payload for Cloud Scheduler triggered SQLite snapshot backup job."""
+
+    verify_archive_keys: bool = Field(default=True)

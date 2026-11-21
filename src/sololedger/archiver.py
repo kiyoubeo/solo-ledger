@@ -8,6 +8,22 @@ from typing import Optional, Tuple
 
 from sololedger.config import settings
 from sololedger.sms_parser import sanitize_card_folder_name
+from sololedger.storage_backend import StorageBackend, get_storage_backend
+
+
+def _guess_content_type(filename: str) -> str:
+    ext = Path(filename or "").suffix.lower()
+    if ext == ".pdf":
+        return "application/pdf"
+    if ext == ".png":
+        return "image/png"
+    if ext in (".html", ".htm"):
+        return "text/html; charset=utf-8"
+    if ext == ".gif":
+        return "image/gif"
+    if ext == ".webp":
+        return "image/webp"
+    return "image/jpeg"
 
 
 class DuplicateReceiptError(ValueError):
@@ -110,6 +126,7 @@ def save_receipt_files(
     archived_file_name: str,
     archive_dir: Optional[Path] = None,
     card_last4: Optional[str] = None,
+    storage: Optional[StorageBackend] = None,
 ) -> Tuple[str, str]:
     """Persist original, normalized, and per-card categorized receipt files under archive directory."""
     base_dir = archive_dir or settings.archive_dir
@@ -130,5 +147,32 @@ def save_receipt_files(
         card_dir = norm_dir / "by_card" / card_folder
         card_dir.mkdir(parents=True, exist_ok=True)
         (card_dir / archived_file_name).write_bytes(content)
+
+    active_storage = storage or (
+        get_storage_backend(archive_dir=base_dir)
+        if settings.storage_backend_type == "gcs"
+        else None
+    )
+    if active_storage is not None and (
+        storage is not None or active_storage.backend_name == "gcs"
+    ):
+        norm_mime = _guess_content_type(archived_file_name)
+        active_storage.put_bytes(
+            f"original/{safe_orig_name}",
+            content,
+            content_type=_guess_content_type(safe_orig_name),
+        )
+        active_storage.put_bytes(
+            f"normalized/{archived_file_name}",
+            content,
+            content_type=norm_mime,
+        )
+        if card_last4:
+            card_folder = sanitize_card_folder_name(card_last4)
+            active_storage.put_bytes(
+                f"normalized/by_card/{card_folder}/{archived_file_name}",
+                content,
+                content_type=norm_mime,
+            )
 
     return str(orig_path), str(norm_path)

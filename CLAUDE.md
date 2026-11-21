@@ -78,3 +78,4 @@
 | 2026-11-12 | logs/last_verification.json, logs/verification_history.jsonl, sql/schema.sql, src/sololedger/dashboard.py (+7 files) | [fix] 거래품목 불확실 가맹점(마트·백화점·PG 등) 미분류 전환 및 주유소 등 특정 사업장 자동분류 정교화 |
 | 2026-11-21 | README.md, docs/DEVELOPMENT_PLAN.md, logs/last_verification.json, logs/verification_history.jsonl (+3 files) | [docs] 그래프 엔지니어링 및 Google Cloud 하이브리드 전환 설계서(CLOUD_AND_GRAPH_PLAN.md) 작성 및 Phase 8~10 로드맵 반영 |
 | 2026-11-21 | docs/DEVELOPMENT_PLAN.md, logs/last_verification.json, logs/verification_history.jsonl, pyproject.toml (+11 files) | [feat] Phase 8(v1.3.0) 코어 경량 상태 그래프 엔진(workflow_graph) 및 세무 마감 사전 감사 병렬 그래프(audit_graph) 구현 |
+| 2026-11-21 | .env.example, docs/DEVELOPMENT_PLAN.md, logs/last_verification.json, logs/verification_history.jsonl (+15 files) | [feat] Phase 9(v1.4.0) Google Cloud 서버리스 하이브리드 전환(스토리지 추상화·SQLite 스냅샷 복제·스케줄러 잡·Cloud Run 배포구성) 구현 |

@@ -172,5 +172,39 @@ class Settings:
         custom = os.getenv("SOLOLEDGER_SCHEMA_PATH")
         return Path(custom) if custom else DEFAULT_SCHEMA_PATH
 
+    @property
+    def cloud_mode(self) -> bool:
+        explicit = os.getenv("SOLOLEDGER_CLOUD_MODE", "").strip().lower()
+        if explicit in ("1", "true", "yes", "on"):
+            return True
+        if explicit in ("0", "false", "no", "off"):
+            return False
+        return bool(os.getenv("K_SERVICE", "").strip())
+
+    @property
+    def gcs_bucket(self) -> str:
+        return os.getenv("SOLOLEDGER_GCS_BUCKET", "").strip()
+
+    @property
+    def gcs_prefix(self) -> str:
+        return os.getenv("SOLOLEDGER_GCS_PREFIX", "sololedger").strip().strip("/")
+
+    @property
+    def gcs_access_token(self) -> str:
+        return os.getenv("SOLOLEDGER_GCS_ACCESS_TOKEN", "").strip()
+
+    @property
+    def storage_backend_type(self) -> str:
+        explicit = os.getenv("SOLOLEDGER_STORAGE_BACKEND", "").strip().lower()
+        if explicit in ("local", "gcs"):
+            return explicit
+        if self.cloud_mode and bool(self.gcs_bucket):
+            return "gcs"
+        return "local"
+
+    @property
+    def scheduler_secret(self) -> str:
+        return os.getenv("SOLOLEDGER_SCHEDULER_SECRET", "").strip()
+
 
 settings = Settings()

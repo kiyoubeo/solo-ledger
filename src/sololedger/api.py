@@ -21,6 +21,11 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sololedger import __version__
 from sololedger.archiver import DuplicateReceiptError, build_receipt_print_title
 from sololedger.audit_graph import run_pre_export_tax_audit
+from sololedger.cloud_sync import (
+    backup_sqlite_snapshot_to_storage,
+    restore_sqlite_snapshot_from_storage,
+    run_cloud_email_sync_job,
+)
 from sololedger.config import PROJECT_ROOT, resolve_bundled_path, settings
 from sololedger.dashboard import (
     build_dashboard_summary,
@@ -49,6 +54,8 @@ from sololedger.merchant_service import (
 )
 from sololedger.models import (
     AppPushWebhookPayload,
+    CloudEmailSyncJobRequest,
+    CloudSnapshotBackupRequest,
     HometaxCsvImportRequest,
     MerchantVerifyRequest,
     MobileLoginRequest,
@@ -87,6 +94,7 @@ from sololedger.sms_parser import (
     sanitize_card_folder_name,
     save_corp_card_policy,
 )
+from sololedger.storage_backend import get_storage_backend
 from sololedger.tax_engine import calculate_supply_and_vat, evaluate_tax_rules
 from sololedger.telegram_bot import handle_telegram_update
 from sololedger.vehicle_tracker import get_vehicle_expense_summary
@@ -132,13 +140,22 @@ async def _background_email_watcher_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize SQLite schema, seed rules, and start background email watcher on startup."""
+    """Initialize SQLite schema, seed rules, and start watcher when not in cloud mode."""
+    if settings.cloud_mode and settings.storage_backend_type == "gcs" and settings.gcs_bucket:
+        try:
+            restore_sqlite_snapshot_from_storage()
+        except Exception:
+            pass
     init_db()
-    watcher_task = asyncio.create_task(_background_email_watcher_loop())
+    watcher_task: Optional[asyncio.Task] = None
+    if not settings.cloud_mode:
+        watcher_task = asyncio.create_task(_background_email_watcher_loop())
     try:
+        app.state.email_watcher_active = watcher_task is not None
         yield
     finally:
-        watcher_task.cancel()
+        if watcher_task is not None:
+            watcher_task.cancel()
 
 
 app = FastAPI(
@@ -253,6 +270,24 @@ def _verify_api_key(
 ) -> None:
     if not _has_valid_auth(x_api_key, sololedger_api_key):
         raise HTTPException(status_code=401, detail="Unauthorized API key or session token.")
+
+
+def _verify_cloud_job_auth(
+    x_api_key: Optional[str] = None,
+    sololedger_api_key: Optional[str] = None,
+    x_cloudscheduler_secret: Optional[str] = None,
+) -> None:
+    """Authenticate Cloud Scheduler jobs via API key/Bearer token or shared scheduler secret."""
+    if _has_valid_auth(x_api_key, sololedger_api_key):
+        return
+    expected_secret = settings.scheduler_secret
+    if expected_secret and x_cloudscheduler_secret:
+        if hmac.compare_digest(
+            x_cloudscheduler_secret.strip().encode("utf-8"),
+            expected_secret.encode("utf-8"),
+        ):
+            return
+    raise HTTPException(status_code=401, detail="Unauthorized cloud scheduler job invocation.")
 
 
 def _verify_read_access() -> None:
@@ -1219,6 +1254,47 @@ async def dashboard_summary_endpoint(
         )
     finally:
         conn.close()
+
+
+@app.post("/api/v1/cloud/jobs/email-sync")
+async def cloud_email_sync_job_endpoint(
+    request: Optional[CloudEmailSyncJobRequest] = Body(default=None),
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+    x_cloudscheduler_secret: Optional[str] = Header(default=None),
+):
+    """Cloud Scheduler endpoint to execute one-shot IMAP order email sync."""
+    _verify_cloud_job_auth(x_api_key, sololedger_api_key, x_cloudscheduler_secret)
+    req = request or CloudEmailSyncJobRequest()
+    init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        return run_cloud_email_sync_job(
+            cursor,
+            lookback_days=req.lookback_days,
+            max_messages=req.max_messages,
+            backup_after_sync=req.backup_after_sync,
+        )
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/cloud/jobs/snapshot-backup")
+async def cloud_snapshot_backup_job_endpoint(
+    request: Optional[CloudSnapshotBackupRequest] = Body(default=None),
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+    x_cloudscheduler_secret: Optional[str] = Header(default=None),
+):
+    """Cloud Scheduler endpoint to upload a hot SQLite snapshot to StorageBackend."""
+    _verify_cloud_job_auth(x_api_key, sololedger_api_key, x_cloudscheduler_secret)
+    req = request or CloudSnapshotBackupRequest()
+    backup_res = backup_sqlite_snapshot_to_storage()
+    if req.verify_archive_keys:
+        store = get_storage_backend()
+        backup_res["archive_keys_count"] = len(store.list_keys())
+    return backup_res
 
 
 @app.post("/api/v1/system/backup-nas")
