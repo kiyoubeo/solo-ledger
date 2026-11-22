@@ -51,6 +51,7 @@ from sololedger.reconciler import reconcile_single_item
 from sololedger.sms_parser import (
     format_card_label,
     is_allowed_corporate_card,
+    is_blocked_personal_card_code,
     load_corp_card_policy,
     register_corp_card,
     sanitize_card_folder_name,
@@ -1194,6 +1195,8 @@ _ONLINE_OR_PG_MERCHANT_KEYWORDS = (
     "kicc",
     "모빌리언스",
     "스마트로",
+    "케이에스넷",
+    "ksnet",
     "갤럭시아",
     "세틀뱅크",
     "11번가",
@@ -1230,6 +1233,59 @@ def _norm_alnum_ko(text: str) -> str:
     return re.sub(r"[^0-9a-zA-Z가-힣]+", "", str(text or "")).lower()
 
 
+_CARD_ISSUER_TOKEN_MAP = (
+    ("국민", "국민"),
+    ("kb", "국민"),
+    ("현대", "현대"),
+    ("롯데", "롯데"),
+    ("우리", "우리"),
+    ("신한", "신한"),
+    ("삼성", "삼성"),
+    ("하나", "하나"),
+    ("농협", "농협"),
+    ("nh", "농협"),
+    ("기업", "기업"),
+    ("ibk", "기업"),
+)
+
+_CARD_ISSUER_CONFLICT_SET = {"국민", "현대", "롯데", "삼성", "신한", "하나", "농협", "우리"}
+
+
+def _extract_card_issuer_canonical(text: str) -> str:
+    """Return canonical Korean card issuer name from an issuer hint or card label."""
+    low = str(text or "").strip().lower()
+    if not low:
+        return ""
+    for token, canonical in _CARD_ISSUER_TOKEN_MAP:
+        if token in low:
+            return canonical
+    return ""
+
+
+_STALE_POLLUTED_MEMO_MARKERS = (
+    "구매를 확정",
+    "자동구매확정",
+    "발송 안내",
+    "KSNET을 통하여 결제",
+    "SmartroPay 결제",
+)
+
+
+def _extract_hint_card_last4(hint: str) -> str:
+    """Extract masked/last-4 card digits from a payment method hint, preferring 4-group card tails."""
+    text = str(hint or "").strip()
+    if not text:
+        return ""
+    m_masked = re.search(
+        r"\d{4}[-\s]+[\dXx*]{2,4}[-\s]+[\dXx*]{2,4}[-\s]+((?=\S*\d)[\d*]{4})",
+        text,
+    )
+    if m_masked:
+        return m_masked.group(1)
+    m_digits = re.search(r"(?:[()\-\s]|^)(\d[\d*]{3})(?:[()\s]|$)", text)
+    return m_digits.group(1) if m_digits else ""
+
+
 def _resolve_card_last4_from_issuer(
     cursor: sqlite3.Cursor,
     card_hint: str,
@@ -1237,29 +1293,11 @@ def _resolve_card_last4_from_issuer(
 ) -> str:
     """Resolve card_last4 from PG email issuer hint ('국민', '현대', etc.) or merchant history."""
     hint = str(card_hint or "").strip()
-    m_digits = re.search(r"(\d[\d\*]{3})", hint)
-    if m_digits:
-        return m_digits.group(1)
+    extracted_last4 = _extract_hint_card_last4(hint)
+    if extracted_last4:
+        return extracted_last4
 
-    issuer_kw = ""
-    hint_low = hint.lower()
-    for token, canonical in (
-        ("국민", "국민"),
-        ("kb", "국민"),
-        ("현대", "현대"),
-        ("롯데", "롯데"),
-        ("우리", "우리"),
-        ("신한", "신한"),
-        ("삼성", "삼성"),
-        ("하나", "하나"),
-        ("농협", "농협"),
-        ("nh", "농협"),
-        ("기업", "기업"),
-        ("ibk", "기업"),
-    ):
-        if token in hint_low:
-            issuer_kw = canonical
-            break
+    issuer_kw = _extract_card_issuer_canonical(hint)
 
     cursor.execute(
         """
@@ -1417,6 +1455,7 @@ def reconcile_scraped_ecommerce_orders(
 
     order_rows = orders_list if orders_list is not None else extract_coupang_orders_from_content(content)
 
+    corp_policy = load_corp_card_policy(archive_dir)
     updated_tx_ids: List[int] = []
     created_tx_ids: List[int] = []
     newly_stated_tx_ids: List[int] = []
@@ -1443,7 +1482,17 @@ def reconcile_scraped_ecommerce_orders(
 
         shop_name = str(row.get("상점명") or row.get("가맹점명") or "").strip()
         app_no = str(row.get("승인번호") or "").strip()
-        card_hint = str(row.get("카드사") or row.get("결제기관") or "").strip()
+        card_hint = str(
+            row.get("카드사") or row.get("결제기관") or row.get("결제수단") or ""
+        ).strip()
+        hint_last4 = _extract_hint_card_last4(card_hint)
+        hint_issuer = _extract_card_issuer_canonical(card_hint)
+        if (
+            corp_policy.get("corp_only_mode")
+            and hint_last4
+            and is_blocked_personal_card_code(hint_last4, archive_dir=archive_dir)
+        ):
+            continue
         clean_biz_no = clean_valid_biz_reg_no(
             str(row.get("사업자번호") or row.get("biz_reg_no") or "")
         )
@@ -1472,6 +1521,9 @@ def reconcile_scraped_ecommerce_orders(
                   OR raw_merchant_name LIKE '%나이스%'
                   OR raw_merchant_name LIKE '%다날%'
                   OR raw_merchant_name LIKE '%페이코%'
+                  OR raw_merchant_name LIKE '%케이에스넷%'
+                  OR raw_merchant_name LIKE '%스마트로%'
+                  OR raw_merchant_name LIKE '%한국정보통신%'
                   OR raw_merchant_name LIKE '%11번가%'
                   OR raw_merchant_name LIKE '%지마켓%' THEN 0
                 ELSE 1
@@ -1496,6 +1548,21 @@ def reconcile_scraped_ecommerce_orders(
             norm_cand = _norm_merchant_token(cand_merch)
             cand_app = str(cand["approval_no"] or "").strip()
             is_app_match = bool(app_no and cand_app == app_no)
+            if corp_policy.get("corp_only_mode") and not is_app_match:
+                cand_last4 = str(cand["card_last4"] or "").strip()
+                if (
+                    cand_last4
+                    and cand_last4 != "0000"
+                    and hint_issuer in _CARD_ISSUER_CONFLICT_SET
+                ):
+                    cand_issuer = _extract_card_issuer_canonical(
+                        format_card_label(cand_last4, archive_dir=archive_dir)
+                    )
+                    if (
+                        cand_issuer in _CARD_ISSUER_CONFLICT_SET
+                        and cand_issuer != hint_issuer
+                    ):
+                        continue
             is_shop_match = bool(
                 norm_shop
                 and norm_cand
@@ -1513,7 +1580,6 @@ def reconcile_scraped_ecommerce_orders(
         is_newly_created = False
         biz_backfilled = False
         if tx_row is None:
-            corp_policy = load_corp_card_policy(archive_dir)
             if (
                 corp_policy.get("corp_only_mode")
                 and corp_policy.get("block_unmatched_email_orders", True)
@@ -1673,7 +1739,8 @@ def reconcile_scraped_ecommerce_orders(
         mp_changed = bool(mp_seller and mp_seller != prev_mp_seller)
 
         # Prevent truncated PG 1-liners from overwriting a fuller or multi-item existing statement
-        if prev_stmt and (not row_line_items or len(row_line_items) <= 1):
+        prev_is_polluted = any(marker in prev_memo for marker in _STALE_POLLUTED_MEMO_MARKERS)
+        if prev_stmt and not prev_is_polluted and (not row_line_items or len(row_line_items) <= 1):
             keep_existing = False
             if (
                 re.search(r"포함\s*총\s*\d+", final_item_name)
@@ -2014,7 +2081,8 @@ def generate_electronic_statement_for_tx(
     resolved_lines: Optional[List[Dict[str, Any]]] = line_items
     cursor.execute(
         """
-        SELECT line_items_json, raw_ocr_response FROM receipt_ocr_metadata
+        SELECT archived_file_name, line_items_json, raw_ocr_response
+        FROM receipt_ocr_metadata
         WHERE tx_id = ? AND source_channel = 'STATEMENT'
         ORDER BY receipt_id DESC LIMIT 1
         """,
@@ -2171,6 +2239,15 @@ def generate_electronic_statement_for_tx(
         archive_dir=archive_dir,
         card_last4=c_code,
     )
+
+    if old_stmt_meta:
+        old_arch_name = str(old_stmt_meta["archived_file_name"] or "").strip()
+        if old_arch_name and old_arch_name != arch_name:
+            norm_root = (archive_dir or settings.archive_dir) / "normalized"
+            if norm_root.exists():
+                for stale_p in norm_root.rglob(old_arch_name):
+                    if stale_p.is_file():
+                        stale_p.unlink(missing_ok=True)
 
     cursor.execute(
         "DELETE FROM receipt_ocr_metadata WHERE tx_id = ? AND source_channel IN ('AUTO_SLIP', 'STATEMENT')",

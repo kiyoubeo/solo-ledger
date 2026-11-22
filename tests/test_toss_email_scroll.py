@@ -1,5 +1,6 @@
 """Unit and integration tests for Toss Payments corporate card email scrolling and reconciliation."""
 
+import base64
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -11,14 +12,19 @@ from sololedger.api import app
 from sololedger.config import settings
 from sololedger.db import get_connection, init_db
 from sololedger.email_watcher import (
+    _discover_imap_scroll_mailboxes,
     _extract_eml_parts,
+    _resolve_account_email_address,
     classify_toss_card_ownership,
     extract_orders_from_email_content,
     load_email_watcher_config,
+    parse_raw_email_bytes_or_text,
     parse_toss_payments_email,
     save_email_watcher_config,
     scroll_imap_toss_payments_emails,
 )
+from sololedger.importers import _normalize_datetime_str
+from sololedger.scraper_service import reconcile_scraped_ecommerce_orders
 from sololedger.sms_parser import (
     is_blocked_personal_card_code,
     match_card_code_pattern,
@@ -26,6 +32,7 @@ from sololedger.sms_parser import (
     register_corp_card,
     save_corp_card_policy,
 )
+from sololedger.telegram_bot import _detect_memo_account_override
 
 
 def _build_toss_eml_bytes(
@@ -843,4 +850,352 @@ def test_unified_year_email_sync_paginates_beyond_600_and_includes_toss_slips(
     assert toss_row["biz_reg_no"] == "1208102922"
     assert "(주)클라우드솔루션" in str(toss_row["counterparty_info"] or "")
     conn_check.close()
+
+
+def test_normalize_datetime_formats() -> None:
+    assert _normalize_datetime_str("2026.3.15. 20:20:33") == "2026-03-15 20:20:33"
+    assert _normalize_datetime_str("2026년 02월28일 17시58분") == "2026-02-28 17:58:00"
+    assert _normalize_datetime_str("2026. 1. 13. PM 5시 32분 51초") == "2026-01-13 17:32:51"
+
+
+def test_imap_mailbox_discovery_large_arc_and_recipient_resolution() -> None:
+    class _FakeNaverImap:
+        def list(self) -> tuple[str, List[bytes]]:
+            return (
+                "OK",
+                [
+                    b'(\\HasNoChildren) "/" "INBOX"',
+                    b'(\\HasNoChildren) "/" "&zK2tbAC3rLDIHA-"',
+                    b'(\\HasNoChildren) "/" "&1QS4XLqowVg-"',
+                    b'(\\Trash \\HasNoChildren) "/" "Trash"',
+                    b'(\\Junk \\HasNoChildren) "/" "Spam"',
+                    b'(\\Noselect \\HasChildren) "/" "[Folder]"',
+                ],
+            )
+
+    discovered = _discover_imap_scroll_mailboxes(_FakeNaverImap(), "INBOX")
+    assert discovered == ["INBOX", "&zK2tbAC3rLDIHA-"]
+    assert (
+        _resolve_account_email_address(
+            {"email_address": "pommoq", "imap_host": "imap.naver.com", "provider": "NAVER"}
+        )
+        == "pommoq@naver.com"
+    )
+
+    arc_pad = "ARC-Seal: i=1; a=rsa-sha256; b=" + ("A" * 2400)
+    html_body = (
+        "<html><body><table>"
+        "<tr><th>주문일자</th><td>2026.3.15. 20:20:33</td></tr>"
+        "<tr><th>구매 상세내역</th><th>쿠팡가</th><th>수량</th>"
+        "<th>구매금액</th><th>판매자</th></tr>"
+        "<tr><td>사무용 라벨 롤지</td><td>19,800원</td><td>1</td>"
+        "<td>19,800원</td><td>쿠팡(주)</td></tr>"
+        "<tr><th>총 결제금액</th><td>19,800원</td></tr>"
+        "</table></body></html>"
+    )
+    b64_html = base64.b64encode(html_body.encode("utf-8")).decode("ascii")
+    raw_eml = (
+        f"{arc_pad}\r\n"
+        "From: 쿠팡 <noreply@coupang.com>\r\n"
+        "Subject: [쿠팡] 주문이 완료되었습니다.\r\n"
+        "Date: Sun, 15 Mar 2026 20:21:00 +0900\r\n"
+        "MIME-Version: 1.0\r\n"
+        'Content-Type: text/html; charset="utf-8"\r\n'
+        "Content-Transfer-Encoding: base64\r\n"
+        "\r\n"
+        f"{b64_html}\r\n"
+    ).encode("utf-8")
+    parsed = parse_raw_email_bytes_or_text(raw_eml)
+    assert len(parsed) == 1
+    assert parsed[0]["결제금액"] == 19800
+    assert parsed[0]["주문일시"].startswith("2026-03-15")
+
+
+def test_naverpay_point_split_proration_and_noise_filtering() -> None:
+    html_split = (
+        "<html><body>"
+        "<p>고객님께서 네이버페이로 주문하신 내역입니다.</p>"
+        "<table><tr><th>주문일자</th><td>2026.01.10</td></tr></table>"
+        "<h3>결제상세</h3>"
+        "<table>"
+        "<tr><td>주문금액</td><td>39,290원</td></tr>"
+        "<tr><td>네이버페이 포인트</td><td>21,283원</td></tr>"
+        "<tr><td>신용카드</td><td>18,007원</td></tr>"
+        "</table>"
+        "<h3>주문상품</h3>"
+        "<table>"
+        "<tr><td>유기농 두부 300g</td><td>주문금액</td><td>10,000원</td>"
+        "<td>수량</td><td>1</td><td>주식회사 컬리 | 사업자명 : 주식회사 컬리</td></tr>"
+        "<tr><td>무항생제 계란 10구</td><td>주문금액</td><td>9,290원</td>"
+        "<td>수량</td><td>1</td><td>주식회사 컬리 | 사업자명 : 주식회사 컬리</td></tr>"
+        "<tr><td>국내산 양파 1kg</td><td>주문금액</td><td>12,000원</td>"
+        "<td>수량</td><td>1</td><td>주식회사 컬리 | 사업자명 : 주식회사 컬리</td></tr>"
+        "<tr><td>친환경 대파 1단</td><td>주문금액</td><td>8,000원</td>"
+        "<td>수량</td><td>1</td><td>주식회사 컬리 | 사업자명 : 주식회사 컬리</td></tr>"
+        "</table>"
+        "<p>네이버파이낸셜(주) 사업자등록번호 524-86-01528</p>"
+        "</body></html>"
+    )
+    orders = extract_orders_from_email_content(
+        subject="[네이버페이] 주문이 완료되었습니다.",
+        sender="네이버페이 <naverpay@navercorp.com>",
+        date_str="Sat, 10 Jan 2026 11:00:00 +0900",
+        body_html=html_split,
+    )
+    assert len(orders) == 1
+    ord0 = orders[0]
+    assert ord0["결제금액"] == 18007
+    assert ord0["사업자번호"] != "5248601528"
+    assert "컬리" in str(ord0.get("입점판매자") or ord0.get("상점명") or "")
+    assert len(ord0["품목내역"]) == 4
+    assert sum(int(li["price"]) for li in ord0["품목내역"]) == 18007
+
+    html_all_points = (
+        "<html><body>"
+        "<p>고객님께서 네이버페이로 주문하신 내역입니다.</p>"
+        "<p>주문일자</p><p>2026.01.10</p>"
+        "<p>결제상세</p><p>주문금액</p><p>15,000원</p><p>네이버페이 포인트</p><p>15,000원</p>"
+        "<p>주문상품</p><p>전액포인트상품</p><p>주문금액</p><p>15,000원</p>"
+        "</body></html>"
+    )
+    assert (
+        extract_orders_from_email_content(
+            subject="[네이버페이] 주문이 완료되었습니다.",
+            sender="네이버페이 <naverpay@navercorp.com>",
+            body_html=html_all_points,
+        )
+        == []
+    )
+
+    for noise_subj in (
+        "[네이버페이] 구매를 확정 부탁드립니다.",
+        "[네이버페이] 자동구매확정 예정 안내",
+        "[네이버페이] 주문하신 상품 발송 안내",
+    ):
+        assert (
+            extract_orders_from_email_content(
+                subject=noise_subj,
+                sender="네이버페이 <naverpay@navercorp.com>",
+                body_text="주문일자 : 2026-01-10\n상품명 : 테스트\n결제금액 : 10,000원",
+            )
+            == []
+        )
+
+
+def test_coupang_six_col_discount_proration_and_policy_noise() -> None:
+    html_6col = (
+        "<html><body>"
+        "<table>"
+        "<tr><th>주문일자</th><td>2026.02.04 14:20:00</td></tr>"
+        "<tr><th>구매 상세내역</th><th>쿠팡가</th><th>수량</th>"
+        "<th>구매금액</th><th>배송정보</th><th>판매자</th></tr>"
+        "<tr><td>스틸 몰딩 2m</td><td>12,000원</td><td>1</td>"
+        "<td>12,000원</td><td>무료&nbsp;</td><td>금속자재몰</td></tr>"
+        "<tr><td>스테인리스 도어스토퍼</td><td>10,000원</td><td>1</td>"
+        "<td>10,000원</td><td>무료배송</td><td>금속자재몰</td></tr>"
+        "<tr><th>총 결제금액</th><td>19,500원&nbsp;</td></tr>"
+        "<tr><th>결제수단</th><td>우리카드(일시불)</td></tr>"
+        "</table>"
+        "</body></html>"
+    )
+    orders = extract_orders_from_email_content(
+        subject="[쿠팡] 주문이 완료되었습니다.",
+        sender="쿠팡 <noreply@coupang.com>",
+        date_str="Wed, 04 Feb 2026 14:20:00 +0900",
+        body_html=html_6col,
+    )
+    assert len(orders) == 1
+    ord0 = orders[0]
+    assert ord0["결제금액"] == 19500
+    assert "우리" in str(ord0.get("카드사") or "")
+    assert len(ord0["품목내역"]) == 2
+    assert sum(int(li["price"]) for li in ord0["품목내역"]) == 19500
+
+    assert (
+        extract_orders_from_email_content(
+            subject="[쿠팡] 로켓배송 정책 변경 안내",
+            sender="쿠팡 <noreply@coupang.com>",
+            body_text="변경 안내 최소 주문금액 : 19,800원",
+        )
+        == []
+    )
+
+
+def test_ksnet_payco_parsing_and_memo_override() -> None:
+    ksnet_html = (
+        "<html><body>"
+        "<h3>구매내역</h3>"
+        "<table><tr>"
+        "<td>우리카드</td>"
+        "<td>2026년 02월28일 17시58분</td>"
+        "<td>[DIY] US 오리진 하프앤하프 외 1</td>"
+        "<td>신용카드</td>"
+        "<td>피자헛 장안동점</td>"
+        "<td>84294928</td>"
+        "</tr></table>"
+        "<p>결제금액</p><p>42,500원</p>"
+        "<p>주식회사 케이에스넷 사업자등록번호 120-81-97322</p>"
+        "</body></html>"
+    )
+    ksnet_orders = extract_orders_from_email_content(
+        subject="[KSNET] 신용카드 결제내역 안내",
+        sender="KSNET <no-reply@ksnet.co.kr>",
+        date_str="Sat, 28 Feb 2026 17:58:10 +0900",
+        body_html=ksnet_html,
+    )
+    assert len(ksnet_orders) == 1
+    ks0 = ksnet_orders[0]
+    assert ks0["상점명"] == "피자헛 장안동점"
+    assert ks0["승인번호"] == "84294928"
+    assert ks0["결제금액"] == 42500
+    assert ks0["사업자번호"] == ""
+    acc_res = _detect_memo_account_override("피자헛 장안동점 [DIY] US 오리진 하프앤하프 외 1")
+    assert acc_res is not None
+    assert acc_res[:2] == ("811", "복리후생비")
+
+    payco_orders = extract_orders_from_email_content(
+        subject="[PAYCO] 결제내역 안내",
+        sender="NHN PAYCO <help@payco.com>",
+        date_str="Tue, 10 Feb 2026 12:00:00 +0900",
+        body_text=(
+            "상품명 : 테스트 원재료 패키지\n"
+            "결제금액 : 33,000원\n"
+            "결제일시 : 2026-02-10 12:00:00\n"
+            "NHN페이코(주) 사업자등록번호 563-81-00723\n"
+        ),
+    )
+    assert len(payco_orders) == 1
+    assert payco_orders[0]["사업자번호"] != "5638100723"
+
+
+def test_reconcile_skips_blocked_personal_and_issuer_conflict_and_repairs_polluted(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    db_file = tmp_path / "issuer_guard.db"
+    arch_dir = tmp_path / "archive"
+    arch_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("SOLOLEDGER_DB_PATH", str(db_file))
+    monkeypatch.setenv("SOLOLEDGER_ARCHIVE_DIR", str(arch_dir))
+    init_db(str(db_file))
+    save_corp_card_policy(
+        {
+            "corp_only_mode": True,
+            "strict_registered_only": True,
+            "block_unmatched_email_orders": True,
+            "blocked_personal_cards": ["6364"],
+        },
+        archive_dir=arch_dir,
+    )
+    register_corp_card("607*", card_label="우리법인(607*)", issuer="WOORI", archive_dir=arch_dir)
+
+    conn = get_connection(str(db_file))
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO card_transactions (
+            card_last4, approval_no, transacted_at, raw_merchant_name,
+            total_amount, supply_value, vat_amount, account_code, account_name,
+            vat_deduction_type, reconcile_status
+        ) VALUES (
+            '607*', '11223344', '2026-03-15 14:00:00', '이니시스 결제',
+            28001, 25455, 2546, '999', '미분류', 'DEDUCTIBLE', 'HOMETAX_VERIFIED'
+        )
+        """
+    )
+    corp_tx_id = int(cur.lastrowid)
+
+    # Seed a stale polluted statement row with NULL approval_no matching real #99 (KSNET)
+    cur.execute(
+        """
+        INSERT INTO card_transactions (
+            card_last4, approval_no, transacted_at, raw_merchant_name,
+            counterparty_info, total_amount, supply_value, vat_amount,
+            account_code, account_name, vat_deduction_type, reconcile_status
+        ) VALUES (
+            '607*', NULL, '2026-02-28 17:58:00', '（주）케이에스넷',
+            'KSNET을 통하여 결제하신 내역입니다.', 42500, 38636, 3864,
+            '830', '소모품비', 'DEDUCTIBLE', 'HOMETAX_VERIFIED'
+        )
+        """
+    )
+    polluted_tx_id = int(cur.lastrowid)
+    cur.execute(
+        """
+        INSERT INTO receipt_ocr_metadata (
+            tx_id, source_channel, original_file_path, archived_file_name,
+            file_hash_sha256, ocr_total_amount, line_items_json
+        ) VALUES (?, 'STATEMENT', 'statement_polluted.html', 'statement_polluted.html', 'deadbeef', 42500, '[]')
+        """,
+        (polluted_tx_id,),
+    )
+    conn.commit()
+
+    # Blocked personal card (6364) and cross-issuer conflict (국민 vs 우리법인 607*) must be skipped
+    res_skip = reconcile_scraped_ecommerce_orders(
+        cur,
+        raw_content="[]",
+        archive_dir=arch_dir,
+        orders_list=[
+            {
+                "주문일자": "2026-03-15",
+                "주문일시": "2026-03-15 14:00:00",
+                "상품명": "개인 쇼핑 건",
+                "결제금액": 28001,
+                "상점명": "이니시스",
+                "승인번호": "",
+                "카드사": "5570-42XX-XXXX-6364 하나카드",
+            },
+            {
+                "주문일자": "2026-03-15",
+                "주문일시": "2026-03-15 14:00:00",
+                "상품명": "국민카드 개인주문",
+                "결제금액": 28001,
+                "상점명": "이니시스",
+                "승인번호": "",
+                "카드사": "국민카드",
+            },
+        ],
+    )
+    assert res_skip["matched_count"] == 0
+    assert res_skip["created_count"] == 0
+    cur.execute("SELECT counterparty_info FROM card_transactions WHERE tx_id = ?", (corp_tx_id,))
+    assert cur.fetchone()["counterparty_info"] is None
+
+    # Polluted memo must not be locked by keep_existing even with NULL approval_no
+    res_fix = reconcile_scraped_ecommerce_orders(
+        cur,
+        raw_content="[]",
+        archive_dir=arch_dir,
+        orders_list=[
+            {
+                "주문일자": "2026-02-28",
+                "주문일시": "2026-02-28 17:58:00",
+                "상품명": "[DIY] US 오리진 하프앤하프 외 1",
+                "결제금액": 42500,
+                "상점명": "피자헛 장안동점",
+                "승인번호": "84294928",
+                "카드사": "우리카드",
+            }
+        ],
+    )
+    conn.commit()
+    assert res_fix["matched_count"] == 1
+    assert polluted_tx_id in res_fix["updated_tx_ids"]
+    cur.execute(
+        """
+        SELECT counterparty_info, approval_no, account_code, account_name
+        FROM card_transactions
+        WHERE tx_id = ?
+        """,
+        (polluted_tx_id,),
+    )
+    fixed_row = dict(cur.fetchone())
+    assert fixed_row["approval_no"] == "84294928"
+    assert fixed_row["account_code"] == "811"
+    assert fixed_row["account_name"] == "복리후생비"
+    assert "피자헛 장안동점" in str(fixed_row["counterparty_info"] or "")
+    assert "US 오리진 하프앤하프" in str(fixed_row["counterparty_info"] or "")
+    conn.close()
+
 

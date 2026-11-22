@@ -25,6 +25,7 @@ CARD_LABEL_MAP: Dict[str, str] = {
     "6534": "우리카드(6534)",
     "1595": "우리카드(1595)",
     "4479": "우리체크(4479)",
+    "6364": "하나카드(6364)",
     "8691": "KB국민카드(8691)",
     "KB하이": "KB국민(하이패스)",
     "KB위시": "KB국민(마이위시)",
@@ -64,6 +65,7 @@ DEFAULT_BLOCKED_PERSONAL_CARDS: tuple[str, ...] = (
     "1595",
     "4479",
     "5*5*",
+    "6364",
 )
 
 CORP_CARD_ISSUER_PREFIX: Dict[str, str] = {

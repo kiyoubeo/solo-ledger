@@ -315,15 +315,35 @@ def _extract_year_hint(text: str) -> Optional[str]:
 def _normalize_datetime_str(raw_dt: str, default_year: Optional[str] = None) -> str:
     """Normalize various date/time formats into `YYYY-MM-DD HH:MM:SS`."""
     raw_str = str(raw_dt or "").strip()
-    m_kor = re.search(
-        r"(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?",
+    # Full date + time (supports 1/2-digit month/day, trailing dots, Korean 시/분/초, AM/PM)
+    m_full_flex = re.search(
+        r"(\d{4})\s*[.\-/년]\s*(\d{1,2})\s*[.\-/월]\s*(\d{1,2})\s*[.\-/일]?\s+"
+        r"(?:(AM|PM|오전|오후)\s*)?(\d{1,2})\s*(?::|시)\s*(\d{1,2})(?:\s*(?::|분)\s*(\d{1,2})\s*초?)?",
+        raw_str,
+        flags=re.IGNORECASE,
+    )
+    if m_full_flex:
+        y, mo, d, ampm, h, mi, sec = m_full_flex.groups()
+        mo_i, d_i, h_i, mi_i, sec_i = int(mo), int(d), int(h), int(mi), int(sec or 0)
+        if ampm:
+            ampm_u = ampm.upper()
+            if ampm_u in ("PM", "오후") and h_i < 12:
+                h_i += 12
+            elif ampm_u in ("AM", "오전") and h_i == 12:
+                h_i = 0
+        if 1 <= mo_i <= 12 and 1 <= d_i <= 31 and 0 <= h_i <= 23 and 0 <= mi_i <= 59 and 0 <= sec_i <= 59:
+            return f"{int(y):04d}-{mo_i:02d}-{d_i:02d} {h_i:02d}:{mi_i:02d}:{sec_i:02d}"
+
+    # Date only (supports 1/2-digit month/day, trailing dots, Korean 년/월/일)
+    m_date_flex = re.search(
+        r"(\d{4})\s*[.\-/년]\s*(\d{1,2})\s*[.\-/월]\s*(\d{1,2})\s*[.\-/일]?(?!\d)",
         raw_str,
     )
-    if m_kor:
-        y, mo, d, h, mi, sec = m_kor.groups()
-        if h and mi:
-            return f"{int(y):04d}-{int(mo):02d}-{int(d):02d} {int(h):02d}:{mi}:{sec or '00'}"
-        return f"{int(y):04d}-{int(mo):02d}-{int(d):02d} 12:00:00"
+    if m_date_flex:
+        y, mo, d = m_date_flex.groups()
+        mo_i, d_i = int(mo), int(d)
+        if 1 <= mo_i <= 12 and 1 <= d_i <= 31:
+            return f"{int(y):04d}-{mo_i:02d}-{d_i:02d} 12:00:00"
 
     s = raw_str.replace(".", "-").replace("/", "-")
     # YYYY-MM-DD HH:MM:SS

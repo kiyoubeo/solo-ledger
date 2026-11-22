@@ -74,3 +74,4 @@
 | 2026-11-21 | `fix` | `logs/last_verification.json, logs/verification_history.jsonl, scripts/setup_gcp_bigquery.ps1, src/sololedger/bq_graph_exporter.py (+1 files)` | 신규 PC 환경 GCP CLI·ADC 통합 인증 및 BigQuery 프로비저닝 스크립트 안정화 | `PASSED` |
 | 2026-11-21 | `fix` | `logs/last_verification.json, logs/verification_history.jsonl, scripts/setup_gcp_bigquery.ps1, src/sololedger/bq_graph_exporter.py (+1 files)` | GCP 조직 정책(allowedPolicyMemberDomains) 호환 BigQuery 데이터셋 ACL 및 PowerShell 호출 보완 | `PASSED` |
 | 2026-11-21 | `fix` | `logs/last_verification.json, logs/verification_history.jsonl, sql/bigquery_property_graph.sql, src/sololedger/bq_graph_exporter.py (+1 files)` | BigQuery GQL 서브쿼리 변수 바인딩 수정, 중복 적재 방지 및 조직 정책 쿼리 폴백 구현 | `PASSED` |
+| 2026-11-22 | `fix` | `logs/architecture_graph.json, logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/email_watcher.py (+5 files)` | 이메일 주문 파서 고도화(네이버 스마트메일함·포인트복합결제·쿠팡6열·KSNET·날짜정규화) 및 개인카드 오탐 방지 | `PASSED` |
