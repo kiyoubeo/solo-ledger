@@ -1,6 +1,7 @@
 """Unit and integration tests for Toss Payments corporate card email scrolling and reconciliation."""
 
 import base64
+import json
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -12,6 +13,7 @@ from sololedger.api import app
 from sololedger.config import settings
 from sololedger.db import get_connection, init_db
 from sololedger.email_watcher import (
+    _discover_imap_promotion_mailboxes,
     _discover_imap_scroll_mailboxes,
     _extract_eml_parts,
     _resolve_account_email_address,
@@ -24,7 +26,11 @@ from sololedger.email_watcher import (
     scroll_imap_toss_payments_emails,
 )
 from sololedger.importers import _normalize_datetime_str
-from sololedger.scraper_service import reconcile_scraped_ecommerce_orders
+from sololedger.scraper_service import (
+    extract_coupang_orders_from_content,
+    ingest_scraped_payload,
+    reconcile_scraped_ecommerce_orders,
+)
 from sololedger.sms_parser import (
     is_blocked_personal_card_code,
     match_card_code_pattern,
@@ -1197,5 +1203,596 @@ def test_reconcile_skips_blocked_personal_and_issuer_conflict_and_repairs_pollut
     assert "피자헛 장안동점" in str(fixed_row["counterparty_info"] or "")
     assert "US 오리진 하프앤하프" in str(fixed_row["counterparty_info"] or "")
     conn.close()
+
+
+def test_coupang_email_delivery_group_subheaders_and_card_layout_parsing() -> None:
+    """Verify Coupang emails with delivery sub-headers, arrival badges, and split Coupay Money parse cleanly."""
+    html_with_subheaders = """<!DOCTYPE html>
+<html><body>
+  <table>
+    <tr><th>주문번호</th><td>2100088776655</td></tr>
+    <tr><th>주문일자</th><td>2026.10.26 11:32:10</td></tr>
+  </table>
+  <table>
+    <tr>
+      <th>구매 상세내역</th><th>쿠팡가</th><th>수량</th>
+      <th>구매금액</th><th>배송정보</th><th>판매자</th>
+    </tr>
+    <tr><td colspan="6">로켓배송 상품</td></tr>
+    <tr>
+      <td>
+        <div>탐사 3겹 순수 소프트 롤화장지 30m 30롤</div>
+        <div>내일(화) 10/27 도착 보장</div>
+        <div>무료반품</div>
+      </td>
+      <td><del>18,900원</del> 13,500원</td>
+      <td>2개</td>
+      <td>27,000원</td>
+      <td>무료배송</td>
+      <td>쿠팡(주)</td>
+    </tr>
+    <tr><td colspan="6">판매자배송 상품</td></tr>
+    <tr>
+      <td>
+        <div>3M 스카치 다용도 포장테이프 6롤 세트</div>
+        <div>모레(수) 도착 예정</div>
+      </td>
+      <td>16,900원</td>
+      <td>1개</td>
+      <td>16,900원</td>
+      <td>무료배송</td>
+      <td>오피스툴코리아</td>
+    </tr>
+  </table>
+  <table>
+    <tr><th>총 주문금액</th><td>43,900원</td></tr>
+    <tr><th>쿠페이 머니</th><td>5,000원</td></tr>
+    <tr><th>신용카드 결제금액</th><td>38,900원</td></tr>
+    <tr><th>결제수단</th><td>우리카드 (2949) 일시불</td></tr>
+    <tr><th>승인번호</th><td>44556677</td></tr>
+  </table>
+</body></html>"""
+
+    orders = extract_orders_from_email_content(
+        subject="[쿠팡] 주문이 완료되었습니다.",
+        sender="쿠팡 <noreply@e.coupang.com>",
+        date_str="Mon, 26 Oct 2026 11:32:15 +0900",
+        body_html=html_with_subheaders,
+    )
+    assert len(orders) == 1
+    cp0 = orders[0]
+    assert cp0["발신처"] == "쿠팡"
+    assert cp0["주문번호"] == "2100088776655"
+    assert cp0["결제금액"] == 38900
+    assert cp0["상품합계금액"] == 43900
+    assert cp0["승인번호"] == "44556677"
+    assert "2949" in str(cp0.get("카드사") or "")
+    assert len(cp0["품목내역"]) == 2
+    assert sum(int(x["price"]) for x in cp0["품목내역"]) == 38900
+    assert "탐사 3겹 순수 소프트 롤화장지" in cp0["품목내역"][0]["item"]
+    assert "도착 보장" not in cp0["품목내역"][0]["item"]
+
+    # Modern div/card-layout Coupang email without classic <th>구매 상세내역</th>
+    card_layout_html = """<!DOCTYPE html>
+<html><body>
+  <div>주문번호 2100099887766</div>
+  <div>주문일 2026.11.12 09:15:00</div>
+  <div>로켓프레시</div>
+  <div>곰곰 무항생제 신선 대란 30구</div>
+  <div>8,900원 · 2개</div>
+  <div>곰곰 유기농 우유 900ml</div>
+  <div>11,600원 · 1개</div>
+  <div>신용카드 결제금액 : 29,400원</div>
+  <div>결제카드 : 우리카드(1175)</div>
+</body></html>"""
+    card_orders = extract_orders_from_email_content(
+        subject="[쿠팡] 주문이 완료되었습니다.",
+        sender="쿠팡 <noreply@coupang.com>",
+        date_str="Thu, 12 Nov 2026 09:15:10 +0900",
+        body_html=card_layout_html,
+    )
+    assert len(card_orders) == 1
+    assert card_orders[0]["결제금액"] == 29400
+    assert "1175" in str(card_orders[0].get("카드사") or "")
+
+
+def test_scroll_imap_coupang_emails_promotion_rescue_and_v2_rescan(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Verify Coupang IMAP scrolling rescues Promotion/Korean All-Mail folders and rescans legacy processed_ids."""
+    db_file = tmp_path / "coupang_email_scroll.db"
+    arch_dir = tmp_path / "archive"
+    arch_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("SOLOLEDGER_DB_PATH", str(db_file))
+    monkeypatch.setenv("SOLOLEDGER_ARCHIVE_DIR", str(arch_dir))
+
+    init_db(str(db_file))
+    save_corp_card_policy(
+        {
+            "corp_only_mode": True,
+            "strict_registered_only": True,
+            "block_unmatched_email_orders": True,
+            "blocked_personal_cards": ["6534"],
+        },
+        archive_dir=arch_dir,
+    )
+    register_corp_card("2949", card_label="우리법인(2949)", issuer="WOORI", archive_dir=arch_dir)
+    # Seed legacy watcher config where <cp-promo-1@example.com> was previously marked processed under v1
+    save_email_watcher_config(
+        {
+            "provider": "NAVER",
+            "imap_host": "imap.naver.com",
+            "imap_port": 993,
+            "email_address": "corp-naver@naver.com",
+            "app_password": "dummy-password",
+            "enabled": True,
+            "processed_ids": ["<cp-promo-1@example.com>"],
+        },
+        archive_dir=arch_dir,
+    )
+
+    conn = get_connection(str(db_file))
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO merchants (biz_reg_no, merchant_name, tax_type_code, biz_status, is_pg_provider)
+        VALUES ('1058765162', '쿠팡페이', 'GENERAL', 'ACTIVE', 1)
+        """
+    )
+    cur.execute(
+        """
+        INSERT INTO card_transactions (
+            card_last4, approval_no, transacted_at, raw_merchant_name, biz_reg_no,
+            total_amount, supply_value, vat_amount, account_code, account_name,
+            vat_deduction_type, reconcile_status
+        ) VALUES (
+            '2949', '99112233', '2026-10-20 13:10:00', '쿠팡페이', '1058765162',
+            31800, 28909, 2891, '999', '미분류', 'DEDUCTIBLE', 'HOMETAX_VERIFIED'
+        )
+        """
+    )
+    existing_cp_tx_id = int(cur.lastrowid)
+    conn.commit()
+    conn.close()
+
+    cp_html_oct = (
+        "<html><body><table>"
+        "<tr><th>주문일자</th><td>2026.10.20 13:10:05</td></tr>"
+        "<tr><th>구매 상세내역</th><th>쿠팡가</th><th>수량</th><th>구매금액</th><th>판매자</th></tr>"
+        "<tr><td colspan='5'>로켓배송 상품</td></tr>"
+        "<tr><td>A4 서류보관 파일박스 10개입</td><td>31,800원</td><td>1개</td>"
+        "<td>31,800원</td><td>쿠팡(주)</td></tr>"
+        "<tr><th>총 결제금액</th><td>31,800원</td></tr>"
+        "<tr><th>결제수단</th><td>우리카드 (2949)</td></tr>"
+        "</table></body></html>"
+    )
+    cp_html_nov_corp = (
+        "<html><body><table>"
+        "<tr><th>주문일자</th><td>2026.11.15 16:40:00</td></tr>"
+        "<tr><th>구매 상세내역</th><th>쿠팡가</th><th>수량</th><th>구매금액</th><th>판매자</th></tr>"
+        "<tr><td colspan='5'>로켓배송 상품</td></tr>"
+        "<tr><td>사무실 멀티탭 6구 개별스위치 3m</td><td>24,500원</td><td>1개</td>"
+        "<td>24,500원</td><td>쿠팡(주)</td></tr>"
+        "<tr><th>총 결제금액</th><td>24,500원</td></tr>"
+        "<tr><th>결제수단</th><td>우리카드 (2949)</td></tr>"
+        "</table></body></html>"
+    )
+    cp_html_personal = (
+        "<html><body><table>"
+        "<tr><th>주문일자</th><td>2026.11.16 20:00:00</td></tr>"
+        "<tr><th>구매 상세내역</th><th>쿠팡가</th><th>수량</th><th>구매금액</th><th>판매자</th></tr>"
+        "<tr><td>개인 반려동물 간식 세트</td><td>19,900원</td><td>1개</td>"
+        "<td>19,900원</td><td>펫스토어</td></tr>"
+        "<tr><th>총 결제금액</th><td>19,900원</td></tr>"
+        "<tr><th>결제수단</th><td>현대카드 (6534)</td></tr>"
+        "</table></body></html>"
+    )
+
+    # Modified UTF-7 for "프로모션" -> "&1QS4XLqowVg-"
+    promo_folder = "&1QS4XLqowVg-"
+
+    class _FakeCoupangImapServer:
+        def __init__(self) -> None:
+            self.current_box = "INBOX"
+            self.inbox_msgs: Dict[bytes, bytes] = {
+                b"11": _build_simple_eml_bytes(
+                    message_id="<cp-nov-corp@example.com>",
+                    sender="쿠팡 <noreply@coupang.com>",
+                    subject="[쿠팡] 주문이 완료되었습니다.",
+                    date_rfc="Sun, 15 Nov 2026 16:40:10 +0900",
+                    body_text="주문 안내",
+                    body_html=cp_html_nov_corp,
+                ),
+                b"12": _build_simple_eml_bytes(
+                    message_id="<cp-nov-pers@example.com>",
+                    sender="쿠팡 <noreply@coupang.com>",
+                    subject="[쿠팡] 주문이 완료되었습니다.",
+                    date_rfc="Mon, 16 Nov 2026 20:00:10 +0900",
+                    body_text="주문 안내",
+                    body_html=cp_html_personal,
+                ),
+            }
+            self.promo_msgs: Dict[bytes, bytes] = {
+                b"21": _build_simple_eml_bytes(
+                    message_id="<cp-promo-1@example.com>",
+                    sender="쿠팡 <noreply@e.coupang.com>",
+                    subject="[쿠팡] 주문이 완료되었습니다.",
+                    date_rfc="Tue, 20 Oct 2026 13:10:15 +0900",
+                    body_text="주문 안내",
+                    body_html=cp_html_oct,
+                ),
+            }
+
+        def login(self, user: str, password: str) -> tuple[str, List[bytes]]:
+            return "OK", [b"Logged in"]
+
+        def list(self) -> tuple[str, List[bytes]]:
+            return (
+                "OK",
+                [
+                    b'(\\HasNoChildren) "/" "INBOX"',
+                    f'(\\HasNoChildren) "/" "{promo_folder}"'.encode("ascii"),
+                ],
+            )
+
+        def select(self, mailbox: str = "INBOX", readonly: bool = True) -> tuple[str, List[bytes]]:
+            self.current_box = mailbox.strip('"')
+            return "OK", [b"2"]
+
+        def uid(self, command: str, *args: Any) -> tuple[str, List[Any]]:
+            cmd = command.upper()
+            store = self.promo_msgs if self.current_box == promo_folder else self.inbox_msgs
+            if cmd == "SEARCH":
+                criteria_str = " ".join(str(a) for a in args)
+                if "tosspayments" in criteria_str.lower():
+                    return "OK", [b""]
+                return "OK", [b" ".join(sorted(store.keys(), key=lambda x: int(x)))]
+            if cmd == "FETCH":
+                uid_csv = args[0]
+                out: List[Any] = []
+                for u in uid_csv.split(b","):
+                    raw = store.get(u.strip())
+                    if raw:
+                        out.append(
+                            (b"1 (UID " + u + b" RFC822 {" + str(len(raw)).encode() + b"})", raw)
+                        )
+                return "OK", out
+            return "BAD", []
+
+        def logout(self) -> tuple[str, List[bytes]]:
+            return "BYE", [b"Logout"]
+
+    fake_imap = _FakeCoupangImapServer()
+    assert _discover_imap_promotion_mailboxes(fake_imap, ["INBOX"]) == [promo_folder]
+
+    client = TestClient(app)
+    with patch("sololedger.email_watcher.imaplib.IMAP4_SSL", return_value=fake_imap):
+        # 1) Dedicated Coupang email scroll endpoint
+        scroll_res = client.post(
+            "/api/v1/scraper/email-scroll-coupang",
+            headers={"X-API-Key": settings.api_key},
+            json={"start_date": "2026-01-01", "end_date": "2026-12-31"},
+        )
+        assert scroll_res.status_code == 200
+        s_json = scroll_res.json()
+        assert s_json["status"] == "scrolled"
+        assert s_json["parsed_coupang_count"] == 3
+        # 1 existing Oct row + 1 newly created Nov corp row (personal skipped)
+        assert s_json["matched_count"] == 2
+        assert s_json["created_count"] == 1
+
+        # 2) Unified email-sync also upgrades coupang_parser_version to 2 without duplicating rows
+        sync_res = client.post(
+            "/api/v1/scraper/email-sync",
+            headers={"X-API-Key": settings.api_key},
+            json={"lookback_days": 365},
+        )
+        assert sync_res.status_code == 200
+        assert load_email_watcher_config(arch_dir).get("coupang_parser_version") == 2
+
+    conn2 = get_connection(str(db_file))
+    cur2 = conn2.cursor()
+    cur2.execute("SELECT * FROM card_transactions WHERE tx_id = ?", (existing_cp_tx_id,))
+    oct_row = dict(cur2.fetchone())
+    assert "A4 서류보관 파일박스" in str(oct_row["counterparty_info"] or "")
+    # Upgraded from Coupay PG 1058765162 to Coupang direct 1208800767
+    assert oct_row["biz_reg_no"] == "1208800767"
+    cur2.execute("SELECT COUNT(*) AS cnt FROM card_transactions")
+    assert int(cur2.fetchone()["cnt"]) == 2
+    conn2.close()
+
+    dash_html = client.get("/dashboard", headers={"X-API-Key": settings.api_key}).text
+    assert "coupang-scroll-panel" in dash_html
+    assert "triggerCoupangEmailScroll" in dash_html
+    assert "runCoupangBackupRematch" in dash_html
+
+
+def test_coupang_ssr_dedup_discount_shipping_wow_and_offline_protection(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Verify SSR dedup, discount/shipping tolerance, Wow Membership, offline protection, and backup API."""
+    db_file = tmp_path / "coupang_reconcile.db"
+    arch_dir = tmp_path / "archive"
+    arch_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("SOLOLEDGER_DB_PATH", str(db_file))
+    monkeypatch.setenv("SOLOLEDGER_ARCHIVE_DIR", str(arch_dir))
+
+    init_db(str(db_file))
+    save_corp_card_policy(
+        {
+            "corp_only_mode": True,
+            "strict_registered_only": True,
+            "block_unmatched_email_orders": True,
+            "blocked_personal_cards": ["6534"],
+        },
+        archive_dir=arch_dir,
+    )
+    register_corp_card("2949", card_label="우리법인(2949)", issuer="WOORI", archive_dir=arch_dir)
+
+    # 1. Verify SSR JSON recursive deduplication & unitPrice * quantity math
+    ssr_payload = {
+        "orders": [
+            {
+                "orderId": "202610090001",
+                "orderedAt": 1791510000000,  # 2026-10-09 KST
+                "orderDate": "2026-10-09",
+                "deliveryGroupList": [
+                    {
+                        "productList": [
+                            {
+                                "productName": "스카치 초강력 다용도 테이프 리필",
+                                "unitPrice": 8330,
+                                "quantity": 3,
+                                # Nested child mirror that previously caused duplicate extraction
+                                "subItem": {
+                                    "productName": "스카치 초강력 다용도 테이프 리필",
+                                    "unitPrice": 8330,
+                                    "quantity": 3,
+                                },
+                            }
+                        ]
+                    }
+                ],
+            }
+        ]
+    }
+    extracted_ssr = extract_coupang_orders_from_content(json.dumps(ssr_payload, ensure_ascii=False))
+    assert len(extracted_ssr) == 1
+    assert int(extracted_ssr[0]["결제금액"]) == 24990
+    assert len(extracted_ssr[0]["품목내역"]) == 1
+
+    conn = get_connection(str(db_file))
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO merchants (biz_reg_no, merchant_name, tax_type_code, biz_status, is_pg_provider)
+        VALUES
+            ('1208800767', '쿠팡(주)', 'GENERAL', 'ACTIVE', 1),
+            ('1058765162', '쿠팡페이', 'GENERAL', 'ACTIVE', 1),
+            ('1138600000', '주식회사 케이씨피', 'GENERAL', 'ACTIVE', 1),
+            ('5120991145', '문경청과', 'GENERAL', 'ACTIVE', 0)
+        """
+    )
+    # Seed 5 realistic ledger transactions:
+    # (A) Multi-item Coupang order with coupon/Coupang-Cash discount (list 116,170 -> billed 101,610)
+    cur.execute(
+        """
+        INSERT INTO card_transactions (
+            card_last4, approval_no, transacted_at, raw_merchant_name, biz_reg_no,
+            total_amount, supply_value, vat_amount, account_code, account_name,
+            vat_deduction_type, reconcile_status
+        ) VALUES (
+            '2949', '10000001', '2026-10-26 15:00:00', '쿠팡페이', '1058765162',
+            101610, 92373, 9237, '999', '미분류', 'DEDUCTIBLE', 'HOMETAX_VERIFIED'
+        )
+        """
+    )
+    tx_discount_multi = int(cur.lastrowid)
+
+    # (B) Multi-qty single-item Coupang order with instant discount (8,330 * 3 = 24,990 -> billed 23,360)
+    cur.execute(
+        """
+        INSERT INTO card_transactions (
+            card_last4, approval_no, transacted_at, raw_merchant_name, biz_reg_no,
+            total_amount, supply_value, vat_amount, account_code, account_name,
+            vat_deduction_type, reconcile_status
+        ) VALUES (
+            '2949', '10000002', '2026-10-09 12:00:00', '쿠팡(주)', '1208800767',
+            23360, 21236, 2124, '999', '미분류', 'DEDUCTIBLE', 'HOMETAX_VERIFIED'
+        )
+        """
+    )
+    tx_discount_qty = int(cur.lastrowid)
+
+    # (C) Seller-delivery item + 3,500 KRW shipping fee via KCP (item 9,000 -> billed 12,500)
+    cur.execute(
+        """
+        INSERT INTO card_transactions (
+            card_last4, approval_no, transacted_at, raw_merchant_name, biz_reg_no,
+            total_amount, supply_value, vat_amount, account_code, account_name,
+            vat_deduction_type, reconcile_status
+        ) VALUES (
+            '2949', '10000003', '2026-02-25 10:00:00', '주식회사 케이씨피', '1138600000',
+            12500, 11364, 1136, '999', '미분류', 'DEDUCTIBLE', 'HOMETAX_VERIFIED'
+        )
+        """
+    )
+    tx_shipping_kcp = int(cur.lastrowid)
+
+    # (D) Offline fruit shop '문경청과' (10,000 KRW) previously polluted by a 10,000 KRW Coupang sub-item
+    cur.execute(
+        """
+        INSERT INTO card_transactions (
+            card_last4, approval_no, transacted_at, raw_merchant_name, biz_reg_no,
+            counterparty_info, total_amount, supply_value, vat_amount,
+            account_code, account_name, vat_deduction_type, reconcile_status
+        ) VALUES (
+            '2949', '10000004', '2026-10-26 17:30:00', '문경청과', '5120991145',
+            '문풍지 외풍차단 틈막이 10m', 10000, 9091, 909,
+            '830', '소모품비', 'DEDUCTIBLE', 'HOMETAX_VERIFIED'
+        )
+        """
+    )
+    tx_offline_fruit = int(cur.lastrowid)
+    cur.execute(
+        """
+        INSERT INTO receipt_ocr_metadata (
+            tx_id, source_channel, original_file_path, archived_file_name,
+            file_hash_sha256, ocr_total_amount, line_items_json
+        ) VALUES (?, 'STATEMENT', 'bad_fruit.html', 'bad_fruit.html', 'badhash1', 10000, '[]')
+        """,
+        (tx_offline_fruit,),
+    )
+
+    # (E) Coupang Wow Membership monthly fee (7,890 KRW)
+    cur.execute(
+        """
+        INSERT INTO card_transactions (
+            card_last4, approval_no, transacted_at, raw_merchant_name, biz_reg_no,
+            total_amount, supply_value, vat_amount, account_code, account_name,
+            vat_deduction_type, reconcile_status
+        ) VALUES (
+            '2949', '10000005', '2026-10-05 08:15:00', '쿠팡페이', '1058765162',
+            7890, 7173, 717, '999', '미분류', 'DEDUCTIBLE', 'HOMETAX_VERIFIED'
+        )
+        """
+    )
+    tx_wow = int(cur.lastrowid)
+    conn.commit()
+
+    backup_orders = [
+        # Summary order on 2026-10-26 (sum 116,170 -> matches tx_discount_multi 101,610)
+        {
+            "주문일자": "2026-10-26",
+            "상품명": "사무용 의자 메쉬 방석 외 2건",
+            "결제금액": 116170,
+            "발신처": "쿠팡",
+            "품목내역": [
+                {"item": "사무용 의자 메쉬 방석", "qty": 1, "price": 56170},
+                {"item": "듀얼모니터 받침대 선반", "qty": 1, "price": 50000},
+                {"item": "문풍지 외풍차단 틈막이 10m", "qty": 1, "price": 10000},
+            ],
+        },
+        # Legacy standalone sub-item on 2026-10-26 (10,000 KRW) -> must NOT match 문경청과, and must self-heal it!
+        {
+            "주문일자": "2026-10-26",
+            "상품명": "문풍지 외풍차단 틈막이 10m",
+            "결제금액": 10000,
+            "발신처": "쿠팡",
+            "품목내역": [{"item": "문풍지 외풍차단 틈막이 10m", "qty": 1, "price": 10000}],
+        },
+        # Legacy unitPrice entry with qty=3 on 2026-10-09 (8,330 * 3 = 24,990 -> matches tx_discount_qty 23,360)
+        {
+            "주문일자": "2026-10-09",
+            "상품명": "스카치 초강력 다용도 테이프 리필",
+            "결제금액": 8330,
+            "품목내역": [{"item": "스카치 초강력 다용도 테이프 리필", "qty": 3, "price": 8330}],
+        },
+        # Seller-delivery order on 2026-02-25 (9,000 + 3,500 shipping -> matches tx_shipping_kcp 12,500)
+        {
+            "주문일자": "2026-02-25",
+            "상품명": "산업용 안전 장갑 10켤레",
+            "결제금액": 9000,
+            "발신처": "쿠팡",
+            "입점판매자": "안전공구상사",
+            "품목내역": [{"item": "산업용 안전 장갑 10켤레", "qty": 1, "price": 9000}],
+        },
+        # Post-statement Nov 2026 order paid with registered corp card 2949 -> auto-created!
+        {
+            "주문일자": "2026-11-18",
+            "상품명": "복사용지 A4 80g 2500매",
+            "결제금액": 26900,
+            "발신처": "쿠팡",
+            "사업자번호": "120-88-00767",
+            "카드사": "우리카드 (2949)",
+            "품목내역": [{"item": "복사용지 A4 80g 2500매", "qty": 1, "price": 26900}],
+        },
+        # Post-statement Nov 2026 order without verified corp card -> must NOT be auto-created under policy!
+        {
+            "주문일자": "2026-11-19",
+            "상품명": "미검증 카드 주문 건",
+            "결제금액": 15400,
+            "발신처": "쿠팡",
+            "품목내역": [{"item": "미검증 카드 주문 건", "qty": 1, "price": 15400}],
+        },
+    ]
+    backup_file = arch_dir / "coupang_orders_auto.json"
+    backup_file.write_text(json.dumps(backup_orders, ensure_ascii=False), encoding="utf-8")
+    conn.close()
+
+    client = TestClient(app)
+    rec_resp = client.post(
+        "/api/v1/scraper/coupang-reconcile-backup",
+        headers={"X-API-Key": settings.api_key},
+    )
+    assert rec_resp.status_code == 200
+    rec_json = rec_resp.json()
+    assert rec_json["status"] == "ingested"
+    # 3 fuzzy/shipping + 1 post-statement corp card created + 1 Wow Membership = 5 matched!
+    assert rec_json["matched_orders"] == 5
+    assert rec_json["wow_membership_matched"] == 1
+    assert rec_json["created_orders"] == 1
+
+    # Verify dynamic server origin injection in coupang-script endpoint
+    script_resp = client.get(
+        "/api/v1/scraper/coupang-script",
+        headers={"X-API-Key": settings.api_key},
+    )
+    assert script_resp.status_code == 200
+    assert "/ssr/api/myorders/model/order/" in script_resp.json()["script"]
+
+    conn_v = get_connection(str(db_file))
+    cur_v = conn_v.cursor()
+
+    # Check (A): matched and line items prorated to 101,610
+    cur_v.execute("SELECT counterparty_info FROM card_transactions WHERE tx_id = ?", (tx_discount_multi,))
+    assert "사무용 의자 메쉬 방석" in str(cur_v.fetchone()["counterparty_info"] or "")
+    cur_v.execute(
+        "SELECT line_items_json FROM receipt_ocr_metadata WHERE tx_id = ? AND source_channel = 'STATEMENT'",
+        (tx_discount_multi,),
+    )
+    li_multi = json.loads(str(cur_v.fetchone()["line_items_json"]))
+    assert sum(int(x["price"]) for x in li_multi) == 101610
+
+    # Check (B): 8,330 * 3 matched 23,360
+    cur_v.execute("SELECT counterparty_info FROM card_transactions WHERE tx_id = ?", (tx_discount_qty,))
+    assert "스카치 초강력 다용도 테이프" in str(cur_v.fetchone()["counterparty_info"] or "")
+
+    # Check (C): 9,000 + 3,500 shipping matched 12,500 KCP row
+    cur_v.execute("SELECT counterparty_info FROM card_transactions WHERE tx_id = ?", (tx_shipping_kcp,))
+    assert "산업용 안전 장갑" in str(cur_v.fetchone()["counterparty_info"] or "")
+
+    # Check (D): Offline fruit store 문경청과 self-healed to NULL / 999 미분류
+    cur_v.execute(
+        "SELECT counterparty_info, account_code FROM card_transactions WHERE tx_id = ?",
+        (tx_offline_fruit,),
+    )
+    fruit_row = dict(cur_v.fetchone())
+    assert fruit_row["counterparty_info"] is None
+    assert fruit_row["account_code"] == "999"
+
+    # Check (E): Wow Membership stated & biz_reg_no upgraded to 1208800767
+    cur_v.execute(
+        "SELECT counterparty_info, biz_reg_no FROM card_transactions WHERE tx_id = ?",
+        (tx_wow,),
+    )
+    wow_row = dict(cur_v.fetchone())
+    assert "와우 멤버십" in str(wow_row["counterparty_info"] or "")
+    assert wow_row["biz_reg_no"] == "1208800767"
+
+    # Also verify direct ingest_scraped_payload idempotency
+    conn_v.close()
+    conn_i = get_connection(str(db_file))
+    cur_i = conn_i.cursor()
+    ing_again = ingest_scraped_payload(
+        cur_i,
+        target_portal="COUPANG",
+        raw_content=backup_file.read_text(encoding="utf-8"),
+        archive_dir=arch_dir,
+    )
+    conn_i.commit()
+    conn_i.close()
+    assert ing_again["created_orders"] == 0
+
 
 

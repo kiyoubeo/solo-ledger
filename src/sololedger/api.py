@@ -48,6 +48,7 @@ from sololedger.email_watcher import (
     ingest_email_order_payload,
     load_email_watcher_config,
     save_email_watcher_config,
+    scroll_imap_coupang_emails,
     scroll_imap_toss_payments_emails,
     sync_imap_order_emails,
     update_email_account_entry,
@@ -1638,11 +1639,14 @@ async def list_scraper_targets_endpoint():
 
 
 @app.get("/api/v1/scraper/coupang-script")
-async def get_coupang_extractor_script_endpoint():
+async def get_coupang_extractor_script_endpoint(request: Request):
     """Return 1-click browser console script for extracting Coupang order list & receipts."""
     _verify_read_access()
+    base_url = str(request.base_url).rstrip("/") if request and request.base_url else "http://127.0.0.1:8000"
+    if "testserver" in base_url:
+        base_url = "http://127.0.0.1:8000"
     script = build_coupang_browser_extractor_script(
-        api_url="http://127.0.0.1:8000",
+        api_url=base_url,
         api_key=settings.api_key,
     )
     return {
@@ -1660,7 +1664,7 @@ async def coupang_auto_crawl_endpoint(
 ):
     """Launch persistent local browser session via CDP, auto-collect Coupang orders, and match."""
     _verify_api_key(x_api_key, sololedger_api_key)
-    max_wait = int(payload.get("max_wait_sec", 180)) if isinstance(payload, dict) else 180
+    max_wait = int(payload.get("max_wait_sec", 240)) if isinstance(payload, dict) else 240
 
     def _run_sync() -> Dict[str, Any]:
         init_db()
@@ -1674,6 +1678,44 @@ async def coupang_auto_crawl_endpoint(
             conn.close()
 
     return await asyncio.to_thread(_run_sync)
+
+
+@app.post("/api/v1/scraper/coupang-reconcile-backup")
+async def coupang_reconcile_backup_endpoint(
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Re-reconcile previously saved archive/coupang_orders_auto.json against the ledger."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    backup_path = settings.archive_dir / "coupang_orders_auto.json"
+    if not backup_path.exists():
+        return {
+            "status": "not_found",
+            "message": (
+                "아직 저장된 쿠팡 자동수집 백업 파일(coupang_orders_auto.json)이 없습니다. "
+                "먼저 자동 크롤링을 실행해 주세요."
+            ),
+            "matched_orders": 0,
+        }
+    raw_content = backup_path.read_text(encoding="utf-8", errors="replace")
+
+    def _run_rematch() -> Dict[str, Any]:
+        init_db()
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            res = ingest_scraped_payload(
+                cursor,
+                target_portal="COUPANG",
+                raw_content=raw_content,
+                auto_generate_slips=True,
+            )
+            conn.commit()
+            return res
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_run_rematch)
 
 
 @app.get("/api/v1/scraper/email-config")
@@ -1852,6 +1894,42 @@ async def scroll_toss_payments_email_endpoint(
             conn.close()
 
     return await asyncio.to_thread(_run_scroll)
+
+
+@app.post("/api/v1/scraper/email-scroll-coupang")
+async def scroll_coupang_email_endpoint(
+    payload: Dict[str, Any] = Body(default_factory=dict),
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Deep-scroll IMAP mailboxes (including All Mail & Promotions) for Coupang order emails."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    body = payload if isinstance(payload, dict) else {}
+    acc_id = str(body.get("account_id") or "").strip()
+    start_dt = str(body.get("start_date") or "").strip()
+    end_dt = str(body.get("end_date") or "").strip()
+    page_size = int(body.get("page_size", 50))
+    max_pages = int(body.get("max_pages", 80))
+
+    def _run_cp_scroll() -> Dict[str, Any]:
+        init_db()
+        conn = get_connection()
+        cur = conn.cursor()
+        try:
+            res = scroll_imap_coupang_emails(
+                cur,
+                account_id=acc_id or None,
+                start_date=start_dt or None,
+                end_date=end_dt or None,
+                page_size=page_size,
+                max_pages=max_pages,
+            )
+            conn.commit()
+            return res
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_run_cp_scroll)
 
 
 @app.post("/api/v1/scraper/email-webhook")

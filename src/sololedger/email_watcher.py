@@ -473,6 +473,7 @@ def save_email_watcher_config(
         "last_matched_count",
         "recent_matched_items",
         "processed_ids",
+        "coupang_parser_version",
     ):
         if key in updates and updates[key] is not None:
             cfg[key] = updates[key]
@@ -641,6 +642,7 @@ def get_public_email_watcher_config(
         pub["recent_matched_items"] = list(cfg.get("recent_matched_items") or [])
     pub["recent_matched_count"] = len(pub["recent_matched_items"])
     pub.pop("processed_ids", None)
+    pub.pop("coupang_parser_version", None)
     return pub
 
 
@@ -745,139 +747,410 @@ def _match_kv_label(label: str, candidates: tuple[str, ...]) -> bool:
     return False
 
 
+_COUPANG_DELIVERY_GROUP_PREFIXES = (
+    "로켓배송",
+    "로켓프레시",
+    "로켓와우",
+    "로켓직구",
+    "로켓설치",
+    "판매자배송",
+    "새벽배송",
+    "정기배송",
+)
+
+_COUPANG_CELL_NOISE_LINE_RE = re.compile(
+    r"^("
+    r"(?:내일|모레|오늘|글피|\d{1,2}/\d{1,2})\s*(?:\([월화수목금토일]\))?.*(?:도착|발송|출고).*|"
+    r"도착\s*예정.*|발송\s*예정.*|"
+    r"로켓배송|로켓프레시|로켓와우|로켓직구|로켓설치|새벽배송|판매자배송|정기배송|무료배송|유료배송|"
+    r"주문상세보기|배송조회|교환.*신청|반품.*신청|리뷰\s*작성.*"
+    r")$",
+    re.IGNORECASE,
+)
+
+
+def _clean_coupang_product_cell_html(cell_html: str) -> str:
+    """Extract clean product + option name from a Coupang HTML <td> cell, stripping arrival badges."""
+    frag = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", cell_html or "", flags=re.I | re.S)
+    frag = re.sub(r"<br\s*/?>|</(?:div|p|li|dt|dd|tr)>", "\n", frag, flags=re.I)
+    frag = html.unescape(re.sub(r"<[^>]+>", " ", frag))
+    kept: List[str] = []
+    for raw_ln in frag.splitlines():
+        ln = re.sub(r"\s+", " ", raw_ln).strip(" ·|-:")
+        if not ln or _COUPANG_CELL_NOISE_LINE_RE.match(ln):
+            continue
+        if re.match(r"^[\d,]+\s*원$", ln):
+            continue
+        kept.append(ln)
+    return ", ".join(kept) if len(kept) <= 2 else " ".join(kept[:2])
+
+
+def _extract_last_krw_in_text(text: str) -> int:
+    """Return the last positive KRW price in a cell (picking sale price after strikethrough price)."""
+    matches = re.findall(r"([\d,]+)\s*원", str(text or ""))
+    vals = [_parse_int_amount(m) for m in matches if _parse_int_amount(m) > 0]
+    if vals:
+        return vals[-1]
+    raw_v = _parse_int_amount(str(text or ""))
+    return raw_v if raw_v > 0 else 0
+
+
 def _extract_coupang_email_orders(
     combined_text: str,
     fallback_dt: str = "",
+    body_html: str = "",
+    subject: str = "",
+    sender: str = "",
 ) -> List[Dict[str, Any]]:
-    """Parse Coupang order confirmation email (5-col or 6-col table + discount prorating)."""
-    if "구매 상세내역" not in combined_text or "쿠팡가" not in combined_text:
+    """Parse Coupang order confirmation email (HTML table, 5/6-col text, or card layout + prorating)."""
+    hdr_probe = f"{sender} {subject}".lower()
+    is_coupang_hdr = any(k in hdr_probe for k in ("쿠팡", "coupang", "쿠페이", "coupay"))
+    has_legacy_markers = "구매 상세내역" in combined_text and "쿠팡가" in combined_text
+    if not has_legacy_markers and not is_coupang_hdr:
         return []
 
+    raw_items: List[Dict[str, Any]] = []
+    total_paid = 0
+    card_paid_amt = 0
+    has_cash_or_money_split = False
+    saw_rocket_group = "로켓배송" in combined_text or "로켓프레시" in combined_text
+    saw_third_party_group = "판매자배송" in combined_text
+
+    _cp_stop_tokens = (
+        "결제 정보",
+        "결제정보",
+        "받으시는 분",
+        "받는사람 정보",
+        "배송지 정보",
+        "구매 상세내역",
+        "주문금액",
+        "총 상품금액",
+        "총상품금액",
+        "배송비",
+        "할인금액",
+        "총 할인금액",
+        "쿠팡캐시",
+        "쿠페이 머니",
+        "쿠페이머니",
+        "결제금액",
+        "총 결제금액",
+        "총결제금액",
+        "실결제금액",
+    )
+
+    # 1. Direct HTML <table> row parser (handles delivery sub-header rows & multi-line <td> cells)
+    if body_html and "<tr" in body_html.lower():
+        table_blocks = re.findall(r"<table[^>]*>(.*?)</table\s*>", body_html, flags=re.I | re.S)
+        if not table_blocks:
+            table_blocks = [body_html]
+        for tbl in table_blocks:
+            tr_list = re.findall(r"<tr[^>]*>(.*?)</tr\s*>", tbl, flags=re.I | re.S)
+            hdr_map: Dict[str, int] = {}
+            in_items_table = False
+            for tr_html in tr_list:
+                raw_cells = re.findall(r"<t[hd][^>]*>(.*?)</t[hd]\s*>", tr_html, flags=re.I | re.S)
+                if not raw_cells:
+                    continue
+                plain_cells = [
+                    re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", c))).strip()
+                    for c in raw_cells
+                ]
+                non_empty = [c for c in plain_cells if c]
+                if not non_empty:
+                    continue
+
+                # Check 2-cell payment summary KV rows
+                if len(non_empty) == 2:
+                    k_lbl = re.sub(r"\s+", "", non_empty[0])
+                    v_txt = non_empty[1]
+                    if k_lbl in ("총결제금액", "실결제금액", "최종결제금액") or (
+                        k_lbl == "결제금액" and not in_items_table
+                    ):
+                        v_int = _extract_last_krw_in_text(v_txt)
+                        if v_int >= 100:
+                            total_paid = v_int
+                    elif any(ck in k_lbl for ck in ("카드결제", "신용카드", "체크카드", "신용/체크카드")):
+                        v_int = _extract_last_krw_in_text(v_txt)
+                        if v_int >= 100:
+                            card_paid_amt += v_int
+                    elif any(mk in k_lbl for mk in ("쿠페이머니", "쿠팡캐시", "적립금", "포인트")):
+                        if _extract_last_krw_in_text(v_txt) > 0:
+                            has_cash_or_money_split = True
+
+                # Detect Coupang item table header row
+                joined_hdr = " ".join(plain_cells)
+                c0_clean = re.sub(r"\s+", "", plain_cells[0])
+                if (
+                    len(plain_cells) >= 3
+                    and c0_clean in ("구매상세내역", "상품정보", "상품명", "주문상품", "주문상품내역", "품목명")
+                    and sum(
+                        1
+                        for kw in ("쿠팡가", "단가", "상품금액", "수량", "구매금액", "결제금액", "합계", "판매자")
+                        if kw in joined_hdr
+                    )
+                    >= 2
+                ):
+                    hdr_map = {"prod": 0}
+                    for c_idx, c_txt in enumerate(plain_cells[1:], start=1):
+                        ck = re.sub(r"\s+", "", c_txt)
+                        if ck in ("쿠팡가", "단가", "판매가", "상품단가") and "unit" not in hdr_map:
+                            hdr_map["unit"] = c_idx
+                        elif "수량" in ck and "qty" not in hdr_map:
+                            hdr_map["qty"] = c_idx
+                        elif ck in ("구매금액", "상품금액", "합계금액", "합계", "결제금액", "주문금액"):
+                            hdr_map["line_amt"] = c_idx
+                        elif "판매자" in ck or "공급자" in ck:
+                            hdr_map["seller"] = c_idx
+                    in_items_table = True
+                    continue
+
+                if not in_items_table:
+                    continue
+
+                first_txt = non_empty[0]
+                if any(first_txt.startswith(pfx) for pfx in _COUPANG_DELIVERY_GROUP_PREFIXES):
+                    if "로켓" in first_txt:
+                        saw_rocket_group = True
+                    if "판매자" in first_txt:
+                        saw_third_party_group = True
+                    # Delivery group sub-header row (colspan): skip row and continue!
+                    continue
+
+                if first_txt in _cp_stop_tokens and len(non_empty) <= 2:
+                    in_items_table = False
+                    continue
+
+                if len(raw_cells) >= 3:
+                    p_clean = _clean_coupang_product_cell_html(raw_cells[hdr_map.get("prod", 0)])
+                    qty_val = 1
+                    q_idx = hdr_map.get("qty")
+                    if q_idx is not None and q_idx < len(plain_cells):
+                        m_q = re.search(r"(\d+)", plain_cells[q_idx])
+                        if m_q:
+                            qty_val = max(1, int(m_q.group(1)))
+                    l_amt = 0
+                    l_idx = hdr_map.get("line_amt")
+                    if l_idx is not None and l_idx < len(plain_cells):
+                        l_amt = _extract_last_krw_in_text(plain_cells[l_idx])
+                    if l_amt <= 0 and hdr_map.get("unit") is not None and hdr_map["unit"] < len(plain_cells):
+                        u_amt = _extract_last_krw_in_text(plain_cells[hdr_map["unit"]])
+                        l_amt = u_amt * qty_val
+                    seller_s = ""
+                    s_idx = hdr_map.get("seller")
+                    if s_idx is not None and s_idx < len(plain_cells):
+                        cand_sel = plain_cells[s_idx].strip(" -:")
+                        if cand_sel and not re.match(r"^(무료|유료|[\d,]+\s*원)$", cand_sel):
+                            seller_s = cand_sel
+                    if p_clean and not _is_noise_product_name(p_clean) and l_amt > 0:
+                        entry_h: Dict[str, Any] = {"item": p_clean, "qty": qty_val, "price": l_amt}
+                        if seller_s:
+                            entry_h["seller"] = seller_s
+                        raw_items.append(entry_h)
+
+    # 2. Token-stream parser fallback (plain-text emails or unparsed tables)
     tokens = [
         tok.strip()
         for ln in combined_text.splitlines()
         for tok in ln.split(" : ")
         if tok.strip()
     ]
-    raw_items: List[Dict[str, Any]] = []
-    total_paid = 0
-    _cp_stop_tokens = (
-        "결제 정보",
-        "결제정보",
-        "받으시는 분",
-        "구매 상세내역",
-        "주문금액",
-        "배송비",
-        "할인금액",
-        "결제금액",
-        "총 결제금액",
-        "총결제금액",
-    )
-    i = 0
     n = len(tokens)
-    while i < n:
-        tok = tokens[i]
-        if (tok in ("총 결제금액", "총결제금액") or (tok == "결제금액" and raw_items)) and i + 1 < n:
-            val = _parse_int_amount(tokens[i + 1])
+    for idx_t, tok in enumerate(tokens):
+        if tok in ("총 결제금액", "총결제금액", "실결제금액") and idx_t + 1 < n and total_paid <= 0:
+            val = _extract_last_krw_in_text(tokens[idx_t + 1])
             if val >= 100:
                 total_paid = val
-        is_hdr_5 = (
-            tok == "구매 상세내역"
-            and i + 4 < n
-            and tokens[i + 1] == "쿠팡가"
-            and tokens[i + 2] == "수량"
-            and tokens[i + 3] == "구매금액"
-            and tokens[i + 4] == "판매자"
-        )
-        is_hdr_6 = (
-            tok == "구매 상세내역"
-            and i + 5 < n
-            and tokens[i + 1] == "쿠팡가"
-            and tokens[i + 2] == "수량"
-            and tokens[i + 3] == "구매금액"
-            and tokens[i + 4] == "배송정보"
-            and tokens[i + 5] == "판매자"
-        )
-        if is_hdr_5 or is_hdr_6:
-            j = i + (6 if is_hdr_6 else 5)
-            while j + 4 <= n:
-                p_name = tokens[j]
-                u_price_s = tokens[j + 1]
-                qty_s = tokens[j + 2]
-                l_price_s = tokens[j + 3]
-                if (
-                    p_name in _cp_stop_tokens
-                    or p_name.startswith(("로켓배송 상품", "판매자배송 상품", "새벽배송 상품"))
-                    or not re.match(r"^[\d,]+\s*원$", u_price_s)
-                    or not qty_s.isdigit()
-                    or not re.match(r"^[\d,]+\s*원$", l_price_s)
-                ):
-                    break
-                seller_s = ""
-                step = 4
-                if j + 4 < n:
-                    cand_s = tokens[j + 4].strip()
-                    next_is_section = cand_s in _cp_stop_tokens or cand_s.startswith(
-                        ("로켓배송 상품", "판매자배송 상품", "새벽배송 상품")
-                    )
-                    next_is_item_row = (
-                        j + 7 < n
-                        and re.match(r"^[\d,]+\s*원$", tokens[j + 5])
-                        and tokens[j + 6].isdigit()
-                        and re.match(r"^[\d,]+\s*원$", tokens[j + 7])
-                    )
-                    if not next_is_section and not next_is_item_row:
-                        if (
-                            is_hdr_6
-                            and j + 5 < n
-                            and re.match(
-                                r"^(무료(?:배송)?|유료(?:배송)?|착불|선불|[\d,]+\s*원|배송비.*|-)$",
-                                cand_s,
-                            )
-                        ):
-                            cand_5 = tokens[j + 5].strip()
-                            next5_is_section = cand_5 in _cp_stop_tokens or cand_5.startswith(
-                                ("로켓배송 상품", "판매자배송 상품", "새벽배송 상품")
-                            )
-                            next5_is_item_row = (
-                                j + 8 < n
-                                and re.match(r"^[\d,]+\s*원$", tokens[j + 6])
-                                and tokens[j + 7].isdigit()
-                                and re.match(r"^[\d,]+\s*원$", tokens[j + 8])
-                            )
-                            if not next5_is_section and not next5_is_item_row:
-                                seller_s = cand_5
-                                step = 6
+        elif tok in ("카드결제", "신용카드", "체크카드", "신용/체크카드") and idx_t + 1 < n and card_paid_amt <= 0:
+            val = _extract_last_krw_in_text(tokens[idx_t + 1])
+            if val >= 100:
+                card_paid_amt = val
+        elif tok in ("쿠페이 머니", "쿠페이머니", "쿠팡캐시") and idx_t + 1 < n:
+            if _extract_last_krw_in_text(tokens[idx_t + 1]) > 0:
+                has_cash_or_money_split = True
+
+    if not raw_items:
+        def _is_price_tok(s: str) -> bool:
+            return bool(re.search(r"[\d,]+\s*원$", s.strip()))
+
+        def _parse_qty_tok(s: str) -> Optional[int]:
+            m_qt = re.match(r"^(\d+)\s*개?$", s.strip())
+            return max(1, int(m_qt.group(1))) if m_qt else None
+
+        i = 0
+        while i < n:
+            tok = tokens[i]
+            if tok == "결제금액" and raw_items and total_paid <= 0 and i + 1 < n:
+                val = _extract_last_krw_in_text(tokens[i + 1])
+                if val >= 100:
+                    total_paid = val
+            is_hdr_5 = (
+                tok in ("구매 상세내역", "상품정보", "주문상품")
+                and i + 4 < n
+                and tokens[i + 1] in ("쿠팡가", "단가", "상품금액")
+                and "수량" in tokens[i + 2]
+                and tokens[i + 3] in ("구매금액", "합계금액", "결제금액", "상품금액")
+                and "판매자" in tokens[i + 4]
+            )
+            is_hdr_6 = (
+                tok in ("구매 상세내역", "상품정보", "주문상품")
+                and i + 5 < n
+                and tokens[i + 1] in ("쿠팡가", "단가", "상품금액")
+                and "수량" in tokens[i + 2]
+                and tokens[i + 3] in ("구매금액", "합계금액", "결제금액", "상품금액")
+                and "배송" in tokens[i + 4]
+                and "판매자" in tokens[i + 5]
+            )
+            if is_hdr_5 or is_hdr_6:
+                j = i + (6 if is_hdr_6 else 5)
+                while j < n:
+                    p_name = tokens[j]
+                    if p_name in _cp_stop_tokens:
+                        break
+                    if (
+                        any(p_name.startswith(pfx) for pfx in _COUPANG_DELIVERY_GROUP_PREFIXES)
+                        or _COUPANG_CELL_NOISE_LINE_RE.match(p_name)
+                    ):
+                        if "로켓" in p_name:
+                            saw_rocket_group = True
+                        if "판매자" in p_name:
+                            saw_third_party_group = True
+                        j += 1
+                        continue
+                    # Allow up to 2 arrival/option tokens between product name and unit price
+                    matched_offset = -1
+                    qty_val = 1
+                    for off in (0, 1, 2):
+                        if j + off + 3 >= n:
+                            break
+                        cand_u = tokens[j + off + 1]
+                        cand_q = _parse_qty_tok(tokens[j + off + 2])
+                        cand_l = tokens[j + off + 3]
+                        if _is_price_tok(cand_u) and cand_q is not None and _is_price_tok(cand_l):
+                            matched_offset = off
+                            qty_val = cand_q
+                            break
+                    if matched_offset < 0:
+                        break
+                    base_j = j + matched_offset
+                    l_price_s = tokens[base_j + 3]
+                    seller_s = ""
+                    step = matched_offset + 4
+                    if base_j + 4 < n:
+                        cand_s = tokens[base_j + 4].strip()
+                        next_is_section = cand_s in _cp_stop_tokens or any(
+                            cand_s.startswith(pfx) for pfx in _COUPANG_DELIVERY_GROUP_PREFIXES
+                        )
+                        next_is_item_row = (
+                            base_j + 7 < n
+                            and _is_price_tok(tokens[base_j + 5])
+                            and _parse_qty_tok(tokens[base_j + 6]) is not None
+                            and _is_price_tok(tokens[base_j + 7])
+                        )
+                        if not next_is_section and not next_is_item_row:
+                            if (
+                                is_hdr_6
+                                and base_j + 5 < n
+                                and re.match(
+                                    r"^(무료(?:배송)?|유료(?:배송)?|착불|선불|[\d,]+\s*원|배송비.*|-)$",
+                                    cand_s,
+                                )
+                            ):
+                                cand_5 = tokens[base_j + 5].strip()
+                                next5_is_section = cand_5 in _cp_stop_tokens or any(
+                                    cand_5.startswith(pfx) for pfx in _COUPANG_DELIVERY_GROUP_PREFIXES
+                                )
+                                next5_is_item_row = (
+                                    base_j + 8 < n
+                                    and _is_price_tok(tokens[base_j + 6])
+                                    and _parse_qty_tok(tokens[base_j + 7]) is not None
+                                    and _is_price_tok(tokens[base_j + 8])
+                                )
+                                if not next5_is_section and not next5_is_item_row:
+                                    seller_s = cand_5
+                                    step = matched_offset + 6
+                                else:
+                                    seller_s = cand_s
+                                    step = matched_offset + 5
                             else:
                                 seller_s = cand_s
-                                step = 5
-                        else:
-                            seller_s = cand_s
-                            step = 5
-                l_amt = _parse_int_amount(l_price_s)
-                qty_val = max(1, int(qty_s))
-                if not _is_noise_product_name(p_name) and l_amt > 0:
-                    entry: Dict[str, Any] = {"item": p_name, "qty": qty_val, "price": l_amt}
-                    if seller_s:
-                        entry["seller"] = seller_s
-                    raw_items.append(entry)
-                j += step
-            i = j
-            continue
-        i += 1
+                                step = matched_offset + 5
+                    l_amt = _extract_last_krw_in_text(l_price_s)
+                    if not _is_noise_product_name(p_name) and l_amt > 0:
+                        entry = {"item": p_name, "qty": qty_val, "price": l_amt}
+                        if seller_s:
+                            entry["seller"] = seller_s
+                        raw_items.append(entry)
+                    j += step
+                i = j
+                continue
+            i += 1
+
+    # 3. Modern card-style Coupang order confirmation email fallback (when sender/subject is Coupang)
+    if not raw_items and is_coupang_hdr and any(
+        kw in f"{subject} {combined_text}" for kw in ("주문번호", "주문이 완료", "주문하신 내역", "결제금액")
+    ):
+        if "와우 멤버십" not in subject and "로켓와우클럽 월회비" not in combined_text:
+            lines_card = [ln.strip() for ln in combined_text.splitlines() if ln.strip()]
+            prev_title = ""
+            for ln in lines_card:
+                if any(ln.startswith(st) for st in _cp_stop_tokens) or _COUPANG_CELL_NOISE_LINE_RE.match(ln):
+                    prev_title = ""
+                    continue
+                m_pq = re.search(r"([\d,]{3,})\s*원\s*[·/|,-]?\s*(?:수량\s*[:：]?\s*)?(\d+)\s*개", ln)
+                if m_pq:
+                    amt_c = _parse_int_amount(m_pq.group(1))
+                    qty_c = max(1, int(m_pq.group(2)))
+                    before_c = ln[: m_pq.start()].strip(" ·-:|")
+                    cand_title = before_c if len(before_c) >= 2 else prev_title
+                    if cand_title and not _is_noise_product_name(cand_title) and amt_c > 0:
+                        raw_items.append({"item": cand_title, "qty": qty_c, "price": amt_c})
+                        prev_title = ""
+                elif len(ln) >= 3 and not ln.isdigit() and "원" not in ln and not _is_noise_product_name(ln):
+                    prev_title = ln
 
     if not raw_items:
         return []
 
+    if card_paid_amt <= 0:
+        m_inline_card = re.search(
+            r"(?:신용카드\s*결제금액|체크카드\s*결제금액|카드\s*결제금액|카드결제)\s*[:：]\s*([\d,]{3,})\s*원",
+            combined_text,
+        )
+        if m_inline_card:
+            card_paid_amt = _parse_int_amount(m_inline_card.group(1))
+    if total_paid <= 0:
+        m_inline_tot = re.search(
+            r"(?:총\s*결제금액|실결제금액|최종결제금액)\s*[:：]\s*([\d,]{3,})\s*원",
+            combined_text,
+        )
+        if m_inline_tot:
+            total_paid = _parse_int_amount(m_inline_tot.group(1))
+
     sum_items = sum(int(x["price"]) for x in raw_items)
-    if total_paid <= 0:
-        total_paid = sum_items
-    if total_paid <= 0:
+    if card_paid_amt > 0:
+        effective_paid = card_paid_amt
+    elif has_cash_or_money_split and total_paid <= 0:
+        return []
+    elif total_paid > 0:
+        effective_paid = total_paid
+    else:
+        effective_paid = sum_items
+    if effective_paid <= 0:
         return []
 
-    prorated_items = _prorate_order_line_items(raw_items, total_paid)
+    prorated_items = _prorate_order_line_items(raw_items, effective_paid)
 
-    order_dt = fallback_dt[:10] if len(fallback_dt) >= 10 else ""
+    order_dt = ""
+    m_explicit_dt = re.search(
+        r"(?:주문일시|주문일자|주문일|결제일시|결제일)\s*[:：]?\s*(20\d{2}\s*[.\-/년]\s*\d{1,2}\s*[.\-/월]\s*\d{1,2}(?:\s*일?\s*\d{1,2}:\d{2}(?::\d{2})?)?)",
+        combined_text,
+    )
+    if m_explicit_dt:
+        norm_exp = _normalize_datetime_str(m_explicit_dt.group(1))
+        if len(norm_exp) >= 10 and norm_exp[:4].isdigit():
+            order_dt = norm_exp[:10]
+    if not order_dt and len(fallback_dt) >= 10:
+        order_dt = fallback_dt[:10]
     if not order_dt:
         m_dt = re.search(r"(20\d{2})\s*[.\-/년]\s*(\d{1,2})\s*[.\-/월]\s*(\d{1,2})", combined_text)
         if m_dt:
@@ -885,7 +1158,6 @@ def _extract_coupang_email_orders(
     if not order_dt:
         return []
 
-    # Separate Coupang Direct (쿠팡(주) -> 120-88-00767) from 3rd-party Marketplace/Rocket-Growth sellers
     sellers = [
         str(it.get("seller") or "").strip()
         for it in prorated_items
@@ -911,20 +1183,29 @@ def _extract_coupang_email_orders(
             mp_seller = f"{third_party_sellers[0]} 외 (쿠팡 복합주문)"
         else:
             mp_seller = f"{third_party_sellers[0]} 외 {len(third_party_sellers) - 1}곳"
-    elif has_direct_cp or ("로켓배송" in combined_text and "판매자배송" not in combined_text):
+    elif has_direct_cp or (saw_rocket_group and not saw_third_party_group):
         order_biz_no = cp_biz_no
 
     card_issuer = ""
     pay_method = ""
     m_card = re.search(
         r"(우리비씨|우리|국민|KB|비씨|BC|삼성|현대|롯데|신한|하나|농협|NH|기업|IBK)"
-        r"(?:카드)*(?:쿠페이\(카드\)|페이)?\s*(?:/|\()\s*(일시불|\d+\s*개월|할부)\)?",
+        r"(?:법인|카드)*(?:\s*\(?(\d[\d*]{3})\)?|\s*\d{4}[-\s]+[\d*]{2,4}[-\s]+[\d*]{2,4}[-\s]+(\d[\d*]{3}))?"
+        r"(?:\s*쿠페이\(카드\)|\s*페이)?\s*(?:(?:/|\()\s*(일시불|\d+\s*개월|할부)\)?)?",
         combined_text,
         flags=re.IGNORECASE,
     )
-    if m_card:
-        card_issuer = f"{m_card.group(1)}카드" if "카드" not in m_card.group(1) else m_card.group(1)
-        pay_method = f"{card_issuer} / {m_card.group(2)}"
+    if m_card and (m_card.group(2) or m_card.group(3) or m_card.group(4)):
+        base_issuer = f"{m_card.group(1)}카드" if "카드" not in m_card.group(1) else m_card.group(1)
+        tail4 = m_card.group(2) or m_card.group(3) or ""
+        card_issuer = f"{base_issuer} ({tail4})" if tail4 else base_issuer
+        inst = m_card.group(4) or "일시불"
+        pay_method = f"{card_issuer} / {inst}"
+
+    m_app = re.search(r"승인번호\s*[:：]?\s*(\d{6,12})", combined_text)
+    approval_no = m_app.group(1) if m_app else ""
+    m_ord = re.search(r"주문번호\s*[:：]?\s*(\d{10,18})", combined_text)
+    order_no = m_ord.group(1) if m_ord else ""
 
     summary_title = (
         prorated_items[0]["item"]
@@ -932,22 +1213,23 @@ def _extract_coupang_email_orders(
         else f"{prorated_items[0]['item']} 외 {len(prorated_items) - 1}건"
     )
     full_dt = fallback_dt if len(fallback_dt) >= 16 and fallback_dt[:10] == order_dt else order_dt
-    return [
-        {
-            "주문일자": order_dt,
-            "주문일시": full_dt,
-            "상품명": summary_title,
-            "결제금액": total_paid,
-            "상점명": "",
-            "발신처": "쿠팡",
-            "승인번호": "",
-            "카드사": card_issuer,
-            "결제수단": pay_method,
-            "사업자번호": order_biz_no,
-            "입점판매자": mp_seller,
-            "품목내역": prorated_items,
-        }
-    ]
+    out_row: Dict[str, Any] = {
+        "주문일자": order_dt,
+        "주문일시": full_dt,
+        "상품명": summary_title,
+        "결제금액": effective_paid,
+        "상품합계금액": sum_items,
+        "상점명": "",
+        "발신처": "쿠팡",
+        "주문번호": order_no,
+        "승인번호": approval_no,
+        "카드사": card_issuer,
+        "결제수단": pay_method,
+        "사업자번호": order_biz_no,
+        "입점판매자": mp_seller,
+        "품목내역": prorated_items,
+    }
+    return [out_row]
 
 
 def _extract_naverpay_email_orders(
@@ -1572,8 +1854,14 @@ def extract_orders_from_email_content(
 
     portal_hint = _infer_sender_portal(sender, subject)
 
-    # 1. Dedicated Coupang Order Confirmation Email parser (multi-item + discount prorating)
-    cp_email_orders = _extract_coupang_email_orders(combined_text, fallback_dt=fallback_dt)
+    # 1. Dedicated Coupang Order Confirmation Email parser (HTML table / 5·6-col / card layout)
+    cp_email_orders = _extract_coupang_email_orders(
+        combined_text,
+        fallback_dt=fallback_dt,
+        body_html=body_html,
+        subject=subject,
+        sender=sender,
+    )
     if cp_email_orders:
         return cp_email_orders
 
@@ -2174,6 +2462,11 @@ def sync_imap_order_emails(
     raw_lb = lookback_days if lookback_days is not None else (cfg.get("lookback_days") or 365)
     eff_lookback_days = max(1, min(1095, int(raw_lb)))
     processed_ids: set[str] = set() if force_rescan else set(cfg.get("processed_ids") or [])
+    need_coupang_rescan = (
+        not force_rescan
+        and bool(processed_ids)
+        and int(cfg.get("coupang_parser_version") or 0) < 2
+    )
 
     if account_id:
         targets = [a for a in accounts if a.get("account_id") == account_id]
@@ -2272,6 +2565,15 @@ def sync_imap_order_emails(
                             typ_r, data_r = imap.search(None, f"(SINCE {recent_since_dt})")
                         if typ_r == "OK" and data_r and data_r[0]:
                             always_rescan_nums = set(data_r[0].split())
+                    if need_coupang_rescan and use_uid:
+                        try:
+                            typ_cp, data_cp = imap.uid(
+                                "SEARCH", None, "FROM", '"coupang"', "SINCE", since_dt
+                            )
+                            if typ_cp == "OK" and data_cp and data_cp[0]:
+                                always_rescan_nums.update(data_cp[0].split())
+                        except Exception:
+                            pass
 
                     recent_nums = (
                         list(reversed(msg_nums[-max_messages:]))
@@ -2420,6 +2722,78 @@ def sync_imap_order_emails(
                                 m_id, u_id, _ = cand_meta
                                 new_processed.append(m_id)
                                 new_processed.append(u_id)
+
+                # Rescue Coupang order emails from Promotion/Smart folders (e.g. Naver Smart Mailboxes)
+                if use_uid and not any(
+                    "all mail" in b.lower() or "전체보관함" in _decode_imap_utf7(b)
+                    for b in mailboxes
+                ):
+                    promo_boxes = _discover_imap_promotion_mailboxes(imap, exclude=mailboxes)
+                    for pmbox in promo_boxes:
+                        if imap.select(_quote_imap_mailbox(pmbox), readonly=True)[0] != "OK":
+                            continue
+                        try:
+                            typ_pm, data_pm = imap.uid(
+                                "SEARCH", None, "FROM", '"coupang"', "SINCE", since_dt
+                            )
+                        except Exception:
+                            continue
+                        pm_uids = (
+                            data_pm[0].split()
+                            if (typ_pm == "OK" and data_pm and data_pm[0])
+                            else []
+                        )
+                        if not pm_uids:
+                            continue
+                        pm_prefix = f"{user}:{pmbox}:uid:"
+                        pm_pending = [
+                            u
+                            for u in reversed(pm_uids)
+                            if force_rescan
+                            or need_coupang_rescan
+                            or f"{pm_prefix}{u.decode('ascii', errors='ignore')}" not in processed_ids
+                        ]
+                        for b_start in range(0, len(pm_pending), 25):
+                            chunk_u = pm_pending[b_start : b_start + 25]
+                            acc_pages += 1
+                            total_scrolled_pages += 1
+                            typ_pb, pb_data = imap.uid(
+                                "FETCH", b",".join(chunk_u), "(UID BODY.PEEK[])"
+                            )
+                            if typ_pb != "OK" or not pb_data:
+                                continue
+                            for idx_p, p_item in enumerate(pb_data):
+                                if not (
+                                    isinstance(p_item, tuple)
+                                    and len(p_item) >= 2
+                                    and isinstance(p_item[1], bytes)
+                                ):
+                                    continue
+                                u_tok = _extract_fetch_msg_token(pb_data, idx_p, True, chunk_u[0])
+                                u_key = f"{pm_prefix}{u_tok.decode('ascii', errors='ignore')}"
+                                parts_p = _extract_eml_parts(p_item[1])
+                                m_key = (
+                                    f"{user}:{parts_p['message_id']}"
+                                    if parts_p["message_id"]
+                                    else u_key
+                                )
+                                if m_key in seen_acc_msg_keys:
+                                    new_processed.append(u_key)
+                                    continue
+                                seen_acc_msg_keys.add(m_key)
+                                if not _IGNORE_EMAIL_SUBJECT_RE.search(parts_p["subject"]):
+                                    ext_p = extract_orders_from_email_content(
+                                        subject=parts_p["subject"],
+                                        sender=parts_p["sender"],
+                                        date_str=parts_p["date_str"],
+                                        body_text=parts_p["body_text"],
+                                        body_html=parts_p["body_html"],
+                                    )
+                                    if ext_p:
+                                        acc_scanned += 1
+                                        acc_orders.extend(ext_p)
+                                new_processed.append(m_key)
+                                new_processed.append(u_key)
             finally:
                 try:
                     imap.logout()
@@ -2637,6 +3011,7 @@ def sync_imap_order_emails(
             "last_matched_count": matched,
             "recent_matched_items": merged_history,
             "processed_ids": new_processed,
+            "coupang_parser_version": 2,
         },
         archive_dir=archive_dir,
     )
@@ -3025,7 +3400,20 @@ _IMAP_SKIP_FOLDER_KEYWORDS = (
     "보낸메일",
     "sent",
 )
-_IMAP_ORDER_FOLDER_KEYWORDS = ("청구", "결제", "영수증", "명세서", "쇼핑", "주문")
+_IMAP_ORDER_FOLDER_KEYWORDS = (
+    "청구",
+    "결제",
+    "영수증",
+    "명세서",
+    "쇼핑",
+    "주문",
+    "쿠팡",
+    "coupang",
+    "구매",
+    "내역",
+    "알림",
+    "카드",
+)
 
 
 def _decode_imap_utf7(raw_name: str) -> str:
@@ -3090,42 +3478,53 @@ def _resolve_account_email_address(acc: Dict[str, Any]) -> str:
     return raw
 
 
+def _parse_imap_list_entry(entry: bytes) -> tuple[str, str]:
+    """Parse an IMAP LIST response line into (flags_low, raw_mailbox_name)."""
+    line = entry.decode("utf-8", errors="replace")
+    m_list = re.match(
+        r'^\s*\((?P<flags>[^)]*)\)\s+(?:"(?:\\.|[^"])*"|NIL|\S+)\s+(?P<name>.+?)\s*$',
+        line,
+    )
+    if m_list:
+        flags_low = m_list.group("flags").lower()
+        raw_tok = m_list.group("name").strip()
+        if len(raw_tok) >= 2 and raw_tok.startswith('"') and raw_tok.endswith('"'):
+            cand = raw_tok[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+        else:
+            cand = raw_tok
+        return flags_low, cand
+    flags_low = line.lower()
+    m_q = re.search(r'"([^"]+)"\s*$', line)
+    cand = m_q.group(1).strip() if m_q else line.rsplit(" ", 1)[-1].strip()
+    return flags_low, cand
+
+
 def _discover_imap_scroll_mailboxes(imap: Any, configured_mailbox: str = "INBOX") -> List[str]:
     """Return ordered list of mailboxes to scroll (All Mail, primary INBOX, and billing/order folders)."""
     primary = (configured_mailbox or "INBOX").strip() or "INBOX"
     boxes: List[str] = [primary]
+    if not hasattr(imap, "list"):
+        return boxes
     try:
         typ, raw_list = imap.list()
         if typ == "OK" and raw_list:
             for entry in raw_list:
                 if not isinstance(entry, bytes):
                     continue
-                line = entry.decode("utf-8", errors="replace")
-                m_list = re.match(
-                    r'^\s*\((?P<flags>[^)]*)\)\s+(?:"(?:\\.|[^"])*"|NIL|\S+)\s+(?P<name>.+?)\s*$',
-                    line,
-                )
-                if m_list:
-                    flags_low = m_list.group("flags").lower()
-                    raw_tok = m_list.group("name").strip()
-                    if len(raw_tok) >= 2 and raw_tok.startswith('"') and raw_tok.endswith('"'):
-                        cand = raw_tok[1:-1].replace('\\"', '"').replace("\\\\", "\\")
-                    else:
-                        cand = raw_tok
-                else:
-                    flags_low = line.lower()
-                    m_q = re.search(r'"([^"]+)"\s*$', line)
-                    cand = m_q.group(1).strip() if m_q else line.rsplit(" ", 1)[-1].strip()
-                if not cand:
-                    continue
-                if any(flag in flags_low for flag in _IMAP_SKIP_FLAGS):
-                    continue
-                if "\\all" in flags_low or cand == "[Gmail]/All Mail":
-                    if cand not in boxes:
-                        # Put All Mail first when available so archived messages are scanned in one pass
-                        boxes.insert(0, cand)
+                flags_low, cand = _parse_imap_list_entry(entry)
+                if not cand or any(flag in flags_low for flag in _IMAP_SKIP_FLAGS):
                     continue
                 decoded_low = _decode_imap_utf7(cand).lower()
+                is_all_mail = (
+                    "\\all" in flags_low
+                    or cand == "[Gmail]/All Mail"
+                    or "전체보관함" in decoded_low
+                    or "전체 메일" in decoded_low
+                )
+                if is_all_mail:
+                    if cand not in boxes:
+                        boxes.insert(0, cand)
+                    continue
                 if any(kw in decoded_low for kw in _IMAP_SKIP_FOLDER_KEYWORDS):
                     continue
                 if any(kw in decoded_low for kw in _IMAP_ORDER_FOLDER_KEYWORDS) and cand not in boxes:
@@ -3133,6 +3532,34 @@ def _discover_imap_scroll_mailboxes(imap: Any, configured_mailbox: str = "INBOX"
     except Exception:
         pass
     return boxes
+
+
+def _discover_imap_promotion_mailboxes(
+    imap: Any,
+    exclude: Optional[List[str]] = None,
+) -> List[str]:
+    """Return Promotion/Smart folders (e.g. Naver '프로모션') for targeted sender-filtered rescue."""
+    excluded = set(exclude or [])
+    promo_boxes: List[str] = []
+    if not hasattr(imap, "list"):
+        return promo_boxes
+    try:
+        typ, raw_list = imap.list()
+        if typ == "OK" and raw_list:
+            for entry in raw_list:
+                if not isinstance(entry, bytes):
+                    continue
+                flags_low, cand = _parse_imap_list_entry(entry)
+                if not cand or cand in excluded:
+                    continue
+                if any(flag in flags_low for flag in _IMAP_SKIP_FLAGS):
+                    continue
+                decoded_low = _decode_imap_utf7(cand).lower()
+                if any(k in decoded_low for k in ("프로모션", "promotion")) and cand not in promo_boxes:
+                    promo_boxes.append(cand)
+    except Exception:
+        pass
+    return promo_boxes
 
 
 def _ensure_toss_merchant_master(
@@ -3895,5 +4322,295 @@ def scroll_imap_toss_payments_emails(
         "skipped_personal_count": skipped_personal,
         "skipped_canceled_count": skipped_canceled,
         "items": result_items,
+        "account_results": account_results,
+    }
+
+
+def scroll_imap_coupang_emails(
+    cursor: sqlite3.Cursor,
+    archive_dir: Optional[Path] = None,
+    account_id: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    page_size: int = 50,
+    max_pages: int = 80,
+) -> Dict[str, Any]:
+    """Deep-scroll IMAP mailboxes (including All Mail & Promotion smart folders) for Coupang orders."""
+    cfg = load_email_watcher_config(archive_dir)
+    accounts: List[Dict[str, Any]] = list(cfg.get("accounts") or [])
+    targets = (
+        [a for a in accounts if a.get("account_id") == account_id]
+        if account_id
+        else [a for a in accounts if a.get("enabled", True)]
+    )
+    valid_targets = [
+        a
+        for a in targets
+        if str(a.get("imap_host") or "").strip()
+        and str(a.get("email_address") or "").strip()
+        and str(a.get("app_password") or "").strip()
+    ]
+    if not valid_targets:
+        return {
+            "status": "not_configured",
+            "message": "활성화된 이메일 계정(주소 및 IMAP 앱 비밀번호)을 먼저 등록해 주세요.",
+            "scrolled_pages": 0,
+            "scanned_messages": 0,
+            "parsed_coupang_count": 0,
+            "matched_count": 0,
+            "created_count": 0,
+            "newly_stated_count": 0,
+            "items": [],
+            "account_results": [],
+        }
+
+    eff_page_size = max(10, min(200, int(page_size or 50)))
+    eff_max_pages = max(1, min(200, int(max_pages or 80)))
+    norm_start = _normalize_datetime_str(start_date)[:10] if start_date else ""
+    norm_end = _normalize_datetime_str(end_date)[:10] if end_date else ""
+
+    total_pages = 0
+    total_scanned_msgs = 0
+    seen_msg_keys: set[str] = set()
+    extracted_orders: List[Dict[str, Any]] = []
+    canceled_apps: set[str] = set()
+    account_results: List[Dict[str, Any]] = []
+    error_messages: List[str] = []
+    success_accounts = 0
+
+    for acc in valid_targets:
+        aid = str(acc["account_id"])
+        host = str(acc["imap_host"]).strip()
+        port = int(acc.get("imap_port") or 993)
+        user = str(acc["email_address"]).strip()
+        password = str(acc["app_password"]).strip()
+        conf_mbox = str(acc.get("mailbox") or "INBOX").strip() or "INBOX"
+        acc_pages = 0
+        acc_msgs = 0
+        acc_parsed = 0
+
+        try:
+            imap = imaplib.IMAP4_SSL(host, port, timeout=30.0)
+            try:
+                imap.login(user, password)
+                use_uid = hasattr(imap, "uid")
+                mailboxes = _discover_imap_scroll_mailboxes(imap, conf_mbox)
+                if not any(
+                    "all mail" in b.lower() or "전체보관함" in _decode_imap_utf7(b)
+                    for b in mailboxes
+                ):
+                    for pb in _discover_imap_promotion_mailboxes(imap, exclude=mailboxes):
+                        if pb not in mailboxes:
+                            mailboxes.append(pb)
+
+                for mbox in mailboxes:
+                    if imap.select(_quote_imap_mailbox(mbox), readonly=True)[0] != "OK":
+                        continue
+
+                    date_tokens: List[str] = []
+                    if len(norm_start) == 10:
+                        date_tokens.extend(["SINCE", _format_imap_date_token(norm_start, 0)])
+                    if len(norm_end) == 10:
+                        date_tokens.extend(["BEFORE", _format_imap_date_token(norm_end, 1)])
+
+                    cand_uids: List[bytes] = []
+                    seen_u: set[bytes] = set()
+                    if use_uid:
+                        for sender_kw in ('"coupang"', '"kcp"', '"easypay"', '"nicepg"', '"inicis"'):
+                            try:
+                                typ_s, data_s = imap.uid(
+                                    "SEARCH", None, "FROM", sender_kw, *date_tokens
+                                )
+                                if typ_s == "OK" and data_s and data_s[0]:
+                                    for u in data_s[0].split():
+                                        if u not in seen_u:
+                                            seen_u.add(u)
+                                            cand_uids.append(u)
+                            except Exception:
+                                continue
+                    else:
+                        since_clause = (
+                            f" SINCE {_format_imap_date_token(norm_start, 0)}"
+                            if len(norm_start) == 10
+                            else ""
+                        )
+                        crit = f'(FROM "coupang"{since_clause})'
+                        typ_s, data_s = imap.search(None, crit)
+                        if typ_s == "OK" and data_s and data_s[0]:
+                            cand_uids = data_s[0].split()
+
+                    if not cand_uids:
+                        continue
+
+                    cand_uids.sort(key=lambda b: int(b) if b.isdigit() else 0)
+                    rev_uids = list(reversed(cand_uids))
+                    for p_idx in range(eff_max_pages):
+                        start_i = p_idx * eff_page_size
+                        if start_i >= len(rev_uids):
+                            break
+                        batch_uids = rev_uids[start_i : start_i + eff_page_size]
+                        acc_pages += 1
+                        total_pages += 1
+                        seq_set = b",".join(batch_uids)
+                        if use_uid:
+                            typ_f, fetch_data = imap.uid("FETCH", seq_set, "(UID BODY.PEEK[])")
+                        else:
+                            typ_f, fetch_data = imap.fetch(seq_set, "(BODY.PEEK[])")
+                        if typ_f != "OK" or not fetch_data:
+                            continue
+
+                        for item in fetch_data:
+                            if not (
+                                isinstance(item, tuple)
+                                and len(item) >= 2
+                                and isinstance(item[1], bytes)
+                            ):
+                                continue
+                            raw_eml = item[1]
+                            if not raw_eml:
+                                continue
+                            parts = _extract_eml_parts(raw_eml)
+                            dedup_k = (
+                                f"{user}:{parts['message_id']}"
+                                if parts["message_id"]
+                                else f"{user}:{hashlib.sha1(raw_eml[:2048]).hexdigest()}"
+                            )
+                            if dedup_k in seen_msg_keys:
+                                continue
+                            seen_msg_keys.add(dedup_k)
+
+                            probe = (
+                                f"{parts['sender']} {parts['subject']} "
+                                f"{parts['body_text'][:1500]} {parts['body_html'][:3000]}"
+                            ).lower()
+                            if not any(k in probe for k in ("쿠팡", "coupang", "쿠페이", "coupay")):
+                                continue
+                            acc_msgs += 1
+                            total_scanned_msgs += 1
+
+                            if _CANCELED_EMAIL_SUBJECT_RE.search(parts["subject"]):
+                                canceled_apps.update(_extract_cancel_approval_nos_from_eml(raw_eml))
+                                continue
+
+                            ords = extract_orders_from_email_content(
+                                subject=parts["subject"],
+                                sender=parts["sender"],
+                                date_str=parts["date_str"],
+                                body_text=parts["body_text"],
+                                body_html=parts["body_html"],
+                            )
+                            valid_cp = [
+                                o
+                                for o in ords
+                                if any(
+                                    k
+                                    in (
+                                        f"{o.get('발신처', '')} {o.get('상점명', '')} "
+                                        f"{parts['sender']} {parts['subject']}"
+                                    ).lower()
+                                    for k in ("쿠팡", "coupang", "쿠페이", "coupay")
+                                )
+                            ]
+                            if valid_cp:
+                                for co in valid_cp:
+                                    if not co.get("발신처"):
+                                        co["발신처"] = "쿠팡"
+                                    dt_o = str(co.get("주문일자") or "")[:10]
+                                    if len(norm_start) == 10 and dt_o and dt_o < norm_start:
+                                        continue
+                                    if len(norm_end) == 10 and dt_o and dt_o > norm_end:
+                                        continue
+                                    extracted_orders.append(co)
+                                    acc_parsed += 1
+            finally:
+                try:
+                    imap.logout()
+                except Exception:
+                    pass
+
+            success_accounts += 1
+            account_results.append(
+                {
+                    "account_id": aid,
+                    "email_address": user,
+                    "status": "scrolled",
+                    "scrolled_pages": acc_pages,
+                    "scanned_messages": acc_msgs,
+                    "parsed_coupang_count": acc_parsed,
+                }
+            )
+        except Exception as exc:
+            err_str = f"{user} ({host}:{port}) 스크롤 실패: {exc}"
+            error_messages.append(err_str)
+            account_results.append(
+                {
+                    "account_id": aid,
+                    "email_address": user,
+                    "status": "error",
+                    "scrolled_pages": acc_pages,
+                    "scanned_messages": acc_msgs,
+                    "parsed_coupang_count": acc_parsed,
+                    "message": err_str,
+                }
+            )
+
+    if success_accounts == 0 and error_messages:
+        return {
+            "status": "error",
+            "message": " / ".join(error_messages),
+            "scrolled_pages": total_pages,
+            "scanned_messages": total_scanned_msgs,
+            "parsed_coupang_count": 0,
+            "matched_count": 0,
+            "created_count": 0,
+            "newly_stated_count": 0,
+            "items": [],
+            "account_results": account_results,
+        }
+
+    merged_orders = _merge_companion_email_orders(extracted_orders)
+    if canceled_apps:
+        merged_orders = [
+            o for o in merged_orders if str(o.get("승인번호") or "").strip() not in canceled_apps
+        ]
+    latest_stmt_dt = _latest_card_statement_date(cursor)
+    rec_res = reconcile_scraped_ecommerce_orders(
+        cursor,
+        raw_content=json.dumps(merged_orders, ensure_ascii=False),
+        archive_dir=archive_dir,
+        orders_list=merged_orders,
+        auto_create_after_date=latest_stmt_dt,
+    )
+    matched_items = rec_res.get("matched_items") or []
+    if matched_items:
+        generate_electronic_slips_for_ledger(cursor, archive_dir=archive_dir)
+        merged_hist = _merge_recent_matched_items(
+            cfg.get("recent_matched_items") or [],
+            matched_items,
+        )
+        save_email_watcher_config(
+            {"recent_matched_items": merged_hist, "coupang_parser_version": 2},
+            archive_dir=archive_dir,
+        )
+
+    matched_cnt = int(rec_res.get("matched_count") or 0)
+    created_cnt = int(rec_res.get("created_count") or 0)
+    newly_cnt = int(rec_res.get("newly_stated_count") or 0)
+    summary_msg = (
+        f"쿠팡 메일 스크롤링 완료 ({total_pages}페이지 · 쿠팡관련 메일 {total_scanned_msgs}통 탐색 · "
+        f"주문 {len(merged_orders)}건 추출): 원장 전표 {matched_cnt}건 반영 "
+        f"(기존매칭 {max(0, matched_cnt - created_cnt)}건 · 신규생성 {created_cnt}건)"
+    )
+    return {
+        "status": "scrolled",
+        "message": summary_msg,
+        "scrolled_pages": total_pages,
+        "scanned_messages": total_scanned_msgs,
+        "parsed_coupang_count": len(merged_orders),
+        "matched_count": matched_cnt,
+        "created_count": created_cnt,
+        "newly_stated_count": newly_cnt,
+        "updated_tx_ids": rec_res.get("updated_tx_ids") or [],
+        "items": matched_items,
         "account_results": account_results,
     }

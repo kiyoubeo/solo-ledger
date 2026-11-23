@@ -2059,6 +2059,13 @@ def render_dashboard_html(
             style="background:#15803d; font-weight:700; padding:8px 16px;">
             🚀 쿠팡 주문내역 자동 크롤링 시작
           </button>
+          <button id="btn-coupang-modal-email-scroll" onclick="runCoupangEmailScrollFromModal(this)"
+            style="background:#ea580c; font-weight:700; padding:8px 12px;">
+            📧 연결된 메일함 쿠팡 주문 스크롤링
+          </button>
+          <button id="btn-coupang-rematch-backup" class="secondary" onclick="runCoupangBackupRematch(this)">
+            ♻️ 기수집 백업파일 재매칭
+          </button>
         </div>
         <div id="coupang-crawl-status"
           style="margin-top:8px; font-size:12px; font-weight:600; color:#1e40af;"></div>
@@ -2192,6 +2199,35 @@ def render_dashboard_html(
           <div id="toss-scroll-results"
                style="display:none; margin-top:8px; background:#ffffff; border:1px solid #bae6fd;
                       border-radius:6px; padding:6px; max-height:200px; overflow-y:auto;"></div>
+        </div>
+      </details>
+
+      <details id="coupang-scroll-panel" class="slip-box"
+               style="margin-bottom:10px; font-size:13px; line-height:1.55;
+                      border:1px solid #ea580c; background:#fff7ed;">
+        <summary style="cursor:pointer; font-weight:800; color:#c2410c; font-size:13px;">
+          🟧 [보조] 쿠팡(Coupang) 주문·결제 메일 단독 정밀 스크롤링 (전체보관함·프로모션함 포함)
+        </summary>
+        <div style="margin-top:8px;">
+          <div style="display:flex; justify-content:space-between; align-items:center;
+                      flex-wrap:wrap; gap:8px; margin-bottom:6px;">
+            <div style="font-size:12px; color:#334155;">
+              받은편지함·전체보관함·프로모션함의 쿠팡 주문확인 및 PG 결제 메일만 페이지 단위로 재탐색하여 매칭합니다.
+            </div>
+            <button id="btn-coupang-email-scroll" style="background:#ea580c; font-weight:700;"
+                    onclick="triggerCoupangEmailScroll(this)">
+              🛒 쿠팡 주문메일 스크롤링 실행
+            </button>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:12px;">
+            <span>탐색 시작일(선택):</span>
+            <input type="date" id="coupang-scroll-start" style="width:136px;" />
+            <span>종료일(선택):</span>
+            <input type="date" id="coupang-scroll-end" style="width:136px;" />
+            <span style="color:#64748b; font-size:11px;">(비워두면 메일함 전체 기간 연속 스크롤)</span>
+          </div>
+          <div id="coupang-email-scroll-status"
+               style="margin-top:8px; font-size:12px; font-weight:700; color:#c2410c;"></div>
         </div>
       </details>
 
@@ -3282,19 +3318,21 @@ def render_dashboard_html(
       btn.disabled = true;
       st.style.color = '#1e40af';
       st.textContent =
-        '⏳ 전용 브라우저가 실행되었습니다. (로그인 창이 뜨면 1회 로그인해 주세요. 이후 자동 수집 후 창이 닫힙니다...)';
+        '⏳ 전용 브라우저가 실행되었습니다. '
+        + '주문목록 전체 페이지 및 주문상세·카드영수증을 정밀 수집 중입니다 (최대 1~3분 소요)...';
       try {{
         const res = await fetch('/api/v1/scraper/coupang-auto-crawl', {{
           method: 'POST',
           headers: API_HEADERS,
-          body: JSON.stringify({{ max_wait_sec: 180 }})
+          body: JSON.stringify({{ max_wait_sec: 240 }})
         }});
         const data = await res.json();
         if (data.status === 'crawled') {{
           st.style.color = '#15803d';
+          const createdNote = data.created_orders ? ` (신규생성 ${{data.created_orders}}건 포함)` : '';
           st.textContent =
             `✅ 쿠팡 주문내역 ${{data.collected_orders_count || 0}}건 수집 · `
-            + `카드전표 ${{data.matched_orders || 0}}건 매칭 및 전자 거래명세서 자동 작성 완료!`;
+            + `카드전표 ${{data.matched_orders || 0}}건 매칭${{createdNote}} 및 전자 거래명세서 작성 완료!`;
           setTimeout(() => {{ window.location.href = '/dashboard?year_month=ALL'; }}, 1200);
         }} else {{
           st.style.color = '#b91c1c';
@@ -3305,6 +3343,111 @@ def render_dashboard_html(
         st.style.color = '#b91c1c';
         st.textContent = '⚠️ 자동 수집 요청 중 오류가 발생했습니다.';
         btn.disabled = false;
+      }}
+    }}
+    async function runCoupangEmailScrollFromModal(btnEl) {{
+      const st = document.getElementById('coupang-crawl-status');
+      const prevTxt = btnEl ? btnEl.textContent : '';
+      if (btnEl) btnEl.disabled = true;
+      st.style.color = '#c2410c';
+      st.textContent =
+        '⏳ 연결된 이메일 계정(전체보관함·프로모션함·받은편지함)에서 '
+        + '쿠팡 주문메일을 정밀 스크롤링 중입니다...';
+      try {{
+        const res = await fetch('/api/v1/scraper/email-scroll-coupang', {{
+          method: 'POST',
+          headers: API_HEADERS,
+          body: JSON.stringify({{ page_size: 50, max_pages: 80 }})
+        }});
+        const data = await res.json();
+        if (data.status === 'scrolled') {{
+          st.style.color = '#15803d';
+          st.textContent = `✅ ${{data.message}}`;
+          if (Number(data.matched_count || 0) > 0) {{
+            setTimeout(() => {{ window.location.href = '/dashboard?year_month=ALL'; }}, 1200);
+          }}
+        }} else {{
+          st.style.color = '#b91c1c';
+          st.textContent = `⚠️ ${{data.message || '쿠팡 메일 스크롤링 실패'}}`;
+        }}
+      }} catch (err) {{
+        st.style.color = '#b91c1c';
+        st.textContent = '⚠️ 쿠팡 메일 스크롤링 요청 중 오류가 발생했습니다.';
+      }} finally {{
+        if (btnEl) {{
+          btnEl.disabled = false;
+          btnEl.textContent = prevTxt;
+        }}
+      }}
+    }}
+    async function runCoupangBackupRematch(btnEl) {{
+      const st = document.getElementById('coupang-crawl-status');
+      if (btnEl) btnEl.disabled = true;
+      st.style.color = '#1e40af';
+      st.textContent = '⏳ 기수집된 쿠팡 백업 파일(coupang_orders_auto.json)로 정밀 재매칭 중입니다...';
+      try {{
+        const res = await fetch('/api/v1/scraper/coupang-reconcile-backup', {{
+          method: 'POST',
+          headers: API_HEADERS
+        }});
+        const data = await res.json();
+        if (data.status === 'ingested') {{
+          st.style.color = '#15803d';
+          st.textContent = `✅ 백업 재매칭 완료! 카드전표 ${{data.matched_orders || 0}}건 반영 완료!`;
+          setTimeout(() => {{ window.location.href = '/dashboard?year_month=ALL'; }}, 1000);
+        }} else {{
+          st.style.color = '#b91c1c';
+          st.textContent = `⚠️ ${{data.message || '백업 파일이 없습니다.'}}`;
+        }}
+      }} catch (err) {{
+        st.style.color = '#b91c1c';
+        st.textContent = '⚠️ 재매칭 요청 중 오류가 발생했습니다.';
+      }} finally {{
+        if (btnEl) btnEl.disabled = false;
+      }}
+    }}
+    async function triggerCoupangEmailScroll(btnEl) {{
+      const st = document.getElementById('coupang-email-scroll-status');
+      const prevTxt = btnEl ? btnEl.textContent : '';
+      if (btnEl) {{
+        btnEl.disabled = true;
+        btnEl.textContent = '⏳ 쿠팡 메일 스크롤링 중...';
+      }}
+      st.style.color = '#c2410c';
+      st.textContent = '⏳ 전체보관함·프로모션함·받은편지함에서 쿠팡 주문·결제 메일을 스크롤 탐색 중입니다...';
+      try {{
+        const sDt = (document.getElementById('coupang-scroll-start').value || '').trim();
+        const eDt = (document.getElementById('coupang-scroll-end').value || '').trim();
+        const res = await fetch('/api/v1/scraper/email-scroll-coupang', {{
+          method: 'POST',
+          headers: API_HEADERS,
+          body: JSON.stringify({{
+            start_date: sDt || undefined,
+            end_date: eDt || undefined,
+            page_size: 50,
+            max_pages: 80
+          }})
+        }});
+        const data = await res.json();
+        await refreshEmailWatcherState();
+        if (data.status === 'scrolled') {{
+          st.style.color = '#15803d';
+          st.textContent = `✅ ${{data.message}}`;
+          if (Number(data.created_count || 0) > 0 || Number(data.newly_stated_count || 0) > 0) {{
+            setTimeout(() => {{ window.location.reload(); }}, 1300);
+          }}
+        }} else {{
+          st.style.color = '#b91c1c';
+          st.textContent = `⚠️ ${{data.message || '쿠팡 메일 스크롤링 실패'}}`;
+        }}
+      }} catch (err) {{
+        st.style.color = '#b91c1c';
+        st.textContent = '⚠️ 쿠팡 메일 스크롤링 요청 중 오류가 발생했습니다.';
+      }} finally {{
+        if (btnEl) {{
+          btnEl.disabled = false;
+          btnEl.textContent = prevTxt;
+        }}
       }}
     }}
     async function copyCoupangExtractorScript() {{
