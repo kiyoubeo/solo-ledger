@@ -1031,7 +1031,8 @@ _CDP_COLLECT_JS = """(async () => {
 def _fetch_cdp_page_ws_url(debug_port: int) -> Optional[str]:
     """Return the active Coupang page WebSocket debugger URL from local CDP port."""
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{debug_port}/json/list", timeout=2.5) as resp:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(f"http://127.0.0.1:{debug_port}/json/list", timeout=2.5) as resp:
             targets = json.loads(resp.read().decode("utf-8", errors="replace"))
     except Exception:
         return None

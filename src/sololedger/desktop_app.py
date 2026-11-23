@@ -19,7 +19,12 @@ import uvicorn
 from sololedger import __version__
 from sololedger.api import _create_session_token
 from sololedger.api import app as fastapi_app
-from sololedger.config import PROJECT_ROOT, resolve_bundled_path, settings
+from sololedger.config import (
+    PROJECT_ROOT,
+    ensure_loopback_no_proxy,
+    resolve_bundled_path,
+    settings,
+)
 
 DEFAULT_DESKTOP_HOST = "0.0.0.0"
 DEFAULT_DESKTOP_PORT = 8000
@@ -62,11 +67,18 @@ def configure_windows_app_id(app_id: str = APP_USER_MODEL_ID) -> bool:
         return False
 
 
+def _is_loopback_host(host: str) -> bool:
+    """Return True when target host points to local loopback interface."""
+    return host.strip().lower() in ("127.0.0.1", "localhost", "::1", "[::1]")
+
+
 def is_sololedger_running(port: int, host: str = "127.0.0.1", timeout: float = 1.0) -> bool:
     """Return True if a SoloLedger FastAPI instance responds healthy on host:port."""
     url = f"http://{host}:{port}/health"
+    bypass_env_proxy = _is_loopback_host(host)
     try:
-        resp = httpx.get(url, timeout=timeout)
+        with httpx.Client(timeout=timeout, trust_env=not bypass_env_proxy) as client:
+            resp = client.get(url)
         if resp.status_code != 200:
             return False
         payload = resp.json()
@@ -75,21 +87,33 @@ def is_sololedger_running(port: int, host: str = "127.0.0.1", timeout: float = 1
         return False
 
 
-def is_port_available(port: int, host: str = "127.0.0.1") -> bool:
-    """Check whether TCP host:port is free to bind."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+def _configure_probe_socket(sock: socket.socket) -> None:
+    """Apply platform-appropriate socket bind flags to accurately detect active listeners."""
+    if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    else:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            sock.bind((host, port))
-            return True
-        except OSError:
-            return False
+
+
+def is_port_available(port: int, host: str = "127.0.0.1") -> bool:
+    """Check whether TCP host:port is genuinely free to bind (including wildcard vs loopback on Windows)."""
+    probe_hosts = ("0.0.0.0", "127.0.0.1") if host in ("0.0.0.0", "") else (host,)
+    for candidate_host in probe_hosts:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            _configure_probe_socket(sock)
+            try:
+                sock.bind((candidate_host, port))
+            except OSError:
+                return False
+    return True
 
 
 def find_free_port(host: str = "127.0.0.1") -> int:
     """Ask the OS for an ephemeral available local TCP port."""
+    bind_addr = "0.0.0.0" if host in ("0.0.0.0", "") else host
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind((host, 0))
+        _configure_probe_socket(sock)
+        sock.bind((bind_addr, 0))
         return int(sock.getsockname()[1])
 
 
@@ -106,11 +130,10 @@ def negotiate_server_endpoint(
             "local_base_url": f"http://127.0.0.1:{preferred_port}",
         }
 
-    check_host = "127.0.0.1" if bind_host in ("0.0.0.0", "") else bind_host
-    if is_port_available(preferred_port, host=check_host):
+    if is_port_available(preferred_port, host=bind_host):
         chosen_port = preferred_port
     else:
-        chosen_port = find_free_port(host="127.0.0.1")
+        chosen_port = find_free_port(host=bind_host)
 
     return {
         "mode": "start_embedded",
@@ -265,6 +288,7 @@ def run_desktop_app(
 ) -> Dict[str, Any]:
     """Start (or attach to) local SoloLedger server and open native WebView2 desktop window."""
     ensure_safe_stdio()
+    ensure_loopback_no_proxy()
     configure_windows_app_id()
 
     resolved_host = host or os.getenv("SOLOLEDGER_DESKTOP_HOST", DEFAULT_DESKTOP_HOST)
@@ -279,12 +303,24 @@ def run_desktop_app(
     try:
         if mode == "start_embedded":
             controller = EmbeddedServerController(bind_host=resolved_host, port=active_port)
-            controller.start(timeout=15.0)
+            try:
+                controller.start(timeout=15.0)
+            except RuntimeError:
+                controller.stop(timeout=2.0)
+                controller = None
+                if is_sololedger_running(active_port, host="127.0.0.1"):
+                    mode = "reuse_existing"
+                    local_base_url = f"http://127.0.0.1:{active_port}"
+                else:
+                    active_port = find_free_port(host=resolved_host)
+                    local_base_url = f"http://127.0.0.1:{active_port}"
+                    controller = EmbeddedServerController(bind_host=resolved_host, port=active_port)
+                    controller.start(timeout=15.0)
 
         start_url = build_desktop_start_url(local_base_url=local_base_url, start_path=start_path)
 
         if check_only:
-            with httpx.Client(follow_redirects=True, timeout=5.0) as client:
+            with httpx.Client(follow_redirects=True, timeout=5.0, trust_env=False) as client:
                 health_resp = client.get(f"{local_base_url}/health")
                 dash_resp = client.get(start_url)
             summary: Dict[str, Any] = {

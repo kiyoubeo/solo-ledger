@@ -11,13 +11,18 @@ from fastapi.testclient import TestClient
 
 from sololedger.api import _create_session_token, app
 from sololedger.cli import run_cli
-from sololedger.config import _resolve_bundle_root, _resolve_project_root
+from sololedger.config import (
+    _resolve_bundle_root,
+    _resolve_project_root,
+    ensure_loopback_no_proxy,
+)
 from sololedger.desktop_app import (
     EmbeddedServerController,
     build_desktop_start_url,
     enable_webview_accelerator_keys,
     ensure_safe_stdio,
     find_free_port,
+    is_port_available,
     is_sololedger_running,
     negotiate_server_endpoint,
     register_webview_window_hooks,
@@ -180,6 +185,62 @@ def test_embedded_server_lifecycle_and_port_negotiation(tmp_path: Path, monkeypa
     cli_res = run_cli(["desktop", "--host", "127.0.0.1", "--port", str(find_free_port()), "--check-only"])
     assert cli_res["command"] == "desktop"
     assert cli_res["status"] == "ok"
+
+
+def test_embedded_server_bypasses_http_proxy_and_detects_wildcard_port_conflict(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Ensure HTTP_PROXY without NO_PROXY never blocks local /health readiness or wildcard port checks."""
+    # 1. Simulate dead/external system HTTP_PROXY with missing NO_PROXY
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+
+    port = find_free_port("127.0.0.1")
+    out_json = tmp_path / "proxy_check.json"
+    summary = run_desktop_app(
+        host="127.0.0.1",
+        port=port,
+        check_only=True,
+        check_output=out_json,
+    )
+    assert summary["status"] == "ok"
+    assert summary["health_status"] == 200
+    assert summary["dashboard_status"] == 200
+
+    no_proxy_val = ensure_loopback_no_proxy()
+    assert "127.0.0.1" in no_proxy_val
+    assert "localhost" in no_proxy_val
+
+    # 2. Wildcard 0.0.0.0 listener must be detected as unavailable even when probing default 0.0.0.0 bind_host
+    wildcard_blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    wildcard_blocker.bind(("0.0.0.0", 0))
+    wildcard_blocker.listen(1)
+    wildcard_port = int(wildcard_blocker.getsockname()[1])
+    try:
+        assert is_port_available(wildcard_port, host="0.0.0.0") is False
+        negotiated = negotiate_server_endpoint(preferred_port=wildcard_port, bind_host="0.0.0.0")
+        assert negotiated["mode"] == "start_embedded"
+        assert negotiated["port"] != wildcard_port
+    finally:
+        wildcard_blocker.close()
+
+    # 3. Concurrent port-bind race recovery falls back cleanly to a free ephemeral port
+    orig_start = EmbeddedServerController.start
+    attempts = {"count": 0}
+
+    def flaky_first_start(self: EmbeddedServerController, timeout: float = 15.0) -> str:
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise RuntimeError(f"Simulated bind race on port {self.port}")
+        return orig_start(self, timeout=timeout)
+
+    monkeypatch.setattr(EmbeddedServerController, "start", flaky_first_start)
+    race_port = find_free_port("127.0.0.1")
+    race_summary = run_desktop_app(host="127.0.0.1", port=race_port, check_only=True)
+    assert attempts["count"] == 2
+    assert race_summary["status"] == "ok"
 
 
 def test_desktop_gui_window_invocation_and_cleanup(monkeypatch) -> None:

@@ -87,7 +87,30 @@ def _load_dotenv_file() -> None:
             os.environ.setdefault(clean_key, clean_val)
 
 
+def ensure_loopback_no_proxy() -> str:
+    """Ensure loopback hosts bypass HTTP_PROXY/HTTPS_PROXY across Python & child runtimes."""
+    required = ("127.0.0.1", "localhost", "::1")
+    merged: list[str] = []
+    seen: set[str] = set()
+    for var_name in ("NO_PROXY", "no_proxy"):
+        raw = os.environ.get(var_name, "")
+        for item in raw.split(","):
+            token = item.strip()
+            if token and token.lower() not in seen:
+                seen.add(token.lower())
+                merged.append(token)
+    for host in required:
+        if host.lower() not in seen:
+            seen.add(host.lower())
+            merged.append(host)
+    value = ",".join(merged)
+    os.environ["NO_PROXY"] = value
+    os.environ["no_proxy"] = value
+    return value
+
+
 _load_dotenv_file()
+ensure_loopback_no_proxy()
 
 
 class Settings:
