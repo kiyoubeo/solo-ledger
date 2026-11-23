@@ -3596,6 +3596,9 @@ def render_dashboard_html(
     let activeCtrlFRegex = null;
     let ctrlFHitElements = [];
     let ctrlFActiveIndex = -1;
+    let ctrlFAnchorPos = null;
+    let ctrlFAnchorStale = true;
+    let ctrlFProgrammaticScrollUntil = 0;
 
     function getLedgerRowSearchText(tr) {{
       let txt = tr.textContent || '';
@@ -4268,6 +4271,180 @@ def render_dashboard_html(
       }}
     }}
 
+    function getActiveStickyTopOffset() {{
+      if (document.body.classList.contains('unfreeze-headers')) return 0;
+      let maxOffset = 0;
+      const sections = document.querySelectorAll('.section');
+      for (let i = 0; i < sections.length; i += 1) {{
+        const sec = sections[i];
+        const secRect = sec.getBoundingClientRect();
+        if (secRect.top <= 4 && secRect.bottom > 80) {{
+          let bar = null;
+          let tbl = null;
+          for (let j = 0; j < sec.children.length; j += 1) {{
+            const child = sec.children[j];
+            if (!bar && child.classList && child.classList.contains('section-sticky-bar')) {{
+              bar = child;
+            }} else if (!tbl && child.classList && child.classList.contains('sticky-ledger-table')) {{
+              tbl = child;
+            }}
+          }}
+          let offset = bar ? bar.getBoundingClientRect().height : 0;
+          if (tbl) {{
+            const tblRect = tbl.getBoundingClientRect();
+            if (tblRect.top <= offset + 4 && tblRect.bottom > offset + 48) {{
+              const thead = tbl.tHead;
+              if (thead) offset += thead.getBoundingClientRect().height;
+              if (tbl.tBodies && tbl.tBodies[0]) {{
+                const pinned = tbl.tBodies[0].querySelectorAll('tr.pinned-ledger-row');
+                for (let k = 0; k < pinned.length; k += 1) {{
+                  if (pinned[k].style.display !== 'none') {{
+                    offset += pinned[k].getBoundingClientRect().height;
+                  }}
+                }}
+              }}
+            }}
+          }}
+          if (offset > maxOffset) maxOffset = offset;
+        }}
+      }}
+      return maxOffset;
+    }}
+
+    function getCtrlFScrollContext() {{
+      const openModal = document.querySelector('.modal-backdrop.open');
+      if (openModal) {{
+        const scrollBox = openModal.querySelector('.modal-card, .receipt-modal') || openModal;
+        const boxRect = scrollBox.getBoundingClientRect();
+        const st = scrollBox.scrollTop || 0;
+        return {{
+          mode: 'modal',
+          openModal: openModal,
+          scrollBox: scrollBox,
+          scrollTop: st,
+          viewportTop: boxRect.top,
+          viewportBottom: boxRect.bottom,
+          currentAnchorY: st
+        }};
+      }}
+      const scrollY = window.scrollY || window.pageYOffset || 0;
+      const stickyOffset = getActiveStickyTopOffset();
+      const vh = window.innerHeight || document.documentElement.clientHeight || 800;
+      return {{
+        mode: 'window',
+        openModal: null,
+        scrollBox: null,
+        scrollTop: scrollY,
+        viewportTop: stickyOffset,
+        viewportBottom: vh,
+        currentAnchorY: scrollY + stickyOffset
+      }};
+    }}
+
+    function captureCtrlFSearchAnchor() {{
+      const ctx = getCtrlFScrollContext();
+      ctrlFAnchorPos = {{
+        mode: ctx.mode,
+        scrollBox: ctx.scrollBox,
+        y: ctx.currentAnchorY
+      }};
+      ctrlFAnchorStale = false;
+      return ctrlFAnchorPos;
+    }}
+
+    function getCtrlFElementFlowMidY(el, ctx) {{
+      const rect = el.getBoundingClientRect();
+      const halfH = Math.max(0, rect.height || 0) * 0.5;
+      if (ctx.mode === 'modal') {{
+        const thead = el.closest ? el.closest('thead') : null;
+        if (thead) {{
+          const tbl = thead.closest('table');
+          if (tbl) {{
+            return (tbl.getBoundingClientRect().top - ctx.viewportTop) + ctx.scrollTop + halfH;
+          }}
+        }}
+        return (rect.top - ctx.viewportTop) + ctx.scrollTop + halfH;
+      }}
+      if (!document.body.classList.contains('unfreeze-headers') && el.closest) {{
+        const stickyBar = el.closest('.section-sticky-bar');
+        if (stickyBar) {{
+          const sec = stickyBar.closest('.section');
+          if (sec) {{
+            return sec.getBoundingClientRect().top + ctx.scrollTop + halfH;
+          }}
+        }}
+        const thead = el.closest('thead');
+        if (thead) {{
+          const tbl = thead.closest('table');
+          if (tbl) {{
+            return tbl.getBoundingClientRect().top + ctx.scrollTop + halfH;
+          }}
+        }}
+        const pinnedTr = el.closest('tr.pinned-ledger-row');
+        if (pinnedTr) {{
+          const tbl = pinnedTr.closest('table');
+          if (tbl) {{
+            return tbl.getBoundingClientRect().top + ctx.scrollTop + (pinnedTr.offsetTop || 0) + halfH;
+          }}
+        }}
+      }}
+      return rect.top + ctx.scrollTop + halfH;
+    }}
+
+    function findInitialCtrlFMatchIndex(overrideAnchorY) {{
+      const total = ctrlFHitElements.length;
+      if (total === 0) return -1;
+      const ctx = getCtrlFScrollContext();
+      let anchorY = ctx.currentAnchorY;
+      if (typeof overrideAnchorY === 'number' && !Number.isNaN(overrideAnchorY)) {{
+        anchorY = overrideAnchorY;
+      }} else if (
+        ctrlFAnchorPos
+        && ctrlFAnchorPos.mode === ctx.mode
+        && ctrlFAnchorPos.scrollBox === ctx.scrollBox
+      ) {{
+        anchorY = ctrlFAnchorPos.y;
+      }}
+      for (let i = 0; i < total; i += 1) {{
+        if (getCtrlFElementFlowMidY(ctrlFHitElements[i], ctx) >= anchorY) {{
+          return i;
+        }}
+      }}
+      return 0;
+    }}
+
+    function isCtrlFTargetInSafeViewport(el, ctx) {{
+      if (!el || !el.getBoundingClientRect) return false;
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0 && rect.height <= 0) return false;
+      const safeTop = ctx.viewportTop + 4;
+      const safeBottom = ctx.viewportBottom - 16;
+      if (rect.top < safeTop || rect.bottom > safeBottom) return false;
+      const vw = window.innerWidth || document.documentElement.clientWidth || 1280;
+      if (rect.left < 0 || rect.right > vw) return false;
+      const bar = document.getElementById('ctrlf-search-bar');
+      if (bar && bar.classList.contains('open')) {{
+        const barRect = bar.getBoundingClientRect();
+        const overlapsBar = (
+          rect.bottom > barRect.top - 4
+          && rect.top < barRect.bottom + 4
+          && rect.right > barRect.left - 4
+          && rect.left < barRect.right + 4
+        );
+        if (overlapsBar) return false;
+      }}
+      if (el.closest) {{
+        const subWrap = el.closest('.acc-detail-table-wrap');
+        if (subWrap) {{
+          const subRect = subWrap.getBoundingClientRect();
+          if (rect.top < subRect.top + 36 || rect.bottom > subRect.bottom - 8) {{
+            return false;
+          }}
+        }}
+      }}
+      return true;
+    }}
+
     function activateCtrlFMatch(idx, shouldScroll) {{
       const total = ctrlFHitElements.length;
       if (total === 0) {{
@@ -4283,12 +4460,16 @@ def render_dashboard_html(
       if (target) {{
         target.classList.add('sl-find-active');
         if (shouldScroll && target.scrollIntoView) {{
-          target.scrollIntoView({{ behavior: 'smooth', block: 'center', inline: 'nearest' }});
+          const ctx = getCtrlFScrollContext();
+          if (!isCtrlFTargetInSafeViewport(target, ctx)) {{
+            ctrlFProgrammaticScrollUntil = Date.now() + 700;
+            target.scrollIntoView({{ behavior: 'smooth', block: 'center', inline: 'nearest' }});
+          }}
         }}
       }}
     }}
 
-    function executeCtrlFSearch(shouldScrollToFirst) {{
+    function executeCtrlFSearch(shouldScrollToMatch, overrideAnchorY) {{
       const inp = document.getElementById('ctrlf-search-input');
       const rawVal = inp ? inp.value : '';
       clearCtrlFHighlights();
@@ -4298,7 +4479,8 @@ def render_dashboard_html(
       if (activeCtrlFRegex) {{
         highlightCtrlFMatches(activeCtrlFRegex);
         if (ctrlFHitElements.length > 0) {{
-          activateCtrlFMatch(0, !!shouldScrollToFirst);
+          const initialIdx = findInitialCtrlFMatchIndex(overrideAnchorY);
+          activateCtrlFMatch(initialIdx, !!shouldScrollToMatch);
         }}
       }}
       updateCtrlFCounterUI(ledgerStats);
@@ -4306,6 +4488,7 @@ def render_dashboard_html(
 
     function refreshCtrlFIfOpen() {{
       if (isCtrlFSearchOpen() && activeCtrlFQuery) {{
+        captureCtrlFSearchAnchor();
         executeCtrlFSearch(false);
       }}
     }}
@@ -4316,18 +4499,32 @@ def render_dashboard_html(
         executeCtrlFSearch(true);
         return;
       }}
-      const nextIdx = ctrlFActiveIndex < 0 ? 0 : (ctrlFActiveIndex + delta);
+      const nextIdx = ctrlFActiveIndex < 0
+        ? findInitialCtrlFMatchIndex()
+        : (ctrlFActiveIndex + delta);
       activateCtrlFMatch(nextIdx, true);
+      ctrlFAnchorStale = true;
       updateCtrlFCounterUI(applyMainLedgerRowVisibility());
     }}
 
     function onCtrlFInput() {{
+      const ctx = getCtrlFScrollContext();
+      if (
+        ctrlFAnchorStale
+        || !ctrlFAnchorPos
+        || ctrlFAnchorPos.mode !== ctx.mode
+        || ctrlFAnchorPos.scrollBox !== ctx.scrollBox
+      ) {{
+        captureCtrlFSearchAnchor();
+      }}
       executeCtrlFSearch(true);
     }}
 
     function onCtrlFRowFilterToggle() {{
       const chk = document.getElementById('ctrlf-filter-rows-chk');
       ctrlFRowFilterOnly = !!(chk && chk.checked);
+      applyMainLedgerRowVisibility();
+      captureCtrlFSearchAnchor();
       executeCtrlFSearch(true);
     }}
 
@@ -4342,19 +4539,38 @@ def render_dashboard_html(
       const bar = document.getElementById('ctrlf-search-bar');
       const inp = document.getElementById('ctrlf-search-input');
       if (!bar || !inp) return;
+      captureCtrlFSearchAnchor();
       bar.classList.add('open');
+      let selectionAnchorY = null;
       if (typeof presetQuery === 'string' && presetQuery.trim()) {{
         inp.value = presetQuery.trim();
       }} else if (window.getSelection) {{
-        const sel = String(window.getSelection().toString() || '').trim();
+        const selObj = window.getSelection();
+        const anchorNode = selObj ? selObj.anchorNode : null;
+        const anchorEl = anchorNode && anchorNode.nodeType === 1
+          ? anchorNode
+          : (anchorNode ? anchorNode.parentElement : null);
+        const insideBar = !!(anchorEl && bar.contains(anchorEl));
+        const sel = insideBar ? '' : String((selObj && selObj.toString()) || '').trim();
         if (sel && sel.length <= 80 && !sel.includes('\\n')) {{
           inp.value = sel;
+          try {{
+            if (selObj && selObj.rangeCount > 0) {{
+              const rangeRect = selObj.getRangeAt(0).getBoundingClientRect();
+              if (rangeRect && (rangeRect.width > 0 || rangeRect.height > 0)) {{
+                const ctx = getCtrlFScrollContext();
+                selectionAnchorY = ctx.mode === 'modal'
+                  ? (rangeRect.top - ctx.viewportTop) + ctx.scrollTop - 2
+                  : rangeRect.top + ctx.scrollTop - 2;
+              }}
+            }}
+          }} catch (e) {{}}
         }}
       }}
       inp.focus();
       inp.select();
       if (inp.value.trim()) {{
-        executeCtrlFSearch(true);
+        executeCtrlFSearch(true, selectionAnchorY);
       }}
     }}
 
@@ -4366,10 +4582,18 @@ def render_dashboard_html(
       ctrlFRowFilterOnly = false;
       activeCtrlFQuery = '';
       activeCtrlFRegex = null;
+      ctrlFAnchorPos = null;
+      ctrlFAnchorStale = true;
       clearCtrlFHighlights();
       applyMainLedgerRowVisibility();
       updateCtrlFCounterUI(null);
     }}
+
+    document.addEventListener('scroll', function() {{
+      if (!isCtrlFSearchOpen()) return;
+      if (Date.now() <= ctrlFProgrammaticScrollUntil) return;
+      ctrlFAnchorStale = true;
+    }}, {{ capture: true, passive: true }});
 
     document.addEventListener('keydown', function(ev) {{
       const isFindKey = (ev.ctrlKey || ev.metaKey)

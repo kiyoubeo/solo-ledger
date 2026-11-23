@@ -562,9 +562,88 @@ powershell -ExecutionPolicy Bypass -File scripts/server_service.ps1 install</cod
     (function() {
       let hits = [];
       let activeIdx = -1;
+      let anchorY = 0;
+      let anchorStale = true;
+      let programmaticScrollUntil = 0;
       const bar = document.getElementById('ctrlf-search-bar');
       const inp = document.getElementById('ctrlf-search-input');
       const cnt = document.getElementById('ctrlf-match-count');
+
+      function getActiveManualStickyOffset() {
+        let maxOffset = 0;
+        const tables = document.querySelectorAll('main table');
+        for (let i = 0; i < tables.length; i += 1) {
+          const tbl = tables[i];
+          const rect = tbl.getBoundingClientRect();
+          if (rect.top <= 4 && rect.bottom > 56 && tbl.tHead) {
+            const h = tbl.tHead.getBoundingClientRect().height;
+            if (h > maxOffset) maxOffset = h;
+          }
+        }
+        return maxOffset;
+      }
+
+      function captureManualAnchor() {
+        const scrollY = window.scrollY || window.pageYOffset || 0;
+        anchorY = scrollY + getActiveManualStickyOffset();
+        anchorStale = false;
+        return anchorY;
+      }
+
+      function getManualElementFlowMidY(el) {
+        const scrollY = window.scrollY || window.pageYOffset || 0;
+        const rect = el.getBoundingClientRect();
+        const halfH = Math.max(0, rect.height || 0) * 0.5;
+        if (el.closest) {
+          const asideEl = el.closest('aside');
+          if (asideEl && window.getComputedStyle && window.getComputedStyle(asideEl).position === 'sticky') {
+            const asideRect = asideEl.getBoundingClientRect();
+            return (rect.top - asideRect.top) + halfH;
+          }
+          const theadEl = el.closest('thead');
+          if (theadEl) {
+            const tbl = theadEl.closest('table');
+            if (tbl) {
+              return tbl.getBoundingClientRect().top + scrollY + halfH;
+            }
+          }
+        }
+        return rect.top + scrollY + halfH;
+      }
+
+      function findInitialManualHitIndex(overrideAnchorY) {
+        if (hits.length === 0) return -1;
+        const targetY = (typeof overrideAnchorY === 'number' && !Number.isNaN(overrideAnchorY))
+          ? overrideAnchorY
+          : anchorY;
+        for (let i = 0; i < hits.length; i += 1) {
+          if (getManualElementFlowMidY(hits[i]) >= targetY) {
+            return i;
+          }
+        }
+        return 0;
+      }
+
+      function isManualHitInSafeViewport(el) {
+        if (!el || !el.getBoundingClientRect) return false;
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 && rect.height <= 0) return false;
+        const safeTop = getActiveManualStickyOffset() + 4;
+        const vh = window.innerHeight || document.documentElement.clientHeight || 800;
+        if (rect.top < safeTop || rect.bottom > vh - 16) return false;
+        if (bar && bar.classList.contains('open')) {
+          const barRect = bar.getBoundingClientRect();
+          if (
+            rect.bottom > barRect.top - 4
+            && rect.top < barRect.bottom + 4
+            && rect.right > barRect.left - 4
+            && rect.left < barRect.right + 4
+          ) {
+            return false;
+          }
+        }
+        return true;
+      }
 
       function clearHits() {
         document.querySelectorAll('mark.sl-find-hit').forEach((m) => {
@@ -578,9 +657,9 @@ powershell -ExecutionPolicy Bypass -File scripts/server_service.ps1 install</cod
         activeIdx = -1;
       }
 
-      function activateHit(idx) {
+      function activateHit(idx, shouldScroll) {
         if (hits.length === 0) {
-          cnt.textContent = (inp.value.trim() ? '0 / 0' : '0 / 0');
+          cnt.textContent = '0 / 0';
           if (inp.value.trim()) cnt.classList.add('zero');
           else cnt.classList.remove('zero');
           return;
@@ -591,12 +670,15 @@ powershell -ExecutionPolicy Bypass -File scripts/server_service.ps1 install</cod
         activeIdx = ((idx % hits.length) + hits.length) % hits.length;
         const el = hits[activeIdx];
         el.classList.add('sl-find-active');
-        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        if (shouldScroll && el.scrollIntoView && !isManualHitInSafeViewport(el)) {
+          programmaticScrollUntil = Date.now() + 700;
+          el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+        }
         cnt.textContent = (activeIdx + 1) + ' / ' + hits.length;
         cnt.classList.remove('zero');
       }
 
-      function runFind() {
+      function runFind(overrideAnchorY) {
         clearHits();
         const q = (inp.value || '').trim();
         if (!q) {
@@ -636,35 +718,67 @@ powershell -ExecutionPolicy Bypass -File scripts/server_service.ps1 install</cod
           if (last < txt.length) frag.appendChild(document.createTextNode(txt.slice(last)));
           if (tn.parentNode) tn.parentNode.replaceChild(frag, tn);
         });
-        activateHit(0);
+        const initIdx = findInitialManualHitIndex(overrideAnchorY);
+        activateHit(initIdx, true);
       }
 
       window.openManualFind = function() {
+        captureManualAnchor();
         bar.classList.add('open');
-        const sel = window.getSelection ? String(window.getSelection().toString() || '').trim() : '';
-        if (sel && sel.length <= 80 && !sel.includes('\n')) inp.value = sel;
+        let selAnchorY = null;
+        if (window.getSelection) {
+          const selObj = window.getSelection();
+          const anchorNode = selObj ? selObj.anchorNode : null;
+          const anchorEl = anchorNode && anchorNode.nodeType === 1
+            ? anchorNode
+            : (anchorNode ? anchorNode.parentElement : null);
+          const insideBar = !!(anchorEl && bar.contains(anchorEl));
+          const sel = insideBar ? '' : String((selObj && selObj.toString()) || '').trim();
+          if (sel && sel.length <= 80 && !sel.includes('\n')) {
+            inp.value = sel;
+            try {
+              if (selObj && selObj.rangeCount > 0) {
+                const rangeRect = selObj.getRangeAt(0).getBoundingClientRect();
+                if (rangeRect && (rangeRect.width > 0 || rangeRect.height > 0)) {
+                  selAnchorY = rangeRect.top + (window.scrollY || window.pageYOffset || 0) - 2;
+                }
+              }
+            } catch (e) {}
+          }
+        }
         inp.focus();
         inp.select();
-        if (inp.value.trim()) runFind();
+        if (inp.value.trim()) runFind(selAnchorY);
       };
       window.closeManualFind = function() {
         bar.classList.remove('open');
+        anchorStale = true;
         clearHits();
         cnt.textContent = '0 / 0';
         cnt.classList.remove('zero');
       };
       window.stepManualFind = function(d) {
         if (!hits.length) { runFind(); return; }
-        activateHit(activeIdx + d);
+        const nextIdx = activeIdx < 0 ? findInitialManualHitIndex() : (activeIdx + d);
+        activateHit(nextIdx, true);
+        anchorStale = true;
       };
 
-      inp.addEventListener('input', runFind);
+      inp.addEventListener('input', () => {
+        if (anchorStale) captureManualAnchor();
+        runFind();
+      });
       inp.addEventListener('keydown', (ev) => {
         if (ev.key === 'Enter' && !ev.isComposing && ev.keyCode !== 229) {
           ev.preventDefault();
           window.stepManualFind(ev.shiftKey ? -1 : 1);
         }
       });
+      document.addEventListener('scroll', () => {
+        if (!bar.classList.contains('open')) return;
+        if (Date.now() <= programmaticScrollUntil) return;
+        anchorStale = true;
+      }, { capture: true, passive: true });
       document.addEventListener('keydown', (ev) => {
         if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && !ev.shiftKey && (ev.key === 'f' || ev.key === 'F' || ev.code === 'KeyF')) {
           ev.preventDefault();

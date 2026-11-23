@@ -361,6 +361,12 @@ def test_dashboard_and_manual_ctrl_f_search_bar_and_ledger_filter() -> None:
 
     # Verify JS functions and keyboard shortcuts (Ctrl+F, F3, Escape) rendered cleanly
     for expected_token in (
+        "function getActiveStickyTopOffset(",
+        "function getCtrlFScrollContext(",
+        "function captureCtrlFSearchAnchor(",
+        "function getCtrlFElementFlowMidY(",
+        "function findInitialCtrlFMatchIndex(",
+        "function isCtrlFTargetInSafeViewport(",
         "function openCtrlFSearch(",
         "function closeCtrlFSearch(",
         "function stepCtrlFMatch(",
@@ -370,12 +376,13 @@ def test_dashboard_and_manual_ctrl_f_search_bar_and_ledger_filter() -> None:
         "ev.key === 'F3'",
     ):
         assert expected_token in html_text
+    assert "activateCtrlFMatch(0," not in html_text
 
     # Verify no accidental double-brace f-string artifacts leaked into rendered HTML/JS
     assert "{{" not in html_text
     assert "}}" not in html_text
 
-    # Verify /manual also includes Ctrl+F search bar & handlers
+    # Verify /manual also includes Ctrl+F search bar & viewport-aware handlers
     manual_resp = client.get("/manual")
     assert manual_resp.status_code == 200
     manual_html = manual_resp.text
@@ -383,6 +390,8 @@ def test_dashboard_and_manual_ctrl_f_search_bar_and_ledger_filter() -> None:
     assert "🔎 매뉴얼 검색 (Ctrl+F)" in manual_html
     assert "window.openManualFind" in manual_html
     assert "window.stepManualFind" in manual_html
+    assert "function findInitialManualHitIndex(" in manual_html
+    assert "activateHit(0)" not in manual_html
 
 
 def test_dashboard_sticky_header_and_excel_row_freeze() -> None:
@@ -493,4 +502,233 @@ def test_dashboard_v15_graph_audit_and_bigquery_modal() -> None:
     assert "{{" not in html_text
     assert "}}" not in html_text
     assert html_text.count('class="section-sticky-bar"') == 4
+
+
+def test_ctrl_f_starts_from_current_viewport_in_headless_chromium(
+    tmp_path: Path, db_conn
+) -> None:
+    """Verify Ctrl+F starts from the current scrolled page/viewport instead of 1/N at page top."""
+    import subprocess
+    import time
+
+    import httpx
+
+    from sololedger.scraper_service import _CdpWebSocket, _find_local_chromium_executable
+
+    browser_exe = _find_local_chromium_executable()
+    if not browser_exe:
+        return
+
+    # Seed enough transactions so /dashboard spans multiple scrollable viewports
+    for idx in range(1, 55):
+        day = (idx % 28) + 1
+        db_conn.execute(
+            """
+            INSERT INTO card_transactions (
+                card_last4, approval_no, transacted_at, raw_merchant_name,
+                total_amount, supply_value, vat_amount, account_code, account_name,
+                vat_deduction_type, counterparty_info, reconcile_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'DEDUCTIBLE', ?, 'HOMETAX_VERIFIED')
+            """,
+            (
+                "우리법인1234",
+                f"VP{idx:06d}",
+                f"2026-10-{day:02d} 12:{idx:02d}:00",
+                f"뷰포트검증상점_{idx:02d}",
+                11000,
+                10000,
+                1000,
+                "811",
+                "복리후생비",
+                f"반복검색키워드 행번호_{idx:02d}",
+            ),
+        )
+    db_conn.commit()
+
+    server_port = find_free_port("127.0.0.1")
+    cdp_port = find_free_port("127.0.0.1")
+    profile_dir = tmp_path / "cdp_ctrlf_profile"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
+    controller = EmbeddedServerController(bind_host="127.0.0.1", port=server_port)
+    proc = None
+    ws = None
+    try:
+        base_url = controller.start(timeout=10.0)
+        dash_url = build_desktop_start_url(base_url, "/dashboard?year_month=ALL")
+        manual_url = build_desktop_start_url(base_url, "/manual")
+
+        proc = subprocess.Popen(
+            [
+                browser_exe,
+                "--headless=new",
+                f"--remote-debugging-port={cdp_port}",
+                "--remote-allow-origins=*",
+                f"--user-data-dir={profile_dir}",
+                "--window-size=1360,820",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-gpu",
+                dash_url,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        ws_url = ""
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            try:
+                resp = httpx.get(f"http://127.0.0.1:{cdp_port}/json", timeout=1.0, trust_env=False)
+                if resp.status_code == 200:
+                    for tgt in resp.json():
+                        if tgt.get("type") == "page" and tgt.get("webSocketDebuggerUrl"):
+                            ws_url = tgt["webSocketDebuggerUrl"]
+                            break
+                if ws_url:
+                    break
+            except Exception:
+                pass
+            time.sleep(0.15)
+        assert ws_url, "Failed to attach CDP WebSocket to headless Chromium"
+
+        ws = _CdpWebSocket(ws_url, timeout=15.0)
+        ws.call("Page.enable", msg_id=1)
+        ws.call("Runtime.enable", msg_id=2)
+
+        # Wait until #main-ledger-tbody is rendered with seeded rows
+        ready = False
+        for msg_seq in range(10, 40):
+            ev = ws.call(
+                "Runtime.evaluate",
+                {
+                    "expression": "document.querySelectorAll('#main-ledger-tbody tr[data-has-stmt]').length",
+                    "returnByValue": True,
+                },
+                msg_id=msg_seq,
+            )
+            row_cnt = ev.get("result", {}).get("result", {}).get("value", 0)
+            if isinstance(row_cnt, int) and row_cnt >= 50:
+                ready = True
+                break
+            time.sleep(0.15)
+        assert ready, "Dashboard rows did not finish loading"
+
+        # 1. Pin top row #0, scroll deep down to row #30, open Ctrl+F and type '뷰포트검증상점'
+        js_dash_check = """
+        (() => {
+          const rows = document.querySelectorAll('#main-ledger-tbody tr[data-has-stmt]');
+          rows[0].classList.add('pinned-ledger-row');
+          syncStickySectionOffsets();
+          const targetRow = rows[30];
+          const targetDocTop = targetRow.getBoundingClientRect().top + window.scrollY;
+          window.scrollTo(0, Math.max(0, targetDocTop - 160));
+          updateStickyStuckClasses();
+          const beforeScrollY = window.scrollY;
+
+          openCtrlFSearch();
+          const inp = document.getElementById('ctrlf-search-input');
+          inp.value = '뷰포트검증상점';
+          onCtrlFInput();
+
+          const firstCountText = document.getElementById('ctrlf-match-count').textContent;
+          const firstIdx = ctrlFActiveIndex;
+          const afterScrollY = window.scrollY;
+
+          // Step next (+1) and verify sequential progression from current viewport match
+          stepCtrlFMatch(1);
+          const nextIdx = ctrlFActiveIndex;
+
+          // Search a term that ONLY exists in the very first row above current scroll -> wraps to 0
+          closeCtrlFSearch();
+          window.scrollTo(0, beforeScrollY);
+          openCtrlFSearch(rows[0].querySelectorAll('td')[3].textContent.trim());
+          const wrappedIdx = ctrlFActiveIndex;
+
+          return {
+            totalRows: rows.length,
+            beforeScrollY: beforeScrollY,
+            afterScrollY: afterScrollY,
+            firstIdx: firstIdx,
+            nextIdx: nextIdx,
+            firstCountText: firstCountText,
+            wrappedIdx: wrappedIdx
+          };
+        })()
+        """
+        dash_eval = ws.call(
+            "Runtime.evaluate",
+            {"expression": js_dash_check, "returnByValue": True},
+            msg_id=100,
+        )
+        res = dash_eval["result"]["result"]["value"]
+        assert res["beforeScrollY"] > 600
+        # Must NOT start at index 0 (1 / N) when scrolled down to row #30 (even with row #0 pinned!)
+        assert res["firstIdx"] >= 20, f"Expected viewport match >= 20, got {res}"
+        assert not res["firstCountText"].startswith("1 / "), f"Counter started at top: {res}"
+        assert res["nextIdx"] == res["firstIdx"] + 1
+        # Because match is already visible in viewport, page does not jump back to top
+        assert abs(res["afterScrollY"] - res["beforeScrollY"]) < 50
+        # Unique match above current viewport cleanly wraps around to index 0
+        assert res["wrappedIdx"] == 0
+
+        # 2. Navigate to /manual, scroll down to #sec-5, and verify sticky <aside> TOC does not hijack 1/N
+        ws.call("Page.navigate", {"url": manual_url}, msg_id=200)
+        manual_ready = False
+        for msg_seq in range(201, 230):
+            ev = ws.call(
+                "Runtime.evaluate",
+                {
+                    "expression": "Boolean(window.openManualFind && document.getElementById('sec-5'))",
+                    "returnByValue": True,
+                },
+                msg_id=msg_seq,
+            )
+            if ev.get("result", {}).get("result", {}).get("value") is True:
+                manual_ready = True
+                break
+            time.sleep(0.15)
+        assert manual_ready
+
+        js_manual_check = """
+        (() => {
+          const sec5 = document.getElementById('sec-5');
+          const secTop = sec5.getBoundingClientRect().top + window.scrollY;
+          window.scrollTo(0, Math.max(0, secTop - 80));
+          const beforeY = window.scrollY;
+          window.openManualFind();
+          const inp = document.getElementById('ctrlf-search-input');
+          inp.value = 'CLI';
+          inp.dispatchEvent(new Event('input'));
+          const countTxt = document.getElementById('ctrlf-match-count').textContent;
+          const activeMark = document.querySelector('mark.sl-find-hit.sl-find-active');
+          const inMain = Boolean(activeMark && activeMark.closest('main'));
+          return {
+            beforeY: beforeY,
+            afterY: window.scrollY,
+            countTxt: countTxt,
+            inMain: inMain
+          };
+        })()
+        """
+        man_eval = ws.call(
+            "Runtime.evaluate",
+            {"expression": js_manual_check, "returnByValue": True},
+            msg_id=250,
+        )
+        mres = man_eval["result"]["result"]["value"]
+        assert mres["beforeY"] > 500
+        assert mres["inMain"] is True, f"Sticky aside hijacked manual find: {mres}"
+        assert not mres["countTxt"].startswith("1 / "), f"Manual find started at 1/N: {mres}"
+    finally:
+        if ws is not None:
+            ws.close()
+        if proc is not None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3.0)
+            except Exception:
+                proc.kill()
+        controller.stop(timeout=5.0)
+
 

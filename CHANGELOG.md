@@ -77,3 +77,4 @@
 | 2026-11-22 | `fix` | `logs/architecture_graph.json, logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/email_watcher.py (+5 files)` | 이메일 주문 파서 고도화(네이버 스마트메일함·포인트복합결제·쿠팡6열·KSNET·날짜정규화) 및 개인카드 오탐 방지 | `PASSED` |
 | 2026-11-23 | `fix` | `logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/config.py, src/sololedger/desktop_app.py (+2 files)` | 데스크톱 앱 루프백 HTTP_PROXY 우회 및 Windows 포트 충돌·경합 폴백 수정 | `PASSED` |
 | 2026-11-23 | `fix` | `logs/architecture_graph.json, logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py (+4 files)` | 쿠팡 페이지·주문상세 크롤링, 쿠팡 이메일 스크롤링 및 할인·배송비·와우멤버십 정밀 자동매칭 고도화 | `PASSED` |
+| 2026-11-23 | `fix` | `docs/USER_MANUAL.html, docs/USER_MANUAL.md, logs/architecture_graph.json, logs/last_verification.json (+3 files)` | Ctrl+F 찾기 실행 시 페이지 최상단(1/N) 대신 현재 스크롤된 화면(뷰포트) 위치부터 검색하도록 수정 | `PASSED` |
