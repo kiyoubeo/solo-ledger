@@ -102,7 +102,7 @@ VALUES
 -- Rule 1: E-commerce & PG providers have uncertain item lists until receipt/statement is confirmed -> Unclassified (999)
 (10, 'MERCHANT_NAME', '(쿠팡|네이버페이|네이버파이낸셜|알리익스프레스|이니시스|토스페이먼츠|카카오페이|주식회사카카|PAYCO|페이코|스마일페이|십일번가|11번가|지마켓|옥션|무신사)', '999', '미분류', 0, NULL, 0, 1),
 -- Rule 2: Gas stations, auto maintenance, parking, toll -> Vehicle Expense + Non-deductible VAT (Passenger car)
-(20, 'MERCHANT_NAME', '(주유|에너지|에너|정유|오일|석유|칼텍스|스피드메이트|오토큐|하이패스|주차|파크|정비|모터스|타이어|세차|카쉐어링|쏘카|피플카)', '822', '차량유지비', 1, 'PASSENGER_CAR', 1, 0),
+(20, 'MERCHANT_NAME', '(주유|에너지|에너|정유|오일|석유|칼텍스|스피드메이트|오토큐|하이패스|주차|파킹|단지\s*관리단|시설관리공단|파크(?!시티|뷰|타운|스퀘어|호텔|몰|에비뉴)|정비|모터스|타이어|세차|카쉐어링|쏘카|피플카)', '822', '차량유지비', 1, 'PASSENGER_CAR', 1, 0),
 -- Rule 3: SaaS, AI subscriptions, Cloud, Telecom, Transit Card, Post Office, Utilities -> Service Fees
 (30, 'MERCHANT_NAME', '(GITHUB|OPENAI|GOOGLE|구글페이먼트|AWS|클라우드|웨이브|넷플릭스|유튜브|한국전력|도시가스|이비카드|티머니|우체국|우정사업본부)', '831', '지급수수료', 0, NULL, 0, 0),
 -- Rule 4: Cafes, Restaurants, Bakeries, Convenience stores -> Welfare Expense

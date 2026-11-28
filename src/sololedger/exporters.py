@@ -78,7 +78,12 @@ def generate_tax_accountant_pack(
     writer = csv.writer(csv_buffer)
     writer.writerow(CSV_HEADERS)
 
+    excl_buffer = io.StringIO()
+    excl_writer = csv.writer(excl_buffer)
+    excl_writer.writerow(CSV_HEADERS)
+
     exported_tx_ids: List[int] = []
+    excluded_tx_ids: List[int] = []
     attached_receipt_files: List[Tuple[str, str]] = []
     card_rows_map: Dict[str, List[List[Any]]] = {}
     card_stats_map: Dict[str, Dict[str, Any]] = {}
@@ -86,24 +91,19 @@ def generate_tax_accountant_pack(
     total_vat = 0
     total_amount = 0
     deductible_vat = 0
+    excluded_amount = 0
 
     for row in rows:
         tx_id = int(row["tx_id"])
-        exported_tx_ids.append(tx_id)
         supply_val = int(row["supply_value"])
         vat_val = int(row["vat_amount"])
         amt_val = int(row["total_amount"])
         c_last4 = str(row["card_last4"] or "0000")
-
-        total_supply += supply_val
-        total_vat += vat_val
-        total_amount += amt_val
-        if row["vat_deduction_type"] == "DEDUCTIBLE":
-            deductible_vat += vat_val
-
+        acc_code = str(row["account_code"] or "999")
+        is_excluded_personal = (
+            acc_code == "900" or str(row["non_deduct_reason"] or "") == "PERSONAL_USE"
+        )
         arch_name = row["archived_file_name"] or ""
-        if arch_name:
-            attached_receipt_files.append((c_last4, arch_name))
 
         csv_row = [
             tx_id,
@@ -116,7 +116,7 @@ def generate_tax_accountant_pack(
             supply_val,
             vat_val,
             amt_val,
-            row["account_code"],
+            acc_code,
             row["account_name"],
             row["vat_deduction_type"],
             row["non_deduct_reason"] or "",
@@ -125,6 +125,23 @@ def generate_tax_accountant_pack(
             row["reconcile_status"],
             arch_name,
         ]
+
+        if is_excluded_personal:
+            excluded_tx_ids.append(tx_id)
+            excluded_amount += amt_val
+            excl_writer.writerow(csv_row)
+            continue
+
+        exported_tx_ids.append(tx_id)
+        total_supply += supply_val
+        total_vat += vat_val
+        total_amount += amt_val
+        if row["vat_deduction_type"] == "DEDUCTIBLE":
+            deductible_vat += vat_val
+
+        if arch_name:
+            attached_receipt_files.append((c_last4, arch_name))
+
         writer.writerow(csv_row)
         card_rows_map.setdefault(c_last4, []).append(csv_row)
 
@@ -148,6 +165,13 @@ def generate_tax_accountant_pack(
     csv_bytes = csv_buffer.getvalue().encode("utf-8-sig")
     csv_path.write_bytes(csv_bytes)
 
+    excl_csv_filename = f"SoloLedger_경비제외_가지급금정산_{year_month}.csv"
+    excl_csv_path = export_dir / excl_csv_filename
+    excl_csv_bytes: Optional[bytes] = None
+    if excluded_tx_ids:
+        excl_csv_bytes = excl_buffer.getvalue().encode("utf-8-sig")
+        excl_csv_path.write_bytes(excl_csv_bytes)
+
     zip_filename = f"SoloLedger_세무증빙_{year_month}.zip"
     zip_path = export_dir / zip_filename
     norm_dir = base_archive / "normalized"
@@ -163,6 +187,8 @@ def generate_tax_accountant_pack(
     seen_card_receipts = set()
     with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(csv_filename, csv_bytes)
+        if excl_csv_bytes is not None:
+            zf.writestr(excl_csv_filename, excl_csv_bytes)
         for c_last4, c_rows in card_rows_map.items():
             c_buf = io.StringIO()
             c_writer = csv.writer(c_buf)
@@ -208,8 +234,9 @@ def generate_tax_accountant_pack(
             content_type="application/zip",
         )
 
-    if exported_tx_ids:
-        placeholders = ",".join("?" for _ in exported_tx_ids)
+    all_marked_ids = [*exported_tx_ids, *excluded_tx_ids]
+    if all_marked_ids:
+        placeholders = ",".join("?" for _ in all_marked_ids)
         cursor.execute(
             f"""
             UPDATE card_transactions
@@ -217,13 +244,16 @@ def generate_tax_accountant_pack(
                 updated_at = CURRENT_TIMESTAMP
             WHERE tx_id IN ({placeholders})
             """,
-            [year_month, *exported_tx_ids],
+            [year_month, *all_marked_ids],
         )
 
     result: Dict[str, Any] = {
         "status": "exported",
         "year_month": year_month,
         "exported_count": len(exported_tx_ids),
+        "excluded_count": len(excluded_tx_ids),
+        "excluded_amount": excluded_amount,
+        "excluded_csv_file_path": str(excl_csv_path) if excl_csv_bytes is not None else None,
         "bundled_receipts_count": bundled_receipts_count,
         "total_supply_value": total_supply,
         "total_vat_amount": total_vat,

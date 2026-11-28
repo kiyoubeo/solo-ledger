@@ -35,6 +35,8 @@ from sololedger.cloud_sync import (
 from sololedger.config import PROJECT_ROOT, resolve_bundled_path, settings
 from sololedger.dashboard import (
     build_dashboard_summary,
+    bulk_update_transactions,
+    delete_transactions_by_ids,
     reapply_tax_rules_to_ledger,
     render_dashboard_html,
     reset_test_ledger,
@@ -64,6 +66,8 @@ from sololedger.models import (
     AppPushWebhookPayload,
     BigQueryGraphExportRequest,
     BigQueryProvisionRequest,
+    BulkTransactionDeleteRequest,
+    BulkTransactionUpdateRequest,
     CloudEmailSyncJobRequest,
     CloudSnapshotBackupRequest,
     HometaxCsvImportRequest,
@@ -1126,6 +1130,76 @@ async def list_transactions(
         cursor.execute("SELECT * FROM card_transactions ORDER BY transacted_at DESC, tx_id DESC")
         rows = [dict(r) for r in cursor.fetchall()]
         return {"count": len(rows), "items": rows}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/transactions/bulk-update")
+async def bulk_update_transactions_endpoint(
+    request: BulkTransactionUpdateRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Batch update account code and memo across multiple selected transactions."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        outcome = bulk_update_transactions(
+            cursor,
+            tx_ids=request.tx_ids,
+            account_code=request.account_code,
+            account_name=request.account_name,
+            vat_deduction_type=request.vat_deduction_type,
+            non_deduct_reason=request.non_deduct_reason,
+            counterparty_info=request.counterparty_info,
+            apply_to_same_merchant=request.apply_to_same_merchant,
+        )
+        for tid in outcome["updated_tx_ids"]:
+            sync_checkpoint_from_ledger(cursor, int(tid))
+        conn.commit()
+        return outcome
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/transactions/bulk-delete")
+async def bulk_delete_transactions_endpoint(
+    request: BulkTransactionDeleteRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Batch delete test, duplicate, or invalid transactions from the ledger."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        outcome = delete_transactions_by_ids(cursor, tx_ids=request.tx_ids)
+        conn.commit()
+        return outcome
+    finally:
+        conn.close()
+
+
+@app.delete("/api/v1/transactions/{tx_id}")
+async def delete_single_transaction_endpoint(
+    tx_id: int,
+    x_api_key: Optional[str] = Header(default=None),
+    sololedger_api_key: Optional[str] = Header(default=None, alias="SOLOLEDGER_API_KEY"),
+):
+    """Delete a single transaction and its linked receipt/checkpoint metadata."""
+    _verify_api_key(x_api_key, sololedger_api_key)
+    init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        outcome = delete_transactions_by_ids(cursor, tx_ids=[tx_id])
+        if outcome["deleted_count"] == 0:
+            raise HTTPException(status_code=404, detail=f"Transaction #{tx_id} not found.")
+        conn.commit()
+        return outcome
     finally:
         conn.close()
 

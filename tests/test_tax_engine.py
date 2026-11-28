@@ -261,3 +261,100 @@ def test_reapply_tax_rules_reverts_unconfirmed_auto_memos_and_keeps_statements(
     assert bool(parking_row["is_vehicle_expense"]) is True
 
 
+def test_branch_name_false_positives_pg_propagation_guard_and_exempt_sync(db_conn):
+    """Verify park-city/stationery fixes, PG propagation guard, 900 exclusion, and EXEMPT sync."""
+    from sololedger.dashboard import update_transaction_classification
+
+    cur = db_conn.cursor()
+
+    # 1. Branch names like '연산파크시티점' on cafes -> 811 복리후생비 (NOT 822 차량유지비)
+    for cafe_name in ("메가엠지씨커피 연산파크시티점", "컴포즈커피 연산파크시티점"):
+        res = evaluate_tax_rules(cur, cafe_name)
+        assert res["account_code"] == "811"
+        assert res["is_vehicle_expense"] is False
+
+    # 2. '문구야놀자' -> 830 소모품비 (NOT 812 여비교통비)
+    res_stat = evaluate_tax_rules(cur, "문구야놀자(연산파크시티점)")
+    assert res_stat["account_code"] == "830"
+
+    # 3. Court registry, public parking facility, and plumbing materials
+    assert evaluate_tax_rules(cur, "법원행정처")["account_code"] == "831"
+    assert evaluate_tax_rules(cur, "서울특별시영등포구시설관리공단")["account_code"] == "822"
+    assert evaluate_tax_rules(cur, "주식회사 신호종합배관")["account_code"] == "501"
+
+    # 4. PG / Mart propagation guard: saving 1 Coupang row must NOT overwrite sibling Coupang row
+    cur.execute(
+        """
+        INSERT INTO card_transactions (
+            card_last4, transacted_at, raw_merchant_name,
+            total_amount, supply_value, vat_amount, account_code, account_name,
+            vat_deduction_type, reconcile_status
+        ) VALUES
+            ('2949', '2026-10-10 12:00:00', '쿠팡페이 주식회사', 33000, 30000, 3000,
+             '999', '미분류', 'PENDING', 'HOMETAX_VERIFIED'),
+            ('2949', '2026-10-12 12:00:00', '쿠팡페이 주식회사', 55000, 50000, 5000,
+             '999', '미분류', 'PENDING', 'HOMETAX_VERIFIED')
+        """
+    )
+    cp_rows = cur.execute(
+        "SELECT tx_id FROM card_transactions WHERE raw_merchant_name = '쿠팡페이 주식회사' ORDER BY tx_id"
+    ).fetchall()
+    cp1, cp2 = int(cp_rows[0][0]), int(cp_rows[1][0])
+
+    upd_cp = update_transaction_classification(
+        cur, tx_id=cp1, account_code="501", counterparty_info="현장 타카핀", apply_to_same_merchant=True
+    )
+    assert upd_cp["propagated_merchant_count"] == 0
+    cp2_row = dict(cur.execute("SELECT * FROM card_transactions WHERE tx_id = ?", (cp2,)).fetchone())
+    assert cp2_row["account_code"] == "999"
+    assert cp2_row["counterparty_info"] is None
+
+    # 5. EXEMPT merchant consistency sync + 900 경비제외 protection across reapply
+    cur.execute(
+        """
+        INSERT INTO merchants (biz_reg_no, merchant_name, tax_type_code, biz_status)
+        VALUES ('2529202318', '문경청과', 'EXEMPT', 'ACTIVE')
+        """
+    )
+    cur.execute(
+        """
+        INSERT INTO card_transactions (
+            card_last4, transacted_at, raw_merchant_name, biz_reg_no,
+            total_amount, supply_value, vat_amount, account_code, account_name,
+            vat_deduction_type, reconcile_status
+        ) VALUES
+            ('2949', '2026-10-19 12:00:00', '문경청과', '2529202318',
+             10000, 9091, 909, '999', '미분류', 'DEDUCTIBLE', 'HOMETAX_VERIFIED'),
+            ('0445', '2026-05-28 12:00:00', '미&끼 헤어퍼밍', NULL,
+             15000, 15000, 0, '999', '미분류', 'EXEMPT', 'HOMETAX_VERIFIED')
+        """
+    )
+    mk_id = int(
+        cur.execute("SELECT tx_id FROM card_transactions WHERE raw_merchant_name = '문경청과'").fetchone()[0]
+    )
+    hair_id = int(
+        cur.execute("SELECT tx_id FROM card_transactions WHERE raw_merchant_name = '미&끼 헤어퍼밍'").fetchone()[0]
+    )
+
+    excl_res = update_transaction_classification(cur, tx_id=hair_id, account_code="900")
+    assert excl_res["account_code"] == "900"
+    assert excl_res["vat_deduction_type"] == "NON_DEDUCTIBLE"
+    assert excl_res["non_deduct_reason"] == "PERSONAL_USE"
+    assert excl_res["supply_value"] == 15000
+    assert excl_res["vat_amount"] == 0
+    assert "사적사용" in (excl_res["counterparty_info"] or "")
+
+    reapply_out = reapply_tax_rules_to_ledger(cur)
+    assert reapply_out["exempt_synced_count"] >= 1
+
+    mk_after = dict(cur.execute("SELECT * FROM card_transactions WHERE tx_id = ?", (mk_id,)).fetchone())
+    assert mk_after["vat_deduction_type"] == "EXEMPT"
+    assert mk_after["supply_value"] == 10000
+    assert mk_after["vat_amount"] == 0
+
+    hair_after = dict(cur.execute("SELECT * FROM card_transactions WHERE tx_id = ?", (hair_id,)).fetchone())
+    assert hair_after["account_code"] == "900"
+    assert hair_after["non_deduct_reason"] == "PERSONAL_USE"
+
+
+

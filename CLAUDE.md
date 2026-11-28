@@ -90,3 +90,4 @@
 | 2026-11-23 | logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/config.py, src/sololedger/desktop_app.py (+2 files) | [fix] 데스크톱 앱 루프백 HTTP_PROXY 우회 및 Windows 포트 충돌·경합 폴백 수정 |
 | 2026-11-23 | logs/architecture_graph.json, logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py (+4 files) | [fix] 쿠팡 페이지·주문상세 크롤링, 쿠팡 이메일 스크롤링 및 할인·배송비·와우멤버십 정밀 자동매칭 고도화 |
 | 2026-11-23 | docs/USER_MANUAL.html, docs/USER_MANUAL.md, logs/architecture_graph.json, logs/last_verification.json (+3 files) | [fix] Ctrl+F 찾기 실행 시 페이지 최상단(1/N) 대신 현재 스크롤된 화면(뷰포트) 위치부터 검색하도록 수정 |
+| 2026-11-28 | logs/architecture_graph.json, logs/last_verification.json, logs/verification_history.jsonl, sql/schema.sql (+13 files) | [feat] 경비제외(900) 계정·분리출력, PG 덮어쓰기 방지·일괄편집 UI, 분류오탐·면세정합성 보정 및 가사경비 세무감사 추가 |

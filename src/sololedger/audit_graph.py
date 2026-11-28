@@ -1,7 +1,9 @@
 """Phase 8 Pre-Export Parallel Tax Audit Fan-out / Join Graph."""
 
 import asyncio
+import re
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -255,6 +257,22 @@ async def audit_missing_evidence(snapshot: Dict[str, Any]) -> List[AuditIssue]:
         vat_type = str(row.get("vat_deduction_type") or "")
         memo = str(row.get("counterparty_info") or "").strip()
 
+        if acc_code == "900":
+            if vat_type == "DEDUCTIBLE":
+                issues.append(
+                    AuditIssue(
+                        tx_id=tx_id,
+                        category="VAT_STATUS",
+                        severity="ERROR",
+                        code="EXCLUDED_EXPENSE_VAT_DEDUCTIBLE_ERROR",
+                        message=(
+                            f"전표 #{tx_id}({merchant_name}): 경비제외(900) 항목은 "
+                            "매입세액 공제(DEDUCTIBLE) 적용 불가"
+                        ),
+                    )
+                )
+            continue
+
         if acc_code == "999":
             issues.append(
                 AuditIssue(
@@ -330,6 +348,112 @@ async def audit_missing_evidence(snapshot: Dict[str, Any]) -> List[AuditIssue]:
     return issues
 
 
+_PERSONAL_HOUSEHOLD_RE = re.compile(
+    r"(헤어|미용실|네일|피부과|성형외과|정형외과|한의원|치과의원|내과의원|"
+    r"예봄교회|교회|성당|사찰|서윤니트|애플아울렛|에이비씨마트|ABC마트|"
+    r"몽키뮤직타운|노래연습장|노래방)",
+    re.IGNORECASE,
+)
+_RAW_GROCERY_RE = re.compile(
+    r"(쌀직매장|동화쌀|착한정육점|정육점|참고기|청과|과일쟁이|농산생활|"
+    r"고구마왕자|야생과|방아간|방앗간|뻥튀기공작소|수산축산)",
+    re.IGNORECASE,
+)
+_PUB_ALCOHOL_RE = re.compile(
+    r"(봉구비어|비어도|주휴소|피맥하우스|청담이상|이자카야|호프|포차|맥주)",
+    re.IGNORECASE,
+)
+_RESORT_LEISURE_RE = re.compile(
+    r"(아난티|한화리조트|리조트|해운조합|세이버리\s*뮤지엄)",
+    re.IGNORECASE,
+)
+
+
+async def audit_tax_disallowance_risk(snapshot: Dict[str, Any]) -> List[AuditIssue]:
+    """Branch D: Flag substantive corporate tax disallowance (가사경비·상여처분) risks."""
+    issues: List[AuditIssue] = []
+    for row in snapshot["rows"]:
+        tx_id = int(row["tx_id"])
+        acc_code = str(row.get("account_code") or "999")
+        if acc_code == "900":
+            continue
+
+        merchant_name = str(row.get("raw_merchant_name") or "")
+        total_amt = abs(int(row.get("total_amount") or 0))
+        memo = str(row.get("counterparty_info") or "").strip()
+        dt_str = str(row.get("transacted_at") or "")[:10]
+        is_weekend = False
+        if len(dt_str) == 10:
+            try:
+                is_weekend = datetime.strptime(dt_str, "%Y-%m-%d").weekday() >= 5
+            except ValueError:
+                is_weekend = False
+
+        if _PERSONAL_HOUSEHOLD_RE.search(merchant_name):
+            issues.append(
+                AuditIssue(
+                    tx_id=tx_id,
+                    category="TAX_DISALLOWANCE_RISK",
+                    severity="WARNING",
+                    code="PERSONAL_HOUSEHOLD_MERCHANT_RISK",
+                    message=(
+                        f"전표 #{tx_id}({merchant_name}, {total_amt:,}원): 미용·의료·의류·종교·유흥 "
+                        "업종 가사경비 부인 위험 — 900 경비제외(가지급금) 전환 검토 권고"
+                    ),
+                )
+            )
+            continue
+
+        if _RAW_GROCERY_RE.search(merchant_name) and acc_code != "813":
+            issues.append(
+                AuditIssue(
+                    tx_id=tx_id,
+                    category="TAX_DISALLOWANCE_RISK",
+                    severity="WARNING",
+                    code="RAW_GROCERY_HOUSEHOLD_RISK",
+                    message=(
+                        f"전표 #{tx_id}({merchant_name}, {total_amt:,}원): 미가공 농축산물·식자재 "
+                        "가사경비 오인 주의 — 거래처 선물(813)·현장 간식 소명 또는 900 경비제외 권고"
+                    ),
+                )
+            )
+            continue
+
+        if _RESORT_LEISURE_RE.search(merchant_name):
+            issues.append(
+                AuditIssue(
+                    tx_id=tx_id,
+                    category="TAX_DISALLOWANCE_RISK",
+                    severity="WARNING",
+                    code="RESORT_OR_LEISURE_EXPENSE_RISK",
+                    message=(
+                        f"전표 #{tx_id}({merchant_name}, {total_amt:,}원): 리조트·여객선·문화시설 결제 "
+                        "— 출장·현장 증빙 확인 또는 사적 일정 시 900 경비제외 권고"
+                    ),
+                )
+            )
+            continue
+
+        if acc_code == "811" and (_PUB_ALCOHOL_RE.search(merchant_name) or total_amt >= 100_000):
+            weekend_tag = "주말 " if is_weekend else ""
+            issues.append(
+                AuditIssue(
+                    tx_id=tx_id,
+                    category="TAX_DISALLOWANCE_RISK",
+                    severity="WARNING",
+                    code="PUB_OR_HIGH_WELFARE_DINING_RISK",
+                    message=(
+                        f"전표 #{tx_id}({merchant_name}, {weekend_tag}{total_amt:,}원): "
+                        "주점 또는 10만 원 이상 복리후생비(811) — 거래처 미팅이면 "
+                        "813 기업업무추진비(참석자 기재), 사적 모임이면 900 경비제외 권고"
+                        + (f" [현재 적요: {memo}]" if memo else "")
+                    ),
+                )
+            )
+
+    return issues
+
+
 def join_audit_report(
     cursor: sqlite3.Cursor,
     year_month: str,
@@ -379,6 +503,7 @@ def join_audit_report(
             "audit_vat_status",
             "audit_vehicle_and_card_policy",
             "audit_missing_evidence",
+            "audit_tax_disallowance_risk",
             "join_audit_report",
         ],
     )
@@ -403,6 +528,7 @@ async def run_pre_export_tax_audit(
             audit_vat_status(snapshot),
             audit_vehicle_and_card_policy(snapshot, archive_dir=archive_dir),
             audit_missing_evidence(snapshot),
+            audit_tax_disallowance_risk(snapshot),
         )
     )
     state = join_audit_report(

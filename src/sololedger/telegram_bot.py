@@ -7,6 +7,10 @@ from typing import Any, Dict, Optional, Tuple
 from sololedger.archiver import build_archived_filename
 
 _MEMO_ACCOUNT_KEYWORDS = [
+    (
+        re.compile(r"(경비제외|사적사용|가사경비|가지급금|개인사용|불산입)"),
+        ("900", "경비제외", True, "PERSONAL_USE"),
+    ),
     (re.compile(r"(비품|모니터|노트북|키보드|책상|의자)"), ("212", "비품", False, None)),
     (re.compile(r"(주차|주유|세차|정비|하이패스|통행료)"), ("822", "차량유지비", True, "PASSENGER_CAR")),
     (re.compile(r"(도서|책|인쇄|출판)"), ("826", "도서인쇄비", False, None)),

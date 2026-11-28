@@ -110,6 +110,8 @@ def _extract_site_info(
     counterparty_info: Optional[str], account_code: str
 ) -> Optional[Tuple[str, str, Optional[str]]]:
     """Derive ConstructionSite (site_id, site_name, client_hint) from memo or cost code."""
+    if account_code == "900":
+        return None
     memo = (counterparty_info or "").strip()
     m_bracket = _SITE_BRACKET_RE.search(memo)
     site_name: Optional[str] = None
@@ -137,6 +139,8 @@ def _account_cost_nature(account_code: str) -> str:
         return "CONSTRUCTION_COST"
     if account_code == "212":
         return "ASSET"
+    if account_code == "900":
+        return "EXCLUDED_PERSONAL"
     if account_code == "999":
         return "UNCLASSIFIED"
     return "OPERATING_EXPENSE"

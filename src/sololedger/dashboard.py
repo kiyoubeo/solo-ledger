@@ -39,6 +39,7 @@ ACCOUNT_CODE_CATALOG: Dict[str, str] = {
     "830": "소모품비",
     "831": "지급수수료",
     "212": "비품",
+    "900": "경비제외(가지급금/사적사용)",
     "999": "가계정(미분류)",
 }
 
@@ -63,8 +64,16 @@ def update_transaction_classification(
     resolved_name = account_name or ACCOUNT_CODE_CATALOG.get(resolved_code, row["account_name"])
     resolved_vat_type = vat_deduction_type or row["vat_deduction_type"]
     resolved_reason = non_deduct_reason if non_deduct_reason is not None else row["non_deduct_reason"]
+    was_exempt = (
+        row["vat_deduction_type"] == "EXEMPT"
+        and int(row["vat_amount"]) == 0
+        and int(row["supply_value"]) == int(row["total_amount"])
+    )
 
-    if resolved_code == "813" and vat_deduction_type is None:
+    if resolved_code == "900":
+        resolved_vat_type = "NON_DEDUCTIBLE"
+        resolved_reason = "PERSONAL_USE"
+    elif resolved_code == "813" and vat_deduction_type is None:
         resolved_vat_type = "NON_DEDUCTIBLE"
         resolved_reason = resolved_reason or "ENTERTAINMENT"
     elif resolved_code == "822" and vat_deduction_type is None:
@@ -73,8 +82,20 @@ def update_transaction_classification(
     elif resolved_code != "999" and resolved_vat_type in ("PENDING", "PENDING_CHECK"):
         resolved_vat_type = "DEDUCTIBLE"
 
-    is_vehicle = 1 if resolved_code == "822" else int(row["is_vehicle_expense"])
-    supply_value, vat_amount = calculate_supply_and_vat(int(row["total_amount"]), resolved_vat_type)
+    if resolved_code not in ("900", "813", "822") and resolved_reason in (
+        "PERSONAL_USE",
+        "ENTERTAINMENT",
+        "PASSENGER_CAR",
+    ) and non_deduct_reason is None:
+        resolved_reason = None
+
+    is_vehicle = 1 if resolved_code == "822" else 0
+    if was_exempt:
+        supply_value, vat_amount = int(row["total_amount"]), 0
+    else:
+        supply_value, vat_amount = calculate_supply_and_vat(
+            int(row["total_amount"]), resolved_vat_type
+        )
     raw_memo = counterparty_info if counterparty_info is not None else row["counterparty_info"]
     resolved_memo = (
         raw_memo
@@ -110,7 +131,12 @@ def update_transaction_classification(
     )
 
     propagated_count = 0
-    if apply_to_same_merchant and resolved_code != "999":
+    can_propagate = (
+        apply_to_same_merchant
+        and resolved_code != "999"
+        and not is_uncertain_item_merchant(row["raw_merchant_name"])
+    )
+    if can_propagate:
         learn_merchant_rule(
             cursor,
             row["raw_merchant_name"],
@@ -121,19 +147,27 @@ def update_transaction_classification(
         )
         cursor.execute(
             """
-            SELECT tx_id, total_amount, counterparty_info
+            SELECT tx_id, total_amount, supply_value, vat_amount, vat_deduction_type, counterparty_info
             FROM card_transactions
             WHERE raw_merchant_name = ?
               AND tx_id != ?
-              AND (account_code = '999' OR counterparty_info IS NULL OR TRIM(counterparty_info) = '')
+              AND account_code = '999'
             """,
             (row["raw_merchant_name"], tx_id),
         )
         peer_rows = cursor.fetchall()
         for peer in peer_rows:
-            p_supply, p_vat = calculate_supply_and_vat(
-                int(peer["total_amount"]), resolved_vat_type
+            peer_exempt = (
+                peer["vat_deduction_type"] == "EXEMPT"
+                and int(peer["vat_amount"]) == 0
+                and int(peer["supply_value"]) == int(peer["total_amount"])
             )
+            if peer_exempt:
+                p_supply, p_vat = int(peer["total_amount"]), 0
+                p_vat_type = "NON_DEDUCTIBLE" if resolved_code == "900" else "EXEMPT"
+            else:
+                p_vat_type = resolved_vat_type
+                p_supply, p_vat = calculate_supply_and_vat(int(peer["total_amount"]), p_vat_type)
             p_memo = (peer["counterparty_info"] or "").strip() or resolved_memo
             cursor.execute(
                 """
@@ -152,7 +186,7 @@ def update_transaction_classification(
                 (
                     resolved_code,
                     resolved_name,
-                    resolved_vat_type,
+                    p_vat_type,
                     resolved_reason,
                     is_vehicle,
                     p_supply,
@@ -161,6 +195,7 @@ def update_transaction_classification(
                     peer["tx_id"],
                 ),
             )
+            _refresh_receipt_archived_filename(cursor, int(peer["tx_id"]))
             propagated_count += 1
 
     archived_file_name = _refresh_receipt_archived_filename(cursor, tx_id)
@@ -169,6 +204,78 @@ def update_transaction_classification(
     updated["archived_file_name"] = archived_file_name
     updated["propagated_merchant_count"] = propagated_count
     return updated
+
+
+def bulk_update_transactions(
+    cursor: sqlite3.Cursor,
+    tx_ids: List[int],
+    account_code: str,
+    account_name: Optional[str] = None,
+    vat_deduction_type: Optional[str] = None,
+    non_deduct_reason: Optional[str] = None,
+    counterparty_info: Optional[str] = None,
+    apply_to_same_merchant: bool = False,
+) -> Dict[str, Any]:
+    """Batch update account classification and memo across multiple selected transactions."""
+    clean_ids = sorted({int(tid) for tid in tx_ids if int(tid) > 0})
+    updated_items: List[Dict[str, Any]] = []
+    skipped_ids: List[int] = []
+    memo_arg = counterparty_info if (counterparty_info or "").strip() else None
+
+    for tid in clean_ids:
+        cursor.execute("SELECT tx_id FROM card_transactions WHERE tx_id = ?", (tid,))
+        if cursor.fetchone() is None:
+            skipped_ids.append(tid)
+            continue
+        res = update_transaction_classification(
+            cursor,
+            tx_id=tid,
+            account_code=account_code,
+            account_name=account_name,
+            vat_deduction_type=vat_deduction_type,
+            non_deduct_reason=non_deduct_reason,
+            counterparty_info=memo_arg,
+            apply_to_same_merchant=apply_to_same_merchant,
+        )
+        updated_items.append(res)
+
+    return {
+        "status": "bulk_updated",
+        "requested_count": len(clean_ids),
+        "updated_count": len(updated_items),
+        "skipped_ids": skipped_ids,
+        "account_code": account_code,
+        "updated_tx_ids": [int(it["tx_id"]) for it in updated_items],
+    }
+
+
+def delete_transactions_by_ids(
+    cursor: sqlite3.Cursor,
+    tx_ids: List[int],
+) -> Dict[str, Any]:
+    """Delete specified transactions (e.g. demo/test/duplicate rows) and linked receipt metadata."""
+    clean_ids = sorted({int(tid) for tid in tx_ids if int(tid) > 0})
+    if not clean_ids:
+        return {"status": "deleted", "deleted_count": 0, "deleted_tx_ids": []}
+
+    placeholders = ",".join("?" for _ in clean_ids)
+    cursor.execute(
+        f"SELECT tx_id FROM card_transactions WHERE tx_id IN ({placeholders})",
+        clean_ids,
+    )
+    existing_ids = [int(r[0]) for r in cursor.fetchall()]
+    if not existing_ids:
+        return {"status": "deleted", "deleted_count": 0, "deleted_tx_ids": []}
+
+    ex_ph = ",".join("?" for _ in existing_ids)
+    cursor.execute(f"DELETE FROM receipt_ocr_metadata WHERE tx_id IN ({ex_ph})", existing_ids)
+    cursor.execute(f"DELETE FROM workflow_checkpoints WHERE tx_id IN ({ex_ph})", existing_ids)
+    cursor.execute(f"DELETE FROM card_transactions WHERE tx_id IN ({ex_ph})", existing_ids)
+    return {
+        "status": "deleted",
+        "deleted_count": len(existing_ids),
+        "deleted_tx_ids": existing_ids,
+    }
 
 
 _SYSTEM_AUTO_MEMOS = {
@@ -188,11 +295,41 @@ _SYSTEM_AUTO_MEMOS = {
     "업무용승용차 정비·유지",
     "하이패스 통행료",
     "업무용승용차 자동차세 납부",
+    "업무용 대중교통·여비교통비",
+    "출장·여비 여행플랫폼 수수료",
+    "법인 등기부등본·제증명 발급 수수료",
+    "사적사용·가사경비 제외 (대표자 가지급금/가수금 정산)",
 }
 
 
 def reapply_tax_rules_to_ledger(cursor: sqlite3.Cursor) -> Dict[str, Any]:
     """Re-evaluate tax classification rules and populate smart default memos across ledger rows."""
+    # First normalize VAT on unexported rows belonging to EXEMPT merchants
+    cursor.execute(
+        """
+        UPDATE card_transactions
+        SET supply_value = total_amount,
+            vat_amount = 0,
+            vat_deduction_type = CASE
+                WHEN account_code = '900' THEN 'NON_DEDUCTIBLE'
+                ELSE 'EXEMPT'
+            END,
+            non_deduct_reason = CASE
+                WHEN account_code = '900' THEN 'PERSONAL_USE'
+                ELSE COALESCE(non_deduct_reason, 'SIMPLIFIED_TAX')
+            END,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE biz_reg_no IN (SELECT biz_reg_no FROM merchants WHERE tax_type_code = 'EXEMPT')
+          AND reconcile_status != 'CANCELED'
+          AND (exported_year_month IS NULL OR exported_year_month = '')
+          AND (
+            vat_deduction_type IN ('DEDUCTIBLE', 'PENDING', 'PENDING_CHECK')
+            OR (vat_deduction_type = 'EXEMPT' AND vat_amount != 0)
+          )
+        """
+    )
+    exempt_synced_count = cursor.rowcount
+
     cursor.execute(
         """
         SELECT DISTINCT tx_id
@@ -221,6 +358,21 @@ def reapply_tax_rules_to_ledger(cursor: sqlite3.Cursor) -> Dict[str, Any]:
         m_name = str(r["raw_merchant_name"] or "")
         cur_code = str(r["account_code"] or "999")
         cur_memo = str(r["counterparty_info"] or "").strip()
+        if cur_code == "900":
+            if not cur_memo:
+                excl_memo = generate_default_memo("900", m_name, False)
+                cursor.execute(
+                    """
+                    UPDATE card_transactions
+                    SET counterparty_info = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE tx_id = ?
+                    """,
+                    (excl_memo, tx_id),
+                )
+                _refresh_receipt_archived_filename(cursor, tx_id)
+                auto_memo_filled_count += 1
+            continue
+
         has_confirmed_evidence = tx_id in confirmed_tx_ids
         has_user_custom_memo = bool(cur_memo) and (cur_memo not in _SYSTEM_AUTO_MEMOS)
 
@@ -234,7 +386,8 @@ def reapply_tax_rules_to_ledger(cursor: sqlite3.Cursor) -> Dict[str, Any]:
                     should_reclassify = True
             elif rule_eval["account_code"] != "999":
                 if cur_code == "999" or (
-                    cur_code in ("830", "831") and rule_eval["account_code"] != cur_code
+                    cur_code in ("830", "831", "812", "822")
+                    and rule_eval["account_code"] != cur_code
                 ):
                     should_reclassify = True
 
@@ -271,13 +424,22 @@ def reapply_tax_rules_to_ledger(cursor: sqlite3.Cursor) -> Dict[str, Any]:
                 )
                 cur_memo = ""
             else:
+                was_pass_car_or_ent = r["non_deduct_reason"] in ("PASSENGER_CAR", "ENTERTAINMENT")
+                keep_hometax_non_ded = (
+                    r["reconcile_status"] == "HOMETAX_VERIFIED"
+                    and r["vat_deduction_type"] in ("EXEMPT", "NON_DEDUCTIBLE")
+                    and not (was_pass_car_or_ent and rule_eval["vat_deduction_type"] == "DEDUCTIBLE")
+                )
                 new_vat_type = (
                     r["vat_deduction_type"]
-                    if r["reconcile_status"] == "HOMETAX_VERIFIED"
-                    and r["vat_deduction_type"] in ("EXEMPT", "NON_DEDUCTIBLE")
+                    if keep_hometax_non_ded
                     else rule_eval["vat_deduction_type"]
                 )
-                new_reason = rule_eval["non_deduct_reason"]
+                new_reason = (
+                    r["non_deduct_reason"]
+                    if keep_hometax_non_ded and rule_eval["non_deduct_reason"] is None
+                    else rule_eval["non_deduct_reason"]
+                )
                 is_veh = 1 if rule_eval["is_vehicle_expense"] else 0
                 if r["reconcile_status"] == "HOMETAX_VERIFIED":
                     sup, vat = int(r["supply_value"]), int(r["vat_amount"])
@@ -289,7 +451,7 @@ def reapply_tax_rules_to_ledger(cursor: sqlite3.Cursor) -> Dict[str, Any]:
                     SET account_code = ?,
                         account_name = ?,
                         vat_deduction_type = ?,
-                        non_deduct_reason = COALESCE(non_deduct_reason, ?),
+                        non_deduct_reason = ?,
                         is_vehicle_expense = ?,
                         supply_value = ?,
                         vat_amount = ?,
@@ -334,6 +496,7 @@ def reapply_tax_rules_to_ledger(cursor: sqlite3.Cursor) -> Dict[str, Any]:
         "total_scanned": len(rows),
         "reclassified_count": reclassified_count,
         "auto_memo_filled_count": auto_memo_filled_count,
+        "exempt_synced_count": exempt_synced_count,
     }
 
 
@@ -716,12 +879,17 @@ def build_dashboard_summary(
     deductible_vat = 0
     non_deductible_vat = 0
     non_deductible_total = 0
+    excluded_personal_count = 0
+    excluded_personal_total = 0
     pending_items: List[Dict[str, Any]] = []
 
     for r in rows:
         amt = int(r["total_amount"])
         vat = int(r["vat_amount"])
         total_expenditure += amt
+        if str(r.get("account_code") or "") == "900" or str(r.get("non_deduct_reason") or "") == "PERSONAL_USE":
+            excluded_personal_count += 1
+            excluded_personal_total += amt
         if r["vat_deduction_type"] == "DEDUCTIBLE":
             deductible_vat += vat
         elif r["vat_deduction_type"] == "NON_DEDUCTIBLE":
@@ -729,9 +897,10 @@ def build_dashboard_summary(
             non_deductible_total += amt
 
         memo = (r.get("counterparty_info") or "").strip()
-        if r["account_code"] == "999" or not memo:
+        if r["account_code"] == "999" or (r["account_code"] != "900" and not memo):
             pending_items.append(r)
 
+    recognized_expense_total = total_expenditure - excluded_personal_total
     vehicle_summary = get_vehicle_expense_summary(cursor, year=target_year)
 
     return {
@@ -756,6 +925,9 @@ def build_dashboard_summary(
         "year": target_year,
         "total_tx_count": len(rows),
         "total_expenditure": total_expenditure,
+        "recognized_expense_total": recognized_expense_total,
+        "excluded_personal_count": excluded_personal_count,
+        "excluded_personal_total": excluded_personal_total,
         "deductible_vat": deductible_vat,
         "non_deductible_vat": non_deductible_vat,
         "non_deductible_total": non_deductible_total,
@@ -1185,7 +1357,9 @@ def render_dashboard_html(
                 f"box-sizing:border-box; font-size:12px;' /></td>"
                 f"<td style='white-space:nowrap;'>{a_select}"
                 f"<button style='padding:4px 8px; font-size:12px;' "
-                f"onclick='saveAccountListTx({atx_id})'>저장</button></td>"
+                f"onclick='saveAccountListTx({atx_id})'>저장</button>"
+                f"<button class='danger' style='padding:4px 7px; font-size:11px;' "
+                f"title='테스트/오류 전표 삭제' onclick='deleteSingleTx({atx_id})'>🗑️</button></td>"
                 f"<td style='font-size:11px; color:#475569;'>{a_arch_str}</td>"
                 f"</tr>"
             )
@@ -1257,12 +1431,21 @@ def render_dashboard_html(
         else "<tr><td colspan='7' class='empty'>집계된 계정과목 내역이 없습니다.</td></tr>"
     )
 
+    bulk_acc_opts = []
+    for b_code, b_name in ACCOUNT_CODE_CATALOG.items():
+        if b_code == "999":
+            continue
+        b_sel = "selected" if b_code == "900" else ""
+        bulk_acc_opts.append(f"<option value='{b_code}' {b_sel}>{b_code} {html.escape(b_name)}</option>")
+    bulk_acc_select_html = "".join(bulk_acc_opts)
+
     pending_rows_html = []
-    for item in summary["pending_transactions"][:150]:
+    for item in summary["pending_transactions"][:200]:
         tx_id = item["tx_id"]
         c_lbl = html.escape(str(item.get("card_label") or format_card_label(item["card_last4"])))
         merchant = html.escape(str(item["raw_merchant_name"]))
-        amt_str = f"{int(item['total_amount']):,}원"
+        amt_int = int(item["total_amount"])
+        amt_str = f"{amt_int:,}원"
         cur_code = str(item["account_code"])
         memo_val = html.escape(str(item.get("counterparty_info") or ""))
         acc_opts = []
@@ -1276,7 +1459,10 @@ def render_dashboard_html(
             f"onclick='openReceiptModal({tx_id})' title='클릭하여 영수증/매출전표 팝업 보기'>{t_dt} 🧾</a>"
         )
         pending_rows_html.append(
-            f"<tr data-tx-id='{tx_id}' data-total-amount='{int(item['total_amount'])}'>"
+            f"<tr data-tx-id='{tx_id}' data-total-amount='{amt_int}'>"
+            f"<td class='no-print' style='text-align:center; width:30px;'>"
+            f"<input type='checkbox' class='pending-row-chk' value='{tx_id}' "
+            f"data-amount='{amt_int}' onchange='updatePendingBulkBar()' /></td>"
             f"<td class='tx-pin-cell' title='클릭 시 이 전표 행을 상단 기준행으로 고정/해제'>#{tx_id}</td>"
             f"<td>{dt_link}</td>"
             f"<td><span class='badge card'>{c_lbl}</span></td>"
@@ -1287,6 +1473,9 @@ def render_dashboard_html(
             f"placeholder='품목 또는 참석자 입력' /></td>"
             f"<td style='white-space:nowrap;'>"
             f"<button onclick='saveTxMemo({tx_id})'>저장</button>"
+            f"<button class='secondary' style='background:#475569;' "
+            f"title='사적사용·가사경비로 경비 제외(900)' "
+            f"onclick='excludeTxPersonal({tx_id})'>🚫 경비제외</button>"
             f"<button class='secondary' onclick='openStatementModal({tx_id})'>📄 거래명세서</button>"
             f"<button class='secondary' onclick='triggerRowStatementUpload({tx_id})'>📎 명세서 첨부</button>"
             f"</td>"
@@ -1295,7 +1484,7 @@ def render_dashboard_html(
     pending_tbody = (
         "\n".join(pending_rows_html)
         if pending_rows_html
-        else "<tr><td colspan='8' class='empty'>미분류 또는 소명 누락 전표가 없습니다.</td></tr>"
+        else "<tr><td colspan='9' class='empty'>미분류 또는 소명 누락 전표가 없습니다.</td></tr>"
     )
 
     tx_rows_html = []
@@ -1404,6 +1593,10 @@ def render_dashboard_html(
         )
     else:
         corp_banner_html = ""
+
+    db_path_obj = Path(summary["db_path"]).resolve()
+    db_full_esc = html.escape(str(db_path_obj))
+    db_short_esc = html.escape(f"{db_path_obj.parent.name}/{db_path_obj.name}")
 
     raw_ym = str(summary.get("year_month") or "").strip()
     default_audit_ym = (
@@ -1716,7 +1909,7 @@ def render_dashboard_html(
           &nbsp;|&nbsp;
           조회 구간: <strong>{s_date} ~ {e_date}</strong>{active_q_meta_html}
           &nbsp;|&nbsp;
-          원장 DB: <code>{html.escape(Path(summary['db_path']).name)}</code>
+          원장 DB: <code title="{db_full_esc}">{db_short_esc}</code>
         </div>
       </div>
       <div class="action-toolbar no-print">
@@ -1832,8 +2025,11 @@ def render_dashboard_html(
 
   <section class="cards">
     <div class="card">
-      <h3>조회 기간 총 지출액 ({summary['total_tx_count']}건)</h3>
-      <div class="val">{summary['total_expenditure']:,}원</div>
+      <h3>법인 인정 경비 ({summary['total_tx_count'] - summary['excluded_personal_count']}건)</h3>
+      <div class="val">{summary['recognized_expense_total']:,}원</div>
+      <div style="font-size:12px; color:#64748b; margin-top:4px;">
+        총 결제액: {summary['total_expenditure']:,}원 ({summary['total_tx_count']}건)
+      </div>
     </div>
     <div class="card">
       <h3>공제 가능 부가세 합계</h3>
@@ -1842,6 +2038,11 @@ def render_dashboard_html(
     <div class="card">
       <h3>불공제 지출 합계 (부가세 {summary['non_deductible_vat']:,}원)</h3>
       <div class="val">{summary['non_deductible_total']:,}원</div>
+    </div>
+    <div class="card" style="border-color:#cbd5e1; background:#f8fafc;">
+      <h3>🚫 경비제외 · 가지급금 정산 ({summary['excluded_personal_count']}건)</h3>
+      <div class="val" style="color:#475569;">{summary['excluded_personal_total']:,}원</div>
+      <div style="font-size:12px; color:#64748b; margin-top:4px;">세무사 기장원장 별도 분리</div>
     </div>
     <div class="card">
       <h3>미분류·소명 필요 건수</h3>
@@ -1922,9 +2123,41 @@ def render_dashboard_html(
                 title="상단 조회 기간 및 필터 영역으로 즉시 이동">⬆ 맨 위로</button>
       </div>
     </div>
+    <div id="pending-bulk-bar" class="bulk-action-bar no-print"
+         style="display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between;
+                gap:8px; padding:10px 12px; margin-bottom:10px; background:#eff6ff;
+                border:1px solid #bfdbfe; border-radius:8px;">
+      <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+        <strong id="pending-bulk-count" style="font-size:13px; color:#1e40af;">선택 0건 · 합계 0원</strong>
+        <span style="font-size:12px; color:#475569;">
+          (PG·마트·백화점 단건 저장 시 다른 전표는 덮어쓰지 않고 안전 보호됩니다)
+        </span>
+      </div>
+      <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+        <select id="bulk-acc-select" style="font-size:12px; padding:5px 8px;">
+          {bulk_acc_select_html}
+        </select>
+        <input type="text" id="bulk-memo-input" placeholder="일괄 적요 입력 (생략 시 자동 적요)"
+               style="width:210px; font-size:12px; padding:5px 8px;" />
+        <button type="button" onclick="bulkApplySelectedPending()" style="font-size:12px; font-weight:700;">
+          ✅ 선택 일괄 저장
+        </button>
+        <button type="button" class="secondary" style="background:#334155; font-size:12px; font-weight:700;"
+                onclick="bulkExcludeSelectedPending()">
+          🚫 선택 일괄 경비제외(900)
+        </button>
+        <button type="button" class="danger" style="font-size:12px;"
+                onclick="bulkDeleteSelectedPending()">
+          🗑️ 선택 삭제
+        </button>
+      </div>
+    </div>
     <table class="sticky-ledger-table" id="pending-ledger-table">
       <thead>
         <tr>
+          <th class="no-print" style="width:30px; text-align:center;" title="표시된 미분류 전표 전체 선택/해제">
+            <input type="checkbox" id="pending-chk-all" onchange="toggleSelectAllPending(this.checked)" />
+          </th>
           <th class="nowrap" title="전표번호 클릭 시 해당 행을 상단 기준행으로 고정/해제">전표번호</th>
           <th class="nowrap">거래일시</th>
           <th class="nowrap">카드구분</th>
@@ -3170,6 +3403,121 @@ def render_dashboard_html(
       }});
       window.location.reload();
     }}
+    async function excludeTxPersonal(txId) {{
+      const memoInput = document.getElementById('memo-' + txId);
+      const customMemo = memoInput ? String(memoInput.value || '').trim() : '';
+      await fetch('/api/v1/transactions/' + txId, {{
+        method: 'PATCH',
+        headers: API_HEADERS,
+        body: JSON.stringify({{
+          account_code: '900',
+          counterparty_info: customMemo || null,
+          apply_to_same_merchant: false
+        }})
+      }});
+      window.location.reload();
+    }}
+    function getSelectedPendingCheckboxes() {{
+      return Array.from(document.querySelectorAll('.pending-row-chk')).filter((el) => {{
+        const tr = el.closest('tr');
+        return el.checked && (!tr || tr.style.display !== 'none');
+      }});
+    }}
+    function updatePendingBulkBar() {{
+      const selected = getSelectedPendingCheckboxes();
+      let sum = 0;
+      selected.forEach((el) => {{
+        sum += parseInt(el.getAttribute('data-amount') || '0', 10) || 0;
+      }});
+      const lbl = document.getElementById('pending-bulk-count');
+      if (lbl) {{
+        lbl.textContent = '선택 ' + selected.length + '건 · 합계 ' + sum.toLocaleString('ko-KR') + '원';
+      }}
+    }}
+    function toggleSelectAllPending(checked) {{
+      document.querySelectorAll('.pending-row-chk').forEach((el) => {{
+        const tr = el.closest('tr');
+        if (!tr || tr.style.display !== 'none') {{
+          el.checked = Boolean(checked);
+        }}
+      }});
+      updatePendingBulkBar();
+    }}
+    async function bulkApplySelectedPending() {{
+      const selected = getSelectedPendingCheckboxes();
+      if (selected.length === 0) {{
+        window.alert('먼저 일괄 변경할 전표 체크박스를 선택해 주세요.');
+        return;
+      }}
+      const accEl = document.getElementById('bulk-acc-select');
+      const memoEl = document.getElementById('bulk-memo-input');
+      const accCode = accEl ? accEl.value : '900';
+      const memoTxt = memoEl ? String(memoEl.value || '').trim() : '';
+      const txIds = selected.map((el) => parseInt(el.value, 10)).filter((n) => n > 0);
+      await fetch('/api/v1/transactions/bulk-update', {{
+        method: 'POST',
+        headers: API_HEADERS,
+        body: JSON.stringify({{
+          tx_ids: txIds,
+          account_code: accCode,
+          counterparty_info: memoTxt || null,
+          apply_to_same_merchant: false
+        }})
+      }});
+      window.location.reload();
+    }}
+    async function bulkExcludeSelectedPending() {{
+      const selected = getSelectedPendingCheckboxes();
+      if (selected.length === 0) {{
+        window.alert('먼저 경비 제외(900)로 처리할 전표를 선택해 주세요.');
+        return;
+      }}
+      const memoEl = document.getElementById('bulk-memo-input');
+      const memoTxt = memoEl ? String(memoEl.value || '').trim() : '';
+      const txIds = selected.map((el) => parseInt(el.value, 10)).filter((n) => n > 0);
+      await fetch('/api/v1/transactions/bulk-update', {{
+        method: 'POST',
+        headers: API_HEADERS,
+        body: JSON.stringify({{
+          tx_ids: txIds,
+          account_code: '900',
+          counterparty_info: memoTxt || null,
+          apply_to_same_merchant: false
+        }})
+      }});
+      window.location.reload();
+    }}
+    async function bulkDeleteSelectedPending() {{
+      const selected = getSelectedPendingCheckboxes();
+      if (selected.length === 0) {{
+        window.alert('삭제할 전표를 먼저 선택해 주세요.');
+        return;
+      }}
+      const txIds = selected.map((el) => parseInt(el.value, 10)).filter((n) => n > 0);
+      const msg = '선택한 ' + txIds.length + '건의 전표를 원장에서 영구 삭제하시겠습니까?\\n'
+        + '(실제 법인카드 개인지출은 삭제 대신 [경비제외(900)] 처리를 권장합니다.)';
+      if (!window.confirm(msg)) {{
+        return;
+      }}
+      await fetch('/api/v1/transactions/bulk-delete', {{
+        method: 'POST',
+        headers: API_HEADERS,
+        body: JSON.stringify({{ tx_ids: txIds }})
+      }});
+      window.location.reload();
+    }}
+    async function deleteSingleTx(txId) {{
+      const msg = '전표 #' + txId + ' 건을 원장에서 삭제하시겠습니까?\\n'
+        + '(테스트/중복 데이터만 삭제하고, 실제 카드 사적사용은 900 경비제외를 선택하세요.)';
+      if (!window.confirm(msg)) {{
+        return;
+      }}
+      await fetch('/api/v1/transactions/' + txId, {{
+        method: 'DELETE',
+        headers: API_HEADERS
+      }});
+      window.location.reload();
+    }}
     async function importPhoneSms() {{
       await fetch('/api/v1/system/import-phone-sms', {{
         method: 'POST',
@@ -3286,6 +3634,9 @@ def render_dashboard_html(
       window.location.reload();
     }}
     async function seedDemoData() {{
+      if (!window.confirm('테스트용 샘플 전표 6건(DEMO1001~DEMO1006)을 현재 원장에 추가하시겠습니까?')) {{
+        return;
+      }}
       await fetch('/api/v1/system/seed-demo', {{
         method: 'POST',
         headers: API_HEADERS,
@@ -3294,6 +3645,9 @@ def render_dashboard_html(
       window.location.reload();
     }}
     async function resetTestLedger() {{
+      if (!window.confirm('경고: 현재 연결된 DB의 모든 전표와 영수증을 초기화하시겠습니까?')) {{
+        return;
+      }}
       await fetch('/api/v1/system/reset-test', {{
         method: 'POST',
         headers: API_HEADERS,

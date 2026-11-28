@@ -165,7 +165,7 @@ class TaxPackExportRequest(BaseModel):
 class TransactionUpdateRequest(BaseModel):
     """Request payload for manual or inline dashboard update of a transaction."""
 
-    account_code: Optional[str] = Field(default=None, description="Target account code (e.g., 811, 813, 830)")
+    account_code: Optional[str] = Field(default=None, description="Target account code (e.g., 811, 813, 830, 900)")
     account_name: Optional[str] = Field(default=None, description="Target account name")
     vat_deduction_type: Optional[str] = Field(
         default=None, description="DEDUCTIBLE, NON_DEDUCTIBLE, EXEMPT, or PENDING_CHECK"
@@ -178,6 +178,29 @@ class TransactionUpdateRequest(BaseModel):
         default=True,
         description="Propagate account classification and learned rule to identical merchants",
     )
+
+
+class BulkTransactionUpdateRequest(BaseModel):
+    """Request payload for batch updating multiple transactions from the dashboard."""
+
+    tx_ids: List[int] = Field(..., min_length=1, description="Target transaction IDs to update")
+    account_code: str = Field(..., description="Target account code (e.g., 900, 811, 813, 501, 830)")
+    account_name: Optional[str] = Field(default=None, description="Optional account name override")
+    vat_deduction_type: Optional[str] = Field(default=None, description="Optional VAT deduction type")
+    non_deduct_reason: Optional[str] = Field(default=None, description="Optional non-deductible reason")
+    counterparty_info: Optional[str] = Field(
+        default=None, description="Optional shared item/attendee memo (auto-generated if omitted)"
+    )
+    apply_to_same_merchant: bool = Field(
+        default=False,
+        description="Propagate classification to other unclassified rows of the same merchant",
+    )
+
+
+class BulkTransactionDeleteRequest(BaseModel):
+    """Request payload for deleting test, duplicate, or invalid transactions."""
+
+    tx_ids: List[int] = Field(..., min_length=1, description="Transaction IDs to delete")
 
 
 class NasBackupRequest(BaseModel):

@@ -79,7 +79,7 @@ _BUILTIN_INSURANCE_RE = re.compile(
 _BUILTIN_TRAVEL_RE = re.compile(
     r"(항공|고속버스|시외버스|공항버스|시티투어|카카오T대리|대리운전|운송사업조합|해운조합|여객선|"
     r"한국철도공사|주식회사\s*에스알|개인택시|"
-    r"와이페이모어|놀유니버스|야놀자|인터파크|하나투어|모두투어|아고다|트립닷컴|마이리얼트립)",
+    r"와이페이모어|놀유니버스|(?<!문구)야놀자|인터파크|하나투어|모두투어|아고다|트립닷컴|마이리얼트립)",
     re.IGNORECASE,
 )
 _BUILTIN_UNCERTAIN_ITEM_RE = re.compile(
@@ -95,7 +95,7 @@ _BUILTIN_UNCERTAIN_ITEM_RE = re.compile(
     re.IGNORECASE,
 )
 _BUILTIN_VEHICLE_EXTRA_RE = re.compile(
-    r"(샤인에너비스|영원석유|삼성에너지|제트라인모터스|아마노코리아)",
+    r"(샤인에너비스|영원석유|삼성에너지|제트라인모터스|아마노코리아|시설관리공단|단지\s*관리단)",
     re.IGNORECASE,
 )
 _BUILTIN_ENTERTAINMENT_RE = re.compile(
@@ -104,7 +104,7 @@ _BUILTIN_ENTERTAINMENT_RE = re.compile(
 )
 _BUILTIN_SITE_MATERIAL_RE = re.compile(
     r"(던에드워드페인트|페인트|성심철물건재|철물|건재|유진홈센터|ACE\s*Hardware|하드웨어|"
-    r"크린대장|목재|합판|석고보드|타일|벽지|장판|인테리어필름|시트지|타카)",
+    r"크린대장|목재|합판|석고보드|타일|벽지|장판|인테리어필름|시트지|타카|종합배관|배관자재)",
     re.IGNORECASE,
 )
 _BUILTIN_SITE_SUBCONTRACT_RE = re.compile(
@@ -114,7 +114,8 @@ _BUILTIN_SITE_SUBCONTRACT_RE = re.compile(
 )
 _BUILTIN_SERVICE_FEE_RE = re.compile(
     r"(알림서비스|연회비|문자서비스|인증수수료|티머니|이비카드|후불교통|스카이라이프|케이티에이치|"
-    r"HCN|우정사업본부|우체국|네이버플러스|와우\s*멤버십|와우멤버십|일상케어|안심케어|나이스_마이홈)",
+    r"HCN|우정사업본부|우체국|네이버플러스|와우\s*멤버십|와우멤버십|일상케어|안심케어|나이스_마이홈|"
+    r"법원행정처|인터넷등기소|대법원)",
     re.IGNORECASE,
 )
 _BUILTIN_RESTAURANT_RE = re.compile(
@@ -136,7 +137,12 @@ _BUILTIN_BOOKSTORE_RE = re.compile(
     re.IGNORECASE,
 )
 _BUILTIN_STATIONERY_RE = re.compile(
-    r"(오피스디포|알파문구|드림디포)",
+    r"(오피스디포|알파문구|드림디포|문구야놀자|모닝글로리|링코)",
+    re.IGNORECASE,
+)
+_BUILTIN_CAFE_PARK_GUARD_RE = re.compile(
+    r"(커피|카페|컴포즈|메가엠지씨|메가커피|스타벅스|투썸|이디야|빽다방|더벤티|할리스|폴바셋|"
+    r"파리바게|뚜레쥬르|베이커리|김밥|분식|치킨|피자)",
     re.IGNORECASE,
 )
 
@@ -149,6 +155,8 @@ def is_uncertain_item_merchant(merchant_name: Optional[str]) -> bool:
     if "쿠팡이츠" in m_txt or "와우 멤버십" in m_txt or "와우멤버십" in m_txt:
         return False
     if "카카오T대리" in m_txt or "알림서비스" in m_txt or "연회비" in m_txt:
+        return False
+    if "시설관리공단" in m_txt:
         return False
     return bool(_BUILTIN_UNCERTAIN_ITEM_RE.search(m_txt))
 
@@ -456,6 +464,13 @@ def evaluate_tax_rules(
         memo_prompt,
     ) in cursor.fetchall():
         if re.search(pattern, m_txt, re.IGNORECASE):
+            # Guard: branch names like '연산파크시티점' on cafes/food must not match '파크' in 822
+            if (
+                acc_code == "822"
+                and _BUILTIN_CAFE_PARK_GUARD_RE.search(m_txt)
+                and not re.search(r"(주유|석유|정유|주차장|하이패스|정비|세차)", m_txt)
+            ):
+                continue
             rule_vat = (
                 "PENDING"
                 if acc_code == "999"
@@ -506,6 +521,8 @@ def generate_default_memo(
     Returns None for unclassified (999), entertainment (813), or uncertain-item merchants
     so unknown purchase items are never fabricated.
     """
+    if account_code == "900":
+        return "사적사용·가사경비 제외 (대표자 가지급금/가수금 정산)"
     if account_code in ("999", "813"):
         return None
     if account_code == "830" and require_memo_prompt:
@@ -532,7 +549,7 @@ def generate_default_memo(
             return "하이패스 통행료"
         if "자동차세" in m_name:
             return "업무용승용차 자동차세 납부"
-        if any(k in m_name for k in ("주차", "파크", "아마노")):
+        if any(k in m_name for k in ("주차", "파크", "파킹", "아마노", "시설관리공단", "관리단")):
             return "차량 주차료"
         if any(k in m_name for k in ("정비", "스피드메이트", "오토큐", "모터스", "타이어", "세차")):
             return "업무용승용차 정비·유지"
@@ -557,6 +574,8 @@ def generate_default_memo(
     if account_code == "830":
         return "사무용 문구 및 소모품 구입"
     if account_code == "831":
+        if any(k in m_name for k in ("법원행정처", "인터넷등기소", "대법원")):
+            return "법인 등기부등본·제증명 발급 수수료"
         if "티머니" in m_name or "이비카드" in m_name:
             return "대중교통(버스·지하철) 교통카드 이용"
         if "알림서비스" in m_name:
@@ -577,12 +596,17 @@ def learn_merchant_rule(
     vat_deduction_type: str,
     non_deduct_reason: Optional[str] = None,
 ) -> None:
-    """Persist a Firefly III-style learned rule (priority 5) for an exact merchant name."""
+    """Persist a Firefly III-style learned rule (priority 5) for an exact merchant name.
+
+    Multi-purpose PG gateways, marts, and department stores are excluded from blanket
+    merchant learning so saving one order never misclassifies unrelated purchases.
+    """
     clean_name = (merchant_name or "").strip()
-    if not clean_name or account_code == "999":
+    if not clean_name or account_code == "999" or is_uncertain_item_merchant(clean_name):
         return
     pattern = f"^{re.escape(clean_name)}$"
-    force_non_ded = 1 if vat_deduction_type == "NON_DEDUCTIBLE" else 0
+    force_non_ded = 1 if (vat_deduction_type == "NON_DEDUCTIBLE" or account_code == "900") else 0
+    resolved_reason = "PERSONAL_USE" if account_code == "900" else non_deduct_reason
     is_vehicle = 1 if account_code == "822" else 0
     require_memo = 1 if account_code == "813" else 0
     cursor.execute(
@@ -605,7 +629,7 @@ def learn_merchant_rule(
             account_code,
             account_name,
             force_non_ded,
-            non_deduct_reason,
+            resolved_reason,
             is_vehicle,
             require_memo,
         ),

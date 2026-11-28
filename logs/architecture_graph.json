@@ -7,17 +7,17 @@
     "module_edge_count": 118,
     "cycle_count": 0,
     "untested_module_count": 0,
-    "route_count": 58,
+    "route_count": 61,
     "autowire_verified_count": 5,
     "sqlite_table_count": 5,
     "fk_edge_count": 3,
     "state_graph_node_count": 6,
     "bq_table_count": 9,
     "gql_query_count": 3,
-    "total_nodes": 127,
-    "total_edges": 202
+    "total_nodes": 130,
+    "total_edges": 203
   },
-  "mermaid": "flowchart LR\n    MODS[\"SoloLedger Python Modules (30)\"]\n    WF[\"workflow_graph.py (StateGraph + Checkpointer)\"]\n    AUD[\"audit_graph.py (Parallel Fan-out/Join)\"]\n    BQ[\"bq_graph_exporter.py (BigQuery Property Graph)\"]\n    DB[\"SQLite Ledger (5 Tables)\"]\n    MODS --> WF\n    MODS --> AUD\n    MODS --> BQ\n    WF --> DB\n    AUD --> DB\n    R1[\"GET /api/v1/analytics/bigquery-status\"] -->|\"get_bigquery_connection_status\"| WF\n    R2[\"GET /api/v1/system/engineering-graph\"] -->|\"verify_engineering_graph\"| WF\n    R3[\"PATCH /api/v1/transactions/{tx_id}\"] -->|\"sync_checkpoint_from_ledger\"| WF\n    R4[\"POST /api/v1/analytics/bigquery-export\"] -->|\"export_ledger_graph_to_bigquery\"| WF\n    R5[\"POST /api/v1/analytics/bigquery-provision\"] -->|\"provision_bigquery_dataset_and_graph\"| WF\n    R6[\"POST /api/v1/audits/tax-pack/{year_month}\"] -->|\"run_pre_export_tax_audit\"| AUD\n    R7[\"POST /api/v1/exports/tax-pack\"] -->|\"run_pre_export_tax_audit\"| AUD\n    R8[\"POST /api/v1/receipts/upload\"] -->|\"sync_checkpoint_from_ledger\"| WF\n    R9[\"POST /api/v1/transactions/{tx_id}/statement\"] -->|\"sync_checkpoint_from_ledger\"| WF\n    R10[\"POST /api/v1/webhooks/push\"] -->|\"run_transaction_workflow\"| WF\n    R11[\"POST /api/v1/webhooks/sms\"] -->|\"run_transaction_workflow\"| WF\n    R12[\"POST /api/v1/webhooks/telegram\"] -->|\"sync_checkpoint_from_ledger\"| WF\n    R13[\"POST /api/v1/workflows/transactions/{tx_id}/resume\"] -->|\"resume_transaction_workflow\"| WF\n    R14[\"POST /api/v1/workflows/transactions/{tx_id}/run\"] -->|\"run_transaction_workflow\"| WF",
+  "mermaid": "flowchart LR\n    MODS[\"SoloLedger Python Modules (30)\"]\n    WF[\"workflow_graph.py (StateGraph + Checkpointer)\"]\n    AUD[\"audit_graph.py (Parallel Fan-out/Join)\"]\n    BQ[\"bq_graph_exporter.py (BigQuery Property Graph)\"]\n    DB[\"SQLite Ledger (5 Tables)\"]\n    MODS --> WF\n    MODS --> AUD\n    MODS --> BQ\n    WF --> DB\n    AUD --> DB\n    R1[\"GET /api/v1/analytics/bigquery-status\"] -->|\"get_bigquery_connection_status\"| WF\n    R2[\"GET /api/v1/system/engineering-graph\"] -->|\"verify_engineering_graph\"| WF\n    R3[\"PATCH /api/v1/transactions/{tx_id}\"] -->|\"sync_checkpoint_from_ledger\"| WF\n    R4[\"POST /api/v1/analytics/bigquery-export\"] -->|\"export_ledger_graph_to_bigquery\"| WF\n    R5[\"POST /api/v1/analytics/bigquery-provision\"] -->|\"provision_bigquery_dataset_and_graph\"| WF\n    R6[\"POST /api/v1/audits/tax-pack/{year_month}\"] -->|\"run_pre_export_tax_audit\"| AUD\n    R7[\"POST /api/v1/exports/tax-pack\"] -->|\"run_pre_export_tax_audit\"| AUD\n    R8[\"POST /api/v1/receipts/upload\"] -->|\"sync_checkpoint_from_ledger\"| WF\n    R9[\"POST /api/v1/transactions/bulk-update\"] -->|\"sync_checkpoint_from_ledger\"| WF\n    R10[\"POST /api/v1/transactions/{tx_id}/statement\"] -->|\"sync_checkpoint_from_ledger\"| WF\n    R11[\"POST /api/v1/webhooks/push\"] -->|\"run_transaction_workflow\"| WF\n    R12[\"POST /api/v1/webhooks/sms\"] -->|\"run_transaction_workflow\"| WF\n    R13[\"POST /api/v1/webhooks/telegram\"] -->|\"sync_checkpoint_from_ledger\"| WF\n    R14[\"POST /api/v1/workflows/transactions/{tx_id}/resume\"] -->|\"resume_transaction_workflow\"| WF\n    R15[\"POST /api/v1/workflows/transactions/{tx_id}/run\"] -->|\"run_transaction_workflow\"| WF",
   "graph": {
     "nodes": [
       {
@@ -276,6 +276,11 @@
         "label": "DELETE /api/v1/system/corp-cards/{card_last4}"
       },
       {
+        "id": "route:DELETE /api/v1/transactions/{tx_id}",
+        "layer": "ROUTE",
+        "label": "DELETE /api/v1/transactions/{tx_id}"
+      },
+      {
         "id": "route:GET /api/v1/analytics/bigquery-status",
         "layer": "ROUTE",
         "label": "GET /api/v1/analytics/bigquery-status"
@@ -519,6 +524,16 @@
         "id": "route:POST /api/v1/system/seed-demo",
         "layer": "ROUTE",
         "label": "POST /api/v1/system/seed-demo"
+      },
+      {
+        "id": "route:POST /api/v1/transactions/bulk-delete",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/transactions/bulk-delete"
+      },
+      {
+        "id": "route:POST /api/v1/transactions/bulk-update",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/transactions/bulk-update"
       },
       {
         "id": "route:POST /api/v1/transactions/{tx_id}/statement",
@@ -1573,6 +1588,11 @@
         "type": "CALLS"
       },
       {
+        "source": "route:POST /api/v1/transactions/bulk-update",
+        "target": "symbol:sync_checkpoint_from_ledger",
+        "type": "CALLS"
+      },
+      {
         "source": "route:POST /api/v1/transactions/{tx_id}/statement",
         "target": "symbol:sync_checkpoint_from_ledger",
         "type": "CALLS"
@@ -1726,6 +1746,11 @@
       "GET /api/v1/exports/tax-pack/{year_month}/download": [],
       "GET /api/v1/exports/tax-pack/{year_month}/csv": [],
       "GET /api/v1/transactions": [],
+      "POST /api/v1/transactions/bulk-update": [
+        "sync_checkpoint_from_ledger"
+      ],
+      "POST /api/v1/transactions/bulk-delete": [],
+      "DELETE /api/v1/transactions/{tx_id}": [],
       "PATCH /api/v1/transactions/{tx_id}": [
         "sync_checkpoint_from_ledger"
       ],

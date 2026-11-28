@@ -243,3 +243,74 @@ def test_hometax_tax_deduction_statement_xls_features(db_conn):
     assert dami_row["account_code"] == "811"
     assert dami_row["vat_deduction_type"] == "NON_DEDUCTIBLE"
 
+
+def test_bulk_update_delete_and_excluded_personal_csv_separation(client):
+    """Verify bulk-update to 900, bulk-delete, dashboard KPI separation, and separate 900 CSV export."""
+    headers = {"X-API-Key": "test-secret-key"}
+    csv_text = (
+        "거래일시,카드번호,승인번호,가맹점명,사업자등록번호,공급가액,부가세,합계금액,과세유형\n"
+        "2026-10-05 12:00:00,3081,AP1001,성심철물건재,120-81-47521,40000,4000,44000,일반과세자\n"
+        "2026-10-06 12:00:00,0445,AP1002,미&끼 헤어퍼밍,252-92-02318,15000,0,15000,면세사업자\n"
+        "2026-10-07 12:00:00,0445,AP1003,서윤니트,301-81-23453,25455,2545,28000,간이과세자\n"
+        "2026-10-08 12:00:00,5678,DEMO9999,테스트더미전표,214-85-39210,9091,909,10000,일반과세자\n"
+    )
+    r_imp = client.post("/api/v1/imports/hometax-csv", json={"csv_text": csv_text}, headers=headers)
+    assert r_imp.status_code == 200
+    tx_ids = [r["tx_id"] for r in r_imp.json()["results"]]
+    hw_id, hair_id, knit_id, demo_id = tx_ids
+
+    # 1. Delete dummy transaction via bulk-delete
+    r_del = client.post(
+        "/api/v1/transactions/bulk-delete",
+        json={"tx_ids": [demo_id]},
+        headers=headers,
+    )
+    assert r_del.status_code == 200
+    assert r_del.json()["deleted_count"] == 1
+
+    # 2. Bulk-exclude personal transactions (hair salon + knitwear) -> 900 경비제외
+    r_bulk = client.post(
+        "/api/v1/transactions/bulk-update",
+        json={"tx_ids": [hair_id, knit_id], "account_code": "900"},
+        headers=headers,
+    )
+    assert r_bulk.status_code == 200
+    assert r_bulk.json()["updated_count"] == 2
+
+    # 3. Verify dashboard summary separates recognized expense vs excluded personal expense
+    r_sum = client.get("/api/v1/dashboard/summary?year_month=202610&year=2026", headers=headers)
+    assert r_sum.status_code == 200
+    s_body = r_sum.json()
+    assert s_body["total_tx_count"] == 3
+    assert s_body["total_expenditure"] == 44000 + 15000 + 28000
+    assert s_body["recognized_expense_total"] == 44000
+    assert s_body["excluded_personal_count"] == 2
+    assert s_body["excluded_personal_total"] == 43000
+    assert s_body["pending_action_count"] == 0
+
+    # 4. Export tax pack: corporate ledger CSV has only 44,000, while excluded CSV has 43,000
+    r_exp = client.post(
+        "/api/v1/exports/tax-pack",
+        json={"year_month": "202610", "strict_audit": True},
+        headers=headers,
+    )
+    assert r_exp.status_code == 200
+    eb = r_exp.json()
+    assert eb["exported_count"] == 1
+    assert eb["excluded_count"] == 2
+    assert eb["total_amount"] == 44000
+    assert eb["excluded_amount"] == 43000
+    assert eb["excluded_csv_file_path"] is not None
+
+    with zipfile.ZipFile(eb["zip_file_path"], "r") as zf:
+        names = zf.namelist()
+        assert "SoloLedger_기장원장_202610.csv" in names
+        assert "SoloLedger_경비제외_가지급금정산_202610.csv" in names
+        corp_csv = zf.read("SoloLedger_기장원장_202610.csv").decode("utf-8-sig")
+        excl_csv = zf.read("SoloLedger_경비제외_가지급금정산_202610.csv").decode("utf-8-sig")
+        assert "성심철물건재" in corp_csv
+        assert "미&끼 헤어퍼밍" not in corp_csv
+        assert "미&끼 헤어퍼밍" in excl_csv
+        assert "서윤니트" in excl_csv
+
+

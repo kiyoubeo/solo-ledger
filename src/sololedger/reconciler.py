@@ -38,12 +38,40 @@ def upsert_merchant(cursor: sqlite3.Cursor, item: ReconcileItem) -> None:
         VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(biz_reg_no) DO UPDATE SET
             merchant_name = excluded.merchant_name,
-            tax_type_code = excluded.tax_type_code,
+            tax_type_code = CASE
+                WHEN merchants.tax_type_code = 'EXEMPT' AND excluded.tax_type_code = 'GENERAL'
+                THEN 'EXEMPT'
+                ELSE excluded.tax_type_code
+            END,
             biz_status = excluded.biz_status,
             nts_verified_at = CURRENT_TIMESTAMP
         """,
         (clean_biz_no, item.merchant_name, item.tax_type_code, item.biz_status),
     )
+    if item.tax_type_code == "EXEMPT":
+        cursor.execute(
+            """
+            UPDATE card_transactions
+            SET supply_value = total_amount,
+                vat_amount = 0,
+                vat_deduction_type = CASE
+                    WHEN account_code = '900' THEN 'NON_DEDUCTIBLE'
+                    ELSE 'EXEMPT'
+                END,
+                non_deduct_reason = CASE
+                    WHEN account_code = '900' THEN 'PERSONAL_USE'
+                    ELSE COALESCE(non_deduct_reason, 'SIMPLIFIED_TAX')
+                END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE biz_reg_no = ?
+              AND (exported_year_month IS NULL OR exported_year_month = '')
+              AND (
+                vat_deduction_type IN ('DEDUCTIBLE', 'PENDING', 'PENDING_CHECK')
+                OR (vat_deduction_type = 'EXEMPT' AND vat_amount != 0)
+              )
+            """,
+            (clean_biz_no,),
+        )
 
 
 def reconcile_single_item(

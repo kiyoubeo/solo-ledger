@@ -416,6 +416,7 @@ async def test_pre_export_tax_audit_parallel_fan_out_join(db_conn, tmp_path):
         "audit_vat_status",
         "audit_vehicle_and_card_policy",
         "audit_missing_evidence",
+        "audit_tax_disallowance_risk",
         "join_audit_report",
     ]
 
@@ -496,3 +497,92 @@ def test_phase8_workflow_and_audit_api_endpoints(client):
     ok_body = r_audit_ok.json()
     assert ok_body["ready_for_export"] is True
     assert ok_body["error_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_audit_tax_disallowance_risk_flags_and_900_clears(db_conn, tmp_path):
+    """Verify substantive disallowance warnings fire on risky items and clear when marked 900."""
+    cur = db_conn.cursor()
+    archive_dir = tmp_path / "archive"
+
+    t_hair = _insert_tx(
+        cur,
+        raw_merchant_name="미&끼 헤어퍼밍",
+        total_amount=15_000,
+        supply_value=15_000,
+        vat_amount=0,
+        account_code="811",
+        account_name="복리후생비",
+        vat_deduction_type="EXEMPT",
+        counterparty_info="소모품",
+        reconcile_status="HOMETAX_VERIFIED",
+        transacted_at="2026-05-28 12:00:00",
+    )
+    t_rice = _insert_tx(
+        cur,
+        raw_merchant_name="동화쌀직매장",
+        total_amount=32_000,
+        supply_value=32_000,
+        vat_amount=0,
+        account_code="811",
+        account_name="복리후생비",
+        vat_deduction_type="EXEMPT",
+        counterparty_info="식대",
+        reconcile_status="HOMETAX_VERIFIED",
+        transacted_at="2026-05-30 12:00:00",
+    )
+    t_resort = _insert_tx(
+        cur,
+        raw_merchant_name="주식회사 아난티 오시리아 제1지점",
+        total_amount=317_850,
+        supply_value=288_955,
+        vat_amount=28_895,
+        account_code="811",
+        account_name="복리후생비",
+        vat_deduction_type="DEDUCTIBLE",
+        counterparty_info="식대",
+        reconcile_status="HOMETAX_VERIFIED",
+        transacted_at="2026-05-16 12:00:00",
+    )
+    t_pub = _insert_tx(
+        cur,
+        raw_merchant_name="봉구비어",
+        total_amount=24_000,
+        supply_value=21_818,
+        vat_amount=2_182,
+        account_code="811",
+        account_name="복리후생비",
+        vat_deduction_type="DEDUCTIBLE",
+        counterparty_info="식대",
+        reconcile_status="HOMETAX_VERIFIED",
+        transacted_at="2026-05-20 21:00:00",
+    )
+    db_conn.commit()
+
+    rep = await run_pre_export_tax_audit(cur, "202605", archive_dir=archive_dir)
+    codes = {iss["code"] for iss in rep["issues"]}
+    assert "PERSONAL_HOUSEHOLD_MERCHANT_RISK" in codes
+    assert "RAW_GROCERY_HOUSEHOLD_RISK" in codes
+    assert "RESORT_OR_LEISURE_EXPENSE_RISK" in codes
+    assert "PUB_OR_HIGH_WELFARE_DINING_RISK" in codes
+
+    # Reclassify all 4 to 900 경비제외 -> 0 warnings and 0 errors
+    cur.executemany(
+        """
+        UPDATE card_transactions
+        SET account_code = '900',
+            account_name = '경비제외(가지급금/사적사용)',
+            vat_deduction_type = 'NON_DEDUCTIBLE',
+            non_deduct_reason = 'PERSONAL_USE',
+            counterparty_info = '사적사용 제외'
+        WHERE tx_id = ?
+        """,
+        [(t_hair,), (t_rice,), (t_resort,), (t_pub,)],
+    )
+    db_conn.commit()
+
+    rep_after = await run_pre_export_tax_audit(cur, "202605", archive_dir=archive_dir)
+    assert rep_after["error_count"] == 0
+    assert rep_after["warning_count"] == 0
+    assert rep_after["ready_for_export"] is True
+
