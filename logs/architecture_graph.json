@@ -7,14 +7,14 @@
     "module_edge_count": 118,
     "cycle_count": 0,
     "untested_module_count": 0,
-    "route_count": 61,
+    "route_count": 62,
     "autowire_verified_count": 5,
     "sqlite_table_count": 5,
     "fk_edge_count": 3,
     "state_graph_node_count": 6,
     "bq_table_count": 9,
     "gql_query_count": 3,
-    "total_nodes": 130,
+    "total_nodes": 131,
     "total_edges": 203
   },
   "mermaid": "flowchart LR\n    MODS[\"SoloLedger Python Modules (30)\"]\n    WF[\"workflow_graph.py (StateGraph + Checkpointer)\"]\n    AUD[\"audit_graph.py (Parallel Fan-out/Join)\"]\n    BQ[\"bq_graph_exporter.py (BigQuery Property Graph)\"]\n    DB[\"SQLite Ledger (5 Tables)\"]\n    MODS --> WF\n    MODS --> AUD\n    MODS --> BQ\n    WF --> DB\n    AUD --> DB\n    R1[\"GET /api/v1/analytics/bigquery-status\"] -->|\"get_bigquery_connection_status\"| WF\n    R2[\"GET /api/v1/system/engineering-graph\"] -->|\"verify_engineering_graph\"| WF\n    R3[\"PATCH /api/v1/transactions/{tx_id}\"] -->|\"sync_checkpoint_from_ledger\"| WF\n    R4[\"POST /api/v1/analytics/bigquery-export\"] -->|\"export_ledger_graph_to_bigquery\"| WF\n    R5[\"POST /api/v1/analytics/bigquery-provision\"] -->|\"provision_bigquery_dataset_and_graph\"| WF\n    R6[\"POST /api/v1/audits/tax-pack/{year_month}\"] -->|\"run_pre_export_tax_audit\"| AUD\n    R7[\"POST /api/v1/exports/tax-pack\"] -->|\"run_pre_export_tax_audit\"| AUD\n    R8[\"POST /api/v1/receipts/upload\"] -->|\"sync_checkpoint_from_ledger\"| WF\n    R9[\"POST /api/v1/transactions/bulk-update\"] -->|\"sync_checkpoint_from_ledger\"| WF\n    R10[\"POST /api/v1/transactions/{tx_id}/statement\"] -->|\"sync_checkpoint_from_ledger\"| WF\n    R11[\"POST /api/v1/webhooks/push\"] -->|\"run_transaction_workflow\"| WF\n    R12[\"POST /api/v1/webhooks/sms\"] -->|\"run_transaction_workflow\"| WF\n    R13[\"POST /api/v1/webhooks/telegram\"] -->|\"sync_checkpoint_from_ledger\"| WF\n    R14[\"POST /api/v1/workflows/transactions/{tx_id}/resume\"] -->|\"resume_transaction_workflow\"| WF\n    R15[\"POST /api/v1/workflows/transactions/{tx_id}/run\"] -->|\"run_transaction_workflow\"| WF",
@@ -464,6 +464,11 @@
         "id": "route:POST /api/v1/scraper/email-config",
         "layer": "ROUTE",
         "label": "POST /api/v1/scraper/email-config"
+      },
+      {
+        "id": "route:POST /api/v1/scraper/email-scroll",
+        "layer": "ROUTE",
+        "label": "POST /api/v1/scraper/email-scroll"
       },
       {
         "id": "route:POST /api/v1/scraper/email-scroll-coupang",
@@ -1782,6 +1787,7 @@
       "PATCH /api/v1/scraper/email-accounts/{account_id}": [],
       "DELETE /api/v1/scraper/email-accounts/{account_id}": [],
       "POST /api/v1/scraper/email-sync": [],
+      "POST /api/v1/scraper/email-scroll": [],
       "POST /api/v1/scraper/email-scroll-toss": [],
       "POST /api/v1/scraper/email-scroll-coupang": [],
       "POST /api/v1/scraper/email-webhook": [],

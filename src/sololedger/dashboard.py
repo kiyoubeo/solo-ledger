@@ -1925,9 +1925,8 @@ def render_dashboard_html(
         <button onclick="document.getElementById('receipt-file-input').click()">영수증 업로드(OCR)</button>
         <button onclick="document.getElementById('csv-file-input').click()">카드사/홈택스 전표 업로드</button>
         <button onclick="openCoupangModal()">🛒 쿠팡 주문·영수증 자동매칭</button>
-        <button onclick="openEmailOrderModal()">📧 이메일 주문내역 실시간 연동</button>
         <button style="background:#0284c7; font-weight:700;"
-                onclick="openTossScrollModal()">🟦 토스페이먼츠 법인카드 메일 스크롤링</button>
+                onclick="openEmailOrderModal()">📧 이메일 주문 · 법인카드 내역 통합 연동</button>
         <input type="file" id="eml-file-input" accept=".eml,.html,.htm,.txt"
                style="display:none" onchange="uploadEmlFile(this)" />
         <button onclick="importPhoneSms()">USB 휴대폰 문자 가져오기</button>
@@ -2338,12 +2337,12 @@ def render_dashboard_html(
     </div>
   </div>
 
-  <!-- 이메일 주문내역 실시간 연동 모달 (다중 계정 지원) -->
+  <!-- 이메일 주문·법인카드 사용내역 통합 연동 및 스크롤링 모달 (다중 계정 지원) -->
   <div id="email-modal-backdrop" class="modal-backdrop no-print"
        onclick="onEmailBackdropClick(event)">
-    <div class="modal-card" style="max-width:820px;">
+    <div class="modal-card" style="max-width:840px;">
       <div class="modal-header">
-        <strong>📧 다중 이메일 주문·결제내역 실시간 연동 및 거래명세서 자동 작성</strong>
+        <strong>📧 이메일 주문 · 법인카드 사용내역 실시간 연동 및 통합 스크롤링</strong>
         <button class="secondary" onclick="closeEmailOrderModal()">닫기 (ESC)</button>
       </div>
 
@@ -2353,7 +2352,7 @@ def render_dashboard_html(
         <div style="display:flex; justify-content:space-between; align-items:center;
                     flex-wrap:wrap; gap:8px; margin-bottom:6px;">
           <div style="font-weight:800; color:#1e3a8a; font-size:14px;">
-            📬 연결된 이메일 계정 목록 (전체 쇼핑몰·PG + 토스페이먼츠 매출전표 통합 스크롤)
+            📬 연결된 이메일 계정 목록 (네이버페이 · 토스 · 쿠팡 · PG · 카드사 승인메일 통합 연동)
           </div>
           <div style="display:flex; gap:6px; flex-wrap:wrap;">
             <button id="btn-email-sync-all" onclick="triggerEmailSyncNow(false, '', this)">
@@ -2365,9 +2364,9 @@ def render_dashboard_html(
           </div>
         </div>
         <div style="font-size:12px; color:#334155; margin-bottom:8px;">
-          설정한 <b>스캔 기간(기본 365일)</b> 동안의 전체보관함·받은편지함을 통수 제한 없이
-          페이지 단위로 끝까지 스크롤하여 쿠팡·네이버페이·이니시스·KCP 주문내역과
-          <b>토스페이먼츠 매출전표(법인카드 판별·사업자번호·부가세 검증)</b>를 한 번에 정리합니다.
+          메일 제목이 <b>카드 결제·승인·주문·영수증·매출전표</b> 관련이면 본문 내용을 확인하여
+          <b>법인카드 사용내역(네이버페이·토스페이먼츠·쿠팡·이니시스·KCP·카드사 승인메일 등)</b>만 자동 선별·반영하고
+          개인카드 결제건은 제외합니다.
         </div>
 
         <div id="email-accounts-list"
@@ -2403,35 +2402,43 @@ def render_dashboard_html(
              style="margin-top:8px; font-size:12px; font-weight:700; color:#1e40af;"></div>
       </div>
 
-      <details id="toss-scroll-panel" class="slip-box"
+      <details id="toss-scroll-panel" open class="slip-box"
                style="margin-bottom:10px; font-size:13px; line-height:1.55;
-                      border:1px solid #0284c7; background:#f0f9ff;">
+                      border:1.5px solid #0284c7; background:#f0f9ff;">
         <summary style="cursor:pointer; font-weight:800; color:#0369a1; font-size:13px;">
-          🟦 [보조] 토스페이먼츠(Toss Payments) 단독 기간지정 스크롤링 (위 통합 스캔에 이미 자동 포함됨)
+          🟦 법인카드 결제·주문메일 기간지정 정밀 스크롤링 (네이버페이 · 토스페이먼츠 · 쿠팡 · PG · 카드사 통합)
         </summary>
         <div style="margin-top:8px;">
           <div style="display:flex; justify-content:space-between; align-items:center;
                       flex-wrap:wrap; gap:8px; margin-bottom:6px;">
             <div style="font-size:12px; color:#334155;">
-              특정 시작일~종료일 구간의 토스페이먼츠 메일만 별도로 다시 검증하고 싶을 때 사용하세요.
+              선택 기간(또는 전체 기간)의 카드결제 관련 메일 본문을 확인해 법인카드 내역을 연속 스크롤합니다.
             </div>
             <button id="btn-toss-email-scroll" style="background:#0284c7; font-weight:700;"
                     onclick="triggerTossEmailScroll(this)">
-              🔍 법인카드 토스페이먼츠 메일 스크롤링 실행
+              🔍 법인카드 사용내역 메일 스크롤링 실행
             </button>
           </div>
           <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:12px;">
-            <span>탐색 시작일(선택):</span>
-            <input type="date" id="toss-scroll-start" style="width:136px;" />
-            <span>종료일(선택):</span>
-            <input type="date" id="toss-scroll-end" style="width:136px;" />
-            <span style="color:#64748b; font-size:11px;">(비워두면 메일함 전체 기간 연속 스크롤)</span>
+            <span>수집 대상:</span>
+            <select id="email-scroll-portal-filter" style="font-size:12px; padding:4px 6px;">
+              <option value="ALL">전체 카드결제·간편결제 통합 (네이버페이·토스·쿠팡·PG·카드사)</option>
+              <option value="NAVERPAY">네이버페이 (NaverPay) 법인카드 결제</option>
+              <option value="TOSS">토스페이먼츠 (Toss Payments) 매출전표</option>
+              <option value="COUPANG">쿠팡 (Coupang) 주문·결제</option>
+              <option value="CARD_PG">일반 카드사·PG(이니시스·KCP·스마트로 등) 승인메일</option>
+            </select>
+            <span>시작일:</span>
+            <input type="date" id="toss-scroll-start" style="width:132px;" />
+            <span>종료일:</span>
+            <input type="date" id="toss-scroll-end" style="width:132px;" />
+            <span style="color:#64748b; font-size:11px;">(비우면 전체 기간 스크롤)</span>
           </div>
           <div id="toss-scroll-status"
                style="margin-top:8px; font-size:12px; font-weight:700; color:#0369a1;"></div>
           <div id="toss-scroll-results"
                style="display:none; margin-top:8px; background:#ffffff; border:1px solid #bae6fd;
-                      border-radius:6px; padding:6px; max-height:200px; overflow-y:auto;"></div>
+                      border-radius:6px; padding:6px; max-height:220px; overflow-y:auto;"></div>
         </div>
       </details>
 
@@ -4317,25 +4324,31 @@ def render_dashboard_html(
     async function triggerTossEmailScroll(btnEl) {{
       const st = document.getElementById('toss-scroll-status');
       const resBox = document.getElementById('toss-scroll-results');
+      const portalSel = document.getElementById('email-scroll-portal-filter');
+      const portalFilter = portalSel ? (portalSel.value || 'ALL') : 'ALL';
       const prevTxt = btnEl ? btnEl.textContent : '';
       if (btnEl) {{
         btnEl.disabled = true;
-        btnEl.textContent = '⏳ 토스 메일 연속 스크롤링 중...';
+        btnEl.textContent = '⏳ 법인카드 메일 스크롤링 중...';
       }}
       st.style.color = '#0369a1';
       st.textContent =
-        '⏳ 메일함(전체보관함·받은편지함)에서 토스페이먼츠 결제 메일 및 매출전표 카드번호를 스크롤 탐색 중입니다...';
+        '⏳ 메일함에서 카드결제 관련 메일 본문을 확인해 법인카드 사용내역을 스크롤 중입니다...';
       try {{
         const sDt = (document.getElementById('toss-scroll-start').value || '').trim();
         const eDt = (document.getElementById('toss-scroll-end').value || '').trim();
-        const res = await fetch('/api/v1/scraper/email-scroll-toss', {{
+        const endpoint = portalFilter === 'TOSS'
+          ? '/api/v1/scraper/email-scroll-toss'
+          : '/api/v1/scraper/email-scroll';
+        const res = await fetch(endpoint, {{
           method: 'POST',
           headers: API_HEADERS,
           body: JSON.stringify({{
+            portal_filter: portalFilter,
             start_date: sDt || undefined,
             end_date: eDt || undefined,
             page_size: 50,
-            max_pages: 50,
+            max_pages: 80,
             verify_receipt_slip: true,
             auto_create_corp_tx: true
           }})
@@ -4349,10 +4362,11 @@ def render_dashboard_html(
           if (resBox) {{
             if (items.length === 0) {{
               resBox.style.display = 'block';
+              const scannedCnt = data.parsed_total_count ?? data.parsed_toss_count ?? 0;
               resBox.innerHTML =
                 '<div style="color:#64748b; font-size:12px; padding:6px;">' +
-                '해당 기간 내 법인카드로 결제된 토스페이먼츠 구매내역이 없습니다 ' +
-                `(탐색 ${{data.parsed_toss_count || 0}}통 · 개인카드 ${{data.skipped_personal_count || 0}}건 제외).` +
+                '해당 기간 내 법인카드 사용내역으로 확인된 결제 메일이 없습니다 ' +
+                `(분석 ${{scannedCnt}}건 · 개인카드·미확인 ${{data.skipped_personal_count || 0}}건 제외).` +
                 '</div>';
             }} else {{
               let tbl =
@@ -4376,11 +4390,12 @@ def render_dashboard_html(
                   ? `<div style="font-size:10px;color:#15803d;">${{escHtml(it.biz_reg_no)}}</div>`
                   : '';
                 const dtTxt = escHtml(String(it.transacted_at || '').slice(0, 16));
+                const cLbl = escHtml(it.card_label || it.card_last4 || '');
                 tbl +=
                   '<tr>' +
                   `<td style="padding:5px 6px;white-space:nowrap;"><strong>#${{it.tx_id}}</strong> ${{actBadge}}</td>` +
                   `<td style="padding:5px 6px;white-space:nowrap;">${{dtTxt}}</td>` +
-                  `<td style="padding:5px 6px;white-space:nowrap;">${{escHtml(it.card_label || it.card_last4)}}</td>` +
+                  `<td style="padding:5px 6px;white-space:nowrap;">${{cLbl}}</td>` +
                   `<td style="padding:5px 6px;">${{escHtml(it.raw_merchant_name)}}${{bizInfo}}</td>` +
                   `<td style="padding:5px 6px;"><strong>${{escHtml(it.item_name)}}</strong></td>` +
                   `<td style="padding:5px 6px;text-align:right;white-space:nowrap;"><strong>${{amtFmt}}</strong></td>` +
@@ -4399,11 +4414,11 @@ def render_dashboard_html(
           }}
         }} else {{
           st.style.color = '#b91c1c';
-          st.textContent = `⚠️ ${{data.message || '토스페이먼츠 메일 스크롤링 실패'}}`;
+          st.textContent = `⚠️ ${{data.message || '법인카드 결제메일 스크롤링 실패'}}`;
         }}
       }} catch (err) {{
         st.style.color = '#b91c1c';
-        st.textContent = '⚠️ 토스페이먼츠 메일 스크롤링 요청 중 오류가 발생했습니다.';
+        st.textContent = '⚠️ 법인카드 결제메일 스크롤링 요청 중 오류가 발생했습니다.';
       }} finally {{
         if (btnEl) {{
           btnEl.disabled = false;

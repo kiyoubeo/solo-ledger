@@ -27,6 +27,10 @@ from sololedger.config import settings
 from sololedger.importers import _normalize_datetime_str, _parse_int_amount
 from sololedger.nts_client import validate_biz_reg_no_checksum
 from sololedger.scraper_service import (
+    _extract_card_issuer_canonical,
+    _extract_hint_card_bin6,
+    _extract_hint_card_last4,
+    _has_corporate_card_text_evidence,
     extract_coupang_orders_from_content,
     extract_rows_from_html_table,
     format_biz_reg_no_display,
@@ -77,9 +81,13 @@ IMAP_PROVIDER_PRESETS: Dict[str, Dict[str, Any]] = {
 }
 
 _ORDER_EMAIL_SUBJECT_RE = re.compile(
-    r"(주문|결제|승인|영수증|거래명세|명세서|구매|발주|매출전표|"
-    r"쿠팡|네이버|이니시스|KCP|케이씨피|토스|나이스|다날|페이코|카카오|이지페이|교보|Battle|"
-    r"Order|Receipt|Invoice|Payment)",
+    r"(주문|결제|승인|영수증|거래명세|명세서|구매|발주|매출전표|카드전표|전자영수증|"
+    r"신용카드|체크카드|법인카드|기업카드|카드사용|카드이용|이용내역|사용내역|거래내역|이용안내|간편결제|"
+    r"쿠팡|쿠페이|네이버|네이버페이|naverpay|이니시스|inicis|KCP|케이씨피|토스|tosspayments|"
+    r"나이스|nicepay|다날|페이코|payco|카카오|이지페이|easypay|스마트로|smartro|케이에스넷|ksnet|"
+    r"헥토파이낸셜|세틀뱅크|갤럭시아|모빌리언스|다우데이타|키움페이|웰컴페이먼츠|포트원|"
+    r"우리카드|우리비씨|비씨카드|bc카드|신한카드|국민카드|kb카드|삼성카드|현대카드|롯데카드|하나카드|농협카드|nh카드|기업카드|ibk|"
+    r"교보|Battle|Order|Receipt|Invoice|Payment|Statement)",
     re.IGNORECASE,
 )
 
@@ -99,10 +107,61 @@ _IGNORE_EMAIL_SUBJECT_RE = re.compile(
     r"회원\s*가입|간편\s*로그인|서비스\s*중단|서비스\s*종료|정기점검|애플리케이션\s*비밀번호|해외\s*로그인|"
     r"휴면\s*정책|휴면계정|수수료율\s*변경|구매이용권\s*안내|만족도\s*조사|문의하신\s*내용에\s*답변|"
     r"예약신청\s*후\s*결제\s*안내|예약확정\s*후\s*결제안내|\d{1,2}월\s*청구서입니다|이용대금명세서|"
+    r"결제예정금액|명세서가?\s*도착|포인트\s*소멸|마일리지\s*소멸|출석체크|"
     r"신규\s*콘텐츠.*출시|신규\s*혜택.*출시|멤버십\s*전용\s*전환|적립\s*대상\s*변경|"
     r"구매\s*전에?\s*(?:옵션을|리뷰를)\s*비교|\[네이버\s*시리즈\])",
     re.IGNORECASE,
 )
+
+_PROMO_MARKETING_NOISE_RE = re.compile(
+    r"(할인\s*쿠폰|특가|타임세일|선착순|무료체험|이벤트\s*안내|캐시백\s*이벤트|적립금\s*지급|뉴스레터)",
+    re.IGNORECASE,
+)
+
+_KNOWN_PAYMENT_SENDER_OR_TAG_RE = re.compile(
+    r"(coupang|쿠팡|쿠페이|naverpay|navercorp|네이버페이|네이버파이낸셜|tosspayments|토스페이먼츠|"
+    r"inicis|이니시스|kcp|케이씨피|easypay|이지페이|한국정보통신|nicepay|nicepg|나이스|"
+    r"ksnet|케이에스넷|smartro|스마트로|kakaopay|카카오페이|payco|페이코|danal|다날|"
+    r"wooricard|우리카드|우리비씨|bccard|비씨카드|shinhancard|신한카드|kbcard|국민카드|"
+    r"samsungcard|삼성카드|hyundaicard|현대카드|lottecard|롯데카드|hanacard|하나카드|"
+    r"nhcard|농협카드|ibk|기업카드|11st|11번가|gmarket|지마켓|kyobobook|교보문고|kurly|컬리|musinsa|ohou)",
+    re.IGNORECASE,
+)
+
+
+def is_card_payment_related_email_header(subject: str, sender: str = "") -> bool:
+    """Return True if an email's Subject/From indicates a card payment, slip, or e-commerce order."""
+    subj = (subject or "").strip()
+    snd = (sender or "").strip()
+    if not subj and not snd:
+        return False
+    if _CANCELED_EMAIL_SUBJECT_RE.search(subj):
+        return True
+    if _IGNORE_EMAIL_SUBJECT_RE.search(subj):
+        return False
+    return bool(_ORDER_EMAIL_SUBJECT_RE.search(f"{subj} {snd}"))
+
+
+def _is_promo_payment_rescue_candidate(subject: str, sender: str = "") -> bool:
+    """Return True if a message in a Promotion/Smart folder is a transactional payment/order notice."""
+    subj = (subject or "").strip()
+    snd = (sender or "").strip()
+    if not subj:
+        return False
+    if _CANCELED_EMAIL_SUBJECT_RE.search(subj):
+        return bool(_KNOWN_PAYMENT_SENDER_OR_TAG_RE.search(f"{subj} {snd}"))
+    if _IGNORE_EMAIL_SUBJECT_RE.search(subj) or _PROMO_MARKETING_NOISE_RE.search(subj):
+        return False
+    if _KNOWN_PAYMENT_SENDER_OR_TAG_RE.search(f"{subj} {snd}") and _ORDER_EMAIL_SUBJECT_RE.search(subj):
+        return True
+    return bool(
+        re.search(
+            r"(결제하신\s*내역|결제한\s*내역|결제가\s*완료|주문이\s*완료|주문하신\s*내역|"
+            r"승인내역|매출전표|거래명세서|법인카드.*(?:승인|결제|이용|사용))",
+            subj,
+            re.IGNORECASE,
+        )
+    )
 
 _GENERIC_NOTIFICATION_SUBJECT_RE = re.compile(
     r"(결제하신\s*내역|주문하신\s*내역|결제\s*내역입니다|승인\s*내역|이용내역\s*안내|"
@@ -151,7 +210,12 @@ _KV_AMOUNT_KEYS = (
     "최종결제금액",
     "결제금액",
     "승인금액",
+    "이용금액",
+    "국내이용금액",
+    "해외이용금액",
     "실결제금액",
+    "카드결제금액",
+    "신용카드결제금액",
     "주문금액",
     "합계금액",
     "거래금액",
@@ -167,16 +231,20 @@ _KV_AMOUNT_KEYS = (
 _KV_DATE_KEYS = (
     "결제일시",
     "승인일시",
+    "이용일시",
+    "사용일시",
     "거래일시",
     "주문일시",
     "주문일자",
     "결제일자",
     "승인일자",
+    "이용일자",
     "거래일자",
     "구매일시",
     "주문일",
     "결제일",
     "승인일",
+    "이용일",
     "일자",
     "일시",
     "date",
@@ -185,8 +253,12 @@ _KV_SHOP_KEYS = (
     "구매상점명",
     "상점명",
     "가맹점명",
+    "이용가맹점",
+    "이용하신곳",
     "가맹점",
     "이용상점",
+    "결제처",
+    "주문처",
     "상호",
     "사용처",
     "판매자상호",
@@ -208,6 +280,9 @@ _KV_CARD_KEYS = (
     "카드사",
     "발급사",
     "결제카드",
+    "이용카드",
+    "카드번호",
+    "카드정보",
     "카드명",
     "카드종류",
 )
@@ -474,6 +549,7 @@ def save_email_watcher_config(
         "recent_matched_items",
         "processed_ids",
         "coupang_parser_version",
+        "email_parser_version",
     ):
         if key in updates and updates[key] is not None:
             cfg[key] = updates[key]
@@ -643,6 +719,7 @@ def get_public_email_watcher_config(
     pub["recent_matched_count"] = len(pub["recent_matched_items"])
     pub.pop("processed_ids", None)
     pub.pop("coupang_parser_version", None)
+    pub.pop("email_parser_version", None)
     return pub
 
 
@@ -1232,20 +1309,117 @@ def _extract_coupang_email_orders(
     return [out_row]
 
 
+_INLINE_MASKED_CARD_RE = re.compile(
+    r"((?:우리비씨|우리|국민|KB|비씨|BC|삼성|현대|롯데|신한|하나|농협|NH|기업|IBK)"
+    r"(?:법인|기업|비씨|카드|체크)*\s*)?"
+    r"(\d{4}[-\s]+[\dXx*]{2,4}[-\s]+[\dXx*]{2,4}[-\s]+(?=\S*\d)[\d*]{4}"
+    r"|(?<!\d)\d{6}[\dXx*]{5,6}(?=\S*\d)[\d*]{4}(?!\d))",
+    re.IGNORECASE,
+)
+
+_INLINE_ISSUER_TAIL_RE = re.compile(
+    r"(우리비씨|우리|국민|KB|비씨|BC|삼성|현대|롯데|신한|하나|농협|NH|기업|IBK)"
+    r"(?:\s*(?:법인|기업|비씨|카드|체크))*"
+    r"(?:\s*[\(\[]\s*(\d[\d*]{3})\s*[\)\]]|\s*법인\s*\(?(\d[\d*]{3})\)?)",
+    re.IGNORECASE,
+)
+
+_NAVERPAY_CARD_LABEL_RE = re.compile(
+    r"(신용카드|체크카드|법인카드|기업카드|카드간편결제|신용/체크카드|카드결제|간편결제.*카드|"
+    r"(?:우리비씨|우리|국민|KB|비씨|BC|삼성|현대|롯데|신한|하나|농협|NH|기업|IBK)(?:법인|기업|카드|체크)*)",
+    re.IGNORECASE,
+)
+
+_NAVERPAY_POINT_DEDUCT_LABEL_RE = re.compile(
+    r"^(?:네이버페이\s*)?(?:포인트|머니|페이머니|선불충전금|Npay\s*(?:포인트|머니))(?:\s*(?:사용|결제|차감))?$",
+    re.IGNORECASE,
+)
+
+
+def _extract_card_hint_from_body(combined_text: str) -> tuple[str, str]:
+    """Scan email body text for masked card numbers, issuer+last4, or explicit corporate card hints."""
+    text = str(combined_text or "")
+    if not text:
+        return "", ""
+
+    m_masked = _INLINE_MASKED_CARD_RE.search(text)
+    masked_no = m_masked.group(2).strip() if m_masked else ""
+    issuer_pfx = (m_masked.group(1) or "").strip() if m_masked else ""
+
+    m_tail = _INLINE_ISSUER_TAIL_RE.search(text)
+    if m_tail:
+        iss_raw = m_tail.group(1).strip()
+        tail_raw = (m_tail.group(2) or m_tail.group(3) or "").strip()
+        full_match = m_tail.group(0).strip()
+        has_corp_kw = "법인" in full_match or "기업" in full_match
+        base_lbl = (
+            f"{iss_raw}법인카드"
+            if has_corp_kw and "카드" not in iss_raw
+            else (f"{iss_raw}카드" if "카드" not in iss_raw else iss_raw)
+        )
+        card_lbl = f"{base_lbl} ({tail_raw})" if tail_raw else base_lbl
+        return card_lbl, masked_no
+
+    m_corp_kw = re.search(
+        r"((?:우리비씨|우리|국민|KB|비씨|BC|삼성|현대|롯데|신한|하나|농협|NH|기업|IBK)?\s*(?:법인카드|기업카드|사업자카드)"
+        r"(?:\s*[\(\[]?\d[\d*]{3}[\)\]]?)?)",
+        text,
+        re.IGNORECASE,
+    )
+    if m_corp_kw:
+        corp_lbl = re.sub(r"\s+", " ", m_corp_kw.group(1)).strip()
+        if masked_no and masked_no not in corp_lbl:
+            return f"{corp_lbl} {masked_no}".strip(), masked_no
+        return corp_lbl, masked_no
+
+    if masked_no:
+        lbl = f"{issuer_pfx} {masked_no}".strip() if issuer_pfx else masked_no
+        return lbl, masked_no
+
+    return "", ""
+
+
 def _extract_naverpay_email_orders(
     combined_text: str,
     fallback_dt: str = "",
+    body_html: str = "",
+    subject: str = "",
+    sender: str = "",
 ) -> Optional[List[Dict[str, Any]]]:
-    """Parse NaverPay online order emails, extracting actual card charge & all line items."""
-    if (
-        "네이버페이로" not in combined_text
-        or "주문하신 내역" not in combined_text
-        or "결제상세" not in combined_text
-        or "주문상품" not in combined_text
-    ):
+    """Parse NaverPay online order & card payment emails, preserving card number & approval metadata."""
+    hdr_probe = f"{sender} {subject}".lower()
+    is_np_mail = (
+        "네이버페이" in hdr_probe
+        or "naverpay" in hdr_probe
+        or "네이버파이낸셜" in combined_text[:2500]
+        or "네이버페이로" in combined_text[:1500]
+    )
+    if not is_np_mail:
         return None
+
+    card_lbl_body, masked_card_body = _extract_card_hint_from_body(combined_text)
+    m_np_app = re.search(r"(?:카드)?승인번호\s*[:：]?\s*(\d{6,12})", combined_text)
+    np_approval_no = m_np_app.group(1) if m_np_app else ""
+    m_np_ord = re.search(r"(?:주문번호|결제번호)\s*[:：]?\s*(\d{8,22})", combined_text)
+    np_order_no = m_np_ord.group(1) if m_np_ord else ""
+
     if "페이홈 > 결제내역 > 오프라인" in combined_text:
-        return []
+        has_merch_or_prod = bool(
+            re.search(
+                r"(?:가맹점명|결제처|사용처|상점명|상품명|주문상품)\s*[:：]\s*\S+",
+                combined_text,
+            )
+        )
+        if not has_merch_or_prod:
+            return []
+        return None
+
+    has_classic_sections = (
+        ("결제상세" in combined_text or "결제정보" in combined_text)
+        and ("주문상품" in combined_text or "주문상품내역" in combined_text)
+    )
+    if not has_classic_sections:
+        return None
 
     lines: List[str] = []
     for raw_ln in combined_text.splitlines():
@@ -1253,7 +1427,20 @@ def _extract_naverpay_email_orders(
         if not ln:
             continue
         if " : " in ln and (
-            ln.startswith(("주문일자 :", "주문금액 :", "신용카드 :", "체크카드 :", "카드간편결제 :"))
+            ln.startswith(
+                (
+                    "주문일자 :",
+                    "결제일시 :",
+                    "주문금액 :",
+                    "총결제금액 :",
+                    "신용카드",
+                    "체크카드",
+                    "법인카드",
+                    "카드간편결제",
+                    "결제수단 :",
+                    "결제카드 :",
+                )
+            )
             or "포인트 :" in ln
             or "머니 :" in ln
             or " : 주문금액 : " in ln
@@ -1266,15 +1453,20 @@ def _extract_naverpay_email_orders(
                 lines.extend(t.strip() for t in ln.split(" : ") if t.strip())
         else:
             lines.append(ln)
-    try:
-        pay_idx = lines.index("결제상세")
-        items_idx = lines.index("주문상품")
-    except ValueError:
+
+    pay_idx = -1
+    items_idx = -1
+    for idx_l, ln in enumerate(lines):
+        if pay_idx < 0 and ln in ("결제상세", "결제정보"):
+            pay_idx = idx_l
+        elif items_idx < 0 and ln in ("주문상품", "주문상품내역"):
+            items_idx = idx_l
+    if pay_idx < 0 or items_idx < 0:
         return None
 
     order_dt = ""
-    for idx, ln in enumerate(lines[: pay_idx + 1]):
-        if ln == "주문일자" and idx + 1 < len(lines):
+    for idx, ln in enumerate(lines[: max(pay_idx, items_idx) + 1]):
+        if ln in ("주문일자", "결제일시", "결제일자", "주문일시") and idx + 1 < len(lines):
             norm_d = _normalize_datetime_str(lines[idx + 1])
             if len(norm_d) >= 10 and norm_d[:4].isdigit():
                 order_dt = norm_d[:10]
@@ -1282,40 +1474,76 @@ def _extract_naverpay_email_orders(
     if not order_dt and len(fallback_dt) >= 10:
         order_dt = fallback_dt[:10]
     if not order_dt:
-        return []
+        return None
 
-    pay_end = items_idx
-    for stop_lbl in ("배송정보", "주문상품"):
-        if stop_lbl in lines[pay_idx + 1 : items_idx + 1]:
-            pay_end = lines.index(stop_lbl, pay_idx + 1)
-            break
-    pay_slice = lines[pay_idx + 1 : pay_end]
+    if pay_idx < items_idx:
+        pay_end = items_idx
+        for stop_lbl in ("배송정보", "주문상품", "주문상품내역"):
+            if stop_lbl in lines[pay_idx + 1 : items_idx + 1]:
+                pay_end = lines.index(stop_lbl, pay_idx + 1)
+                break
+        pay_slice = lines[pay_idx + 1 : pay_end]
+    else:
+        pay_slice = lines[pay_idx + 1 : min(len(lines), pay_idx + 24)]
 
     order_amt = 0
     card_amt = 0
-    has_point_or_money = any(
-        ("포인트" in ln or "머니" in ln or "페이머니" in ln) for ln in pay_slice
-    )
+    point_used_amt = 0
+    detected_card_labels: List[str] = []
     for idx, ln in enumerate(pay_slice):
         clean_lbl = re.sub(r"[\s:：]+", "", ln)
-        if clean_lbl == "주문금액" and idx + 1 < len(pay_slice):
-            order_amt = _parse_int_amount(pay_slice[idx + 1])
-        elif clean_lbl in ("신용카드", "체크카드", "카드간편결제", "신용/체크카드", "카드결제"):
+        if clean_lbl in ("주문금액", "총주문금액", "총결제금액", "합계금액") and idx + 1 < len(pay_slice):
+            cand_oa = _parse_int_amount(pay_slice[idx + 1])
+            if cand_oa > 0:
+                order_amt = cand_oa
+        elif (
+            "적립" not in ln
+            and "혜택" not in ln
+            and "보유" not in ln
+            and "잔액" not in ln
+            and (
+                _NAVERPAY_POINT_DEDUCT_LABEL_RE.match(ln.strip(" :："))
+                or clean_lbl in ("네이버페이포인트", "포인트사용", "네이버페이머니", "머니사용", "페이머니")
+            )
+        ):
             if idx + 1 < len(pay_slice):
-                card_amt += _parse_int_amount(pay_slice[idx + 1])
+                p_val = _parse_int_amount(pay_slice[idx + 1])
+                if p_val > 0:
+                    point_used_amt += p_val
+        elif (
+            "포인트" not in clean_lbl
+            and "머니" not in clean_lbl
+            and "할인" not in clean_lbl
+            and "쿠폰" not in clean_lbl
+            and "배송비" not in clean_lbl
+            and _NAVERPAY_CARD_LABEL_RE.search(ln)
+        ):
+            detected_card_labels.append(ln.strip())
+            if idx + 1 < len(pay_slice):
+                nxt_v = pay_slice[idx + 1].strip()
+                c_val = _parse_int_amount(nxt_v) if "원" in nxt_v or nxt_v.replace(",", "").isdigit() else 0
+                if c_val > 0:
+                    card_amt += c_val
+                elif _NAVERPAY_CARD_LABEL_RE.search(nxt_v) or re.search(r"\d[\d*]{3}", nxt_v):
+                    detected_card_labels.append(nxt_v)
+        elif clean_lbl in ("결제수단", "결제카드", "카드정보") and idx + 1 < len(pay_slice):
+            detected_card_labels.append(pay_slice[idx + 1].strip())
 
     if card_amt > 0:
         total_paid = card_amt
-    elif has_point_or_money:
-        return []
+    elif point_used_amt > 0:
+        if order_amt > point_used_amt and (detected_card_labels or card_lbl_body):
+            total_paid = order_amt - point_used_amt
+        else:
+            return []
     elif order_amt > 0:
         total_paid = order_amt
     else:
-        return []
+        return None
 
     items_end = len(lines)
     for stop_idx in range(items_idx + 1, len(lines)):
-        if lines[stop_idx] in ("상품금액", "네이버페이 홈"):
+        if lines[stop_idx] in ("상품금액", "네이버페이 홈", "결제상세", "결제정보"):
             items_end = stop_idx
             break
     items_slice = lines[items_idx + 1 : items_end]
@@ -1326,10 +1554,10 @@ def _extract_naverpay_email_orders(
     n_it = len(items_slice)
     k = 0
     while k < n_it:
-        if items_slice[k] == "주문금액" and k + 1 < n_it:
+        if items_slice[k] in ("주문금액", "상품금액") and k + 1 < n_it:
             item_title = ""
             for p_ln in items_slice[item_start_idx:k]:
-                if p_ln in ("추가상품", "주문상품", "배송정보"):
+                if p_ln in ("추가상품", "주문상품", "주문상품내역", "배송정보"):
                     continue
                 if p_ln.startswith(("옵션", "대표자명", "대표주소", "판매자 특이사항", "무료(", "유료(")):
                     continue
@@ -1342,14 +1570,22 @@ def _extract_naverpay_email_orders(
             if (
                 k + 3 < n_it
                 and items_slice[k + 2] == "수량"
-                and items_slice[k + 3].isdigit()
+                and re.match(r"^\d+\s*개?$", items_slice[k + 3])
             ):
-                qty_val = max(1, int(items_slice[k + 3]))
+                qty_val = max(1, int(re.sub(r"\D", "", items_slice[k + 3]) or "1"))
 
             seller_name = ""
-            next_start = k + (4 if (k + 3 < n_it and items_slice[k + 2] == "수량") else 2)
+            next_start = k + (
+                4
+                if (
+                    k + 3 < n_it
+                    and items_slice[k + 2] == "수량"
+                    and re.match(r"^\d+\s*개?$", items_slice[k + 3])
+                )
+                else 2
+            )
             m_scan = next_start
-            while m_scan < n_it and items_slice[m_scan] != "주문금액":
+            while m_scan < n_it and items_slice[m_scan] not in ("주문금액", "상품금액"):
                 cur_ln = items_slice[m_scan]
                 if "사업자명" in cur_ln and "|" in cur_ln:
                     m_sel = re.search(r"사업자명\s*[:：]\s*([^|]+)", cur_ln)
@@ -1378,8 +1614,31 @@ def _extract_naverpay_email_orders(
             continue
         k += 1
 
+    # Fallback: HTML <table> item rows inside NaverPay order confirmation
+    if not raw_items and body_html and "<table" in body_html.lower():
+        for tbl_r in extract_rows_from_html_table(body_html):
+            p_nm = str(
+                tbl_r.get("상품명")
+                or tbl_r.get("주문상품")
+                or tbl_r.get("주문상품명")
+                or tbl_r.get("품목명")
+                or ""
+            ).strip()
+            p_pr = _parse_int_amount(
+                str(tbl_r.get("주문금액") or tbl_r.get("상품금액") or tbl_r.get("결제금액") or "0")
+            )
+            p_qt = max(1, _parse_int_amount(str(tbl_r.get("수량") or "1")) or 1)
+            p_sl = str(tbl_r.get("판매자") or tbl_r.get("가맹점") or tbl_r.get("상점명") or "").strip()
+            if p_nm and not _is_noise_product_name(p_nm) and p_pr > 0:
+                it_obj: Dict[str, Any] = {"item": p_nm, "qty": p_qt, "price": p_pr}
+                if p_sl:
+                    it_obj["seller"] = p_sl
+                    if p_sl not in sellers:
+                        sellers.append(p_sl)
+                raw_items.append(it_obj)
+
     if not raw_items:
-        return []
+        return None
 
     prorated_items = _prorate_order_line_items(raw_items, total_paid)
     seller_label = (
@@ -1393,6 +1652,8 @@ def _extract_naverpay_email_orders(
         else f"{prorated_items[0]['item']} 외 {len(prorated_items) - 1}건"
     )
     full_dt = fallback_dt if len(fallback_dt) >= 16 and fallback_dt[:10] == order_dt else order_dt
+    joined_card = " ".join(dict.fromkeys([*detected_card_labels, card_lbl_body])).strip()
+    pay_method_out = joined_card if joined_card else "신용카드"
     return [
         {
             "주문일자": order_dt,
@@ -1401,9 +1662,11 @@ def _extract_naverpay_email_orders(
             "결제금액": total_paid,
             "상점명": seller_label,
             "발신처": "네이버페이",
-            "승인번호": "",
-            "카드사": "",
-            "결제수단": "신용카드",
+            "주문번호": np_order_no,
+            "승인번호": np_approval_no,
+            "카드사": card_lbl_body or joined_card,
+            "카드번호": masked_card_body,
+            "결제수단": pay_method_out,
             "사업자번호": "",
             "입점판매자": seller_label,
             "품목내역": prorated_items,
@@ -1513,6 +1776,42 @@ def _infer_sender_portal(sender: str, subject: str) -> str:
         ("musinsa", "무신사"),
         ("오늘의집", "오늘의집"),
         ("ohou", "오늘의집"),
+        ("이니시스", "이니시스"),
+        ("inicis", "이니시스"),
+        ("케이씨피", "NHN KCP"),
+        ("kcp", "NHN KCP"),
+        ("이지페이", "이지페이"),
+        ("easypay", "이지페이"),
+        ("한국정보통신", "이지페이"),
+        ("나이스", "나이스페이"),
+        ("nicepay", "나이스페이"),
+        ("스마트로", "스마트로"),
+        ("smartro", "스마트로"),
+        ("케이에스넷", "KSNET"),
+        ("ksnet", "KSNET"),
+        ("페이코", "페이코"),
+        ("payco", "페이코"),
+        ("우리카드", "우리카드"),
+        ("wooricard", "우리카드"),
+        ("우리비씨", "우리카드"),
+        ("비씨카드", "BC카드"),
+        ("bccard", "BC카드"),
+        ("신한카드", "신한카드"),
+        ("shinhancard", "신한카드"),
+        ("국민카드", "KB국민카드"),
+        ("kbcard", "KB국민카드"),
+        ("삼성카드", "삼성카드"),
+        ("samsungcard", "삼성카드"),
+        ("현대카드", "현대카드"),
+        ("hyundaicard", "현대카드"),
+        ("롯데카드", "롯데카드"),
+        ("lottecard", "롯데카드"),
+        ("하나카드", "하나카드"),
+        ("hanacard", "하나카드"),
+        ("농협카드", "NH농협카드"),
+        ("nhcard", "NH농협카드"),
+        ("기업카드", "IBK기업카드"),
+        ("ibk", "IBK기업카드"),
     ):
         if token in comb:
             return canonical
@@ -1846,9 +2145,13 @@ def extract_orders_from_email_content(
         if html_txt not in combined_text:
             combined_text = f"{combined_text}\n{html_txt}"
 
-    # Skip offline NaverPay/card point notifications that contain no product line items
+    # Skip bare offline NaverPay/card point notifications that contain neither product nor merchant
     if "페이홈 > 결제내역 > 오프라인" in combined_text:
-        return []
+        if not re.search(
+            r"(?:가맹점명|결제처|사용처|상점명|상품명|주문상품)\s*[:：]\s*\S+",
+            combined_text,
+        ):
+            return []
 
     fallback_dt = _parse_email_date_kst(date_str)
 
@@ -1876,8 +2179,14 @@ def extract_orders_from_email_content(
     if toss_email_orders:
         return toss_email_orders
 
-    # 1c. Dedicated NaverPay Online Order Email parser (point-split card charge + multi-item)
-    np_email_orders = _extract_naverpay_email_orders(combined_text, fallback_dt=fallback_dt)
+    # 1c. Dedicated NaverPay Online Order Email parser (point-split card charge + multi-item + card meta)
+    np_email_orders = _extract_naverpay_email_orders(
+        combined_text,
+        fallback_dt=fallback_dt,
+        body_html=body_html,
+        subject=subject,
+        sender=sender,
+    )
     if np_email_orders is not None:
         return np_email_orders
 
@@ -2006,16 +2315,38 @@ def extract_orders_from_email_content(
     kv_card = ""
     for raw_c in kv["cards"]:
         clean_c = re.sub(r"\s+", " ", raw_c).strip()
-        if clean_c and len(clean_c) <= 30:
+        if clean_c and len(clean_c) <= 42:
             kv_card = clean_c
             break
+    body_card_lbl, body_masked_no = _extract_card_hint_from_body(combined_text)
+    if body_card_lbl:
+        if not kv_card:
+            kv_card = body_card_lbl
+        elif not _extract_hint_card_last4(kv_card) and _extract_hint_card_last4(body_card_lbl):
+            kv_card = f"{kv_card} {body_card_lbl}".strip()
+        elif "법인" in body_card_lbl and "법인" not in kv_card:
+            kv_card = f"{kv_card} ({body_card_lbl})".strip()
 
     kv_pay = ""
     for raw_pm in kv["pay_methods"]:
         clean_pm = re.sub(r"\s+", " ", raw_pm).strip()
-        if clean_pm and len(clean_pm) <= 30:
+        if clean_pm and len(clean_pm) <= 42:
             kv_pay = clean_pm
             break
+
+    # Support direct Card Issuer / NaverPay / PG card slip notices that specify merchant + card without item row
+    is_merchant_slip_fallback = False
+    if not kv_prod and kv_shop and not _is_noise_product_name(kv_shop):
+        has_card_signal = bool(
+            kv_card
+            or kv_app
+            or body_masked_no
+            or re.search(r"(카드|승인|매출전표|간편결제)", f"{subject} {kv_pay}", re.I)
+            or portal_hint.endswith("카드")
+        )
+        if has_card_signal:
+            kv_prod = f"{kv_shop} 결제건"
+            is_merchant_slip_fallback = True
 
     # Extract supplier biz_reg_no ONLY for verified direct sellers (never PG/intermediary footers)
     kv_biz_no = ""
@@ -2062,21 +2393,23 @@ def extract_orders_from_email_content(
                 break
 
     if kv_dt and kv_amt > 0 and kv_prod and not orders:
-        orders.append(
-            {
-                "주문일자": kv_dt[:10],
-                "주문일시": kv_dt if len(kv_dt) >= 16 else (fallback_dt or kv_dt),
-                "상품명": kv_prod,
-                "결제금액": kv_amt,
-                "상점명": kv_shop,
-                "발신처": portal_hint,
-                "승인번호": kv_app,
-                "카드사": kv_card,
-                "결제수단": kv_pay,
-                "사업자번호": kv_biz_no,
-                "품목내역": [{"item": kv_prod, "qty": 1, "price": kv_amt}],
-            }
-        )
+        fb_order: Dict[str, Any] = {
+            "주문일자": kv_dt[:10],
+            "주문일시": kv_dt if len(kv_dt) >= 16 else (fallback_dt or kv_dt),
+            "상품명": kv_prod,
+            "결제금액": kv_amt,
+            "상점명": kv_shop,
+            "발신처": portal_hint,
+            "승인번호": kv_app,
+            "카드사": kv_card,
+            "카드번호": body_masked_no,
+            "결제수단": kv_pay,
+            "사업자번호": kv_biz_no,
+            "품목내역": [{"item": kv_prod, "qty": 1, "price": kv_amt}],
+        }
+        if is_merchant_slip_fallback:
+            fb_order["가맹점전표여부"] = True
+        orders.append(fb_order)
 
     # Deduplicate by (date, amount, product) and enrich metadata
     deduped: List[Dict[str, Any]] = []
@@ -2106,6 +2439,8 @@ def extract_orders_from_email_content(
             o["승인번호"] = kv_app
         if kv_card and not o.get("카드사"):
             o["카드사"] = kv_card
+        if body_masked_no and not o.get("카드번호"):
+            o["카드번호"] = body_masked_no
         if kv_pay and not o.get("결제수단"):
             o["결제수단"] = kv_pay
         if kv_biz_no and not o.get("사업자번호") and not o.get("입점판매자"):
@@ -2201,13 +2536,14 @@ def parse_raw_email_bytes_or_text(
     )
 
 
-def _order_priority_key(o: Dict[str, Any]) -> tuple[int, int, int]:
-    """Prioritize itemized multi-product orders and full titles over truncated PG 1-liners."""
+def _order_priority_key(o: Dict[str, Any]) -> tuple[int, int, int, int]:
+    """Prioritize itemized multi-product orders and full titles over truncated PG or card-slip 1-liners."""
     lines = o.get("품목내역") if isinstance(o.get("품목내역"), list) else []
     li_cnt = len(lines)
     title = str(o.get("상품명") or "")
+    is_slip_only = 1 if o.get("가맹점전표여부") else 0
     is_truncated_pg = 1 if (li_cnt <= 1 and re.search(r"(포함\s*총\s*\d+|외\s*\d+건|\s\d+$)", title)) else 0
-    return (-li_cnt, is_truncated_pg, -len(title))
+    return (is_slip_only, -li_cnt, is_truncated_pg, -len(title))
 
 
 def _parse_order_ts_seconds(ts_str: str) -> Optional[float]:
@@ -2274,7 +2610,9 @@ def _merge_companion_email_orders(orders: List[Dict[str, Any]]) -> List[Dict[str
             for meta_key in (
                 "승인번호",
                 "카드사",
+                "카드번호",
                 "결제수단",
+                "주문번호",
                 "상점명",
                 "발신처",
                 "입점판매자",
@@ -2445,6 +2783,233 @@ def _extract_fetch_msg_token(
     return m_seq.group(1) if m_seq else default_tok
 
 
+def classify_email_card_ownership(
+    order: Dict[str, Any],
+    *,
+    cursor: Optional[sqlite3.Cursor] = None,
+    confirmed_corp_card_numbers: Optional[set[str]] = None,
+    existing_corp_approvals: Optional[set[str]] = None,
+    archive_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Inspect parsed email order & card metadata to classify corporate vs personal card usage."""
+    policy = load_corp_card_policy(archive_dir)
+    corp_only = bool(policy.get("corp_only_mode", False))
+    corp_cards = confirmed_corp_card_numbers or set()
+    corp_apps = existing_corp_approvals or set()
+
+    app_no = str(order.get("승인번호") or order.get("approval_no") or "").strip()
+    card_col = str(order.get("카드사") or order.get("card_issuer") or "").strip()
+    card_num = str(order.get("카드번호") or order.get("card_number_masked") or "").strip()
+    pay_method = str(order.get("결제수단") or order.get("payment_method") or "").strip()
+    buyer_hint = str(order.get("구매자힌트") or order.get("buyer_greeting") or "").strip()
+    item_name = str(order.get("상품명") or order.get("item_name") or "").strip()
+    card_probe = f"{card_col} {card_num} {pay_method}".strip()
+
+    if (
+        re.search(
+            r"쿠페이\s*머니|coupay\s*money|네이버페이\s*(?:포인트|머니)|카카오페이\s*머니|무통장|계좌이체",
+            pay_method,
+            re.I,
+        )
+        and not card_col
+        and not card_num
+    ):
+        return {
+            "is_corporate": False,
+            "confirmed_corp_evidence": False,
+            "reason": "non_card_payment",
+            "card_last4": "0000",
+            "issuer_code": "CORP",
+        }
+
+    tail4 = _extract_hint_card_last4(card_probe)
+    bin6 = _extract_hint_card_bin6(card_probe)
+    if not tail4 and card_num:
+        t_fb, b_fb = _extract_card_tail4_and_bin6(card_num)
+        tail4 = tail4 or t_fb
+        bin6 = bin6 or b_fb
+    issuer_code = _infer_corp_issuer_code(card_probe)
+
+    # 1. Match against registered corporate card list (exact or wildcard e.g. '117*' -> '1175')
+    matched_reg = match_registered_corp_card_code(tail4, archive_dir=archive_dir) if tail4 else None
+    if matched_reg:
+        return {
+            "is_corporate": True,
+            "confirmed_corp_evidence": True,
+            "reason": "registered_corp_card",
+            "card_last4": matched_reg,
+            "issuer_code": issuer_code,
+        }
+
+    # 2. Match against existing corporate ledger approval_no
+    if app_no and app_no in corp_apps:
+        return {
+            "is_corporate": True,
+            "confirmed_corp_evidence": True,
+            "reason": "existing_ledger_approval_match",
+            "card_last4": tail4 or "0000",
+            "issuer_code": issuer_code,
+        }
+
+    # 3. Block known personal card codes or personal-only card BINs
+    if tail4 and is_blocked_personal_card_code(tail4, archive_dir=archive_dir):
+        return {
+            "is_corporate": False,
+            "confirmed_corp_evidence": False,
+            "reason": "blocked_personal_card",
+            "card_last4": tail4,
+            "issuer_code": issuer_code,
+        }
+    if bin6 and any(bin6.startswith(p) for p in _TOSS_PERSONAL_CARD_BIN6_PREFIXES):
+        return {
+            "is_corporate": False,
+            "confirmed_corp_evidence": False,
+            "reason": "personal_card_bin",
+            "card_last4": tail4 or "0000",
+            "issuer_code": issuer_code,
+        }
+
+    # 4. Corporate BIN, explicit corporate card label in body, cohort card, or corporate buyer
+    has_corp_text = _has_corporate_card_text_evidence(card_probe)
+    in_corp_cohort = bool(card_num and card_num in corp_cards)
+    has_corp_buyer = bool(_CORP_BUYER_OR_ITEM_RE.search(f"{buyer_hint} {item_name}") and not bin6)
+    if has_corp_text or in_corp_cohort or has_corp_buyer:
+        resolved_c4 = tail4 if len(tail4) == 4 else "0000"
+        return {
+            "is_corporate": True,
+            "confirmed_corp_evidence": True,
+            "reason": "corporate_card_body_evidence",
+            "card_last4": resolved_c4,
+            "issuer_code": issuer_code,
+        }
+
+    # 5. Match against an existing corporate card transaction in card_transactions (e.g. NaverPay without digits)
+    if cursor is not None:
+        amt = abs(_parse_int_amount(str(order.get("결제금액") or order.get("paid_amount") or 0)))
+        prod_sum = abs(_parse_int_amount(str(order.get("상품합계금액") or 0)))
+        dt_p = _normalize_datetime_str(
+            str(order.get("주문일시") or order.get("주문일자") or "")
+        )[:10]
+        hint_issuer = _extract_card_issuer_canonical(card_probe)
+        if amt > 0 and len(dt_p) == 10:
+            cursor.execute(
+                """
+                SELECT card_last4, raw_merchant_name, total_amount
+                FROM card_transactions
+                WHERE reconcile_status != 'CANCELED'
+                  AND total_amount > 0
+                  AND ABS(julianday(SUBSTR(transacted_at, 1, 10)) - julianday(?)) <= 3.0
+                """,
+                (dt_p,),
+            )
+            for cand in cursor.fetchall():
+                c_amt = int(cand["total_amount"])
+                c_last4 = str(cand["card_last4"] or "0000").strip()
+                is_exact_amt = c_amt in (amt, prod_sum)
+                is_cp = "쿠팡" in str(order.get("발신처") or "")
+                is_cp_tol = is_cp and (
+                    (0 < (amt - c_amt) <= max(3000, int(amt * 0.28)) and c_amt >= int(amt * 0.65))
+                    or ((c_amt - amt) in (2500, 3000, 3500, 4000, 5000))
+                )
+                if not (is_exact_amt or is_cp_tol):
+                    continue
+                if tail4 and c_last4 != "0000":
+                    m_reg = match_registered_corp_card_code(tail4, archive_dir=archive_dir) or tail4
+                    if c_last4 not in (tail4, m_reg):
+                        continue
+                if hint_issuer and c_last4 != "0000":
+                    cand_iss = _extract_card_issuer_canonical(
+                        format_card_label(c_last4, archive_dir=archive_dir)
+                    )
+                    if cand_iss and cand_iss != hint_issuer:
+                        continue
+                return {
+                    "is_corporate": True,
+                    "confirmed_corp_evidence": False,
+                    "reason": "existing_ledger_tx_match",
+                    "card_last4": c_last4,
+                    "issuer_code": issuer_code,
+                }
+
+    if not corp_only:
+        return {
+            "is_corporate": True,
+            "confirmed_corp_evidence": False,
+            "reason": "corp_only_disabled",
+            "card_last4": tail4 if len(tail4) == 4 else "0000",
+            "issuer_code": issuer_code,
+        }
+
+    return {
+        "is_corporate": False,
+        "confirmed_corp_evidence": False,
+        "reason": "unverified_or_personal_card",
+        "card_last4": tail4 or "0000",
+        "issuer_code": issuer_code,
+    }
+
+
+def _annotate_and_filter_corporate_orders(
+    cursor: sqlite3.Cursor,
+    orders: List[Dict[str, Any]],
+    *,
+    archive_dir: Optional[Path] = None,
+) -> tuple[List[Dict[str, Any]], int]:
+    """Inspect merged email orders for corporate card ownership and filter personal card orders."""
+    if not orders:
+        return [], 0
+
+    cursor.execute(
+        """
+        SELECT DISTINCT approval_no FROM card_transactions
+        WHERE approval_no IS NOT NULL AND TRIM(approval_no) != ''
+          AND reconcile_status != 'CANCELED'
+        """
+    )
+    existing_corp_approvals = {str(r[0]).strip() for r in cursor.fetchall() if r[0]}
+
+    confirmed_corp_cards: set[str] = set()
+    for o in orders:
+        c_num = str(o.get("카드번호") or "").strip()
+        if not c_num:
+            continue
+        probe = f"{o.get('카드사') or ''} {c_num} {o.get('결제수단') or ''}".strip()
+        t4 = _extract_hint_card_last4(probe)
+        b6 = _extract_hint_card_bin6(probe)
+        if t4 and is_blocked_personal_card_code(t4, archive_dir=archive_dir):
+            continue
+        if b6 and any(b6.startswith(p) for p in _TOSS_PERSONAL_CARD_BIN6_PREFIXES):
+            continue
+        app_no = str(o.get("승인번호") or "").strip()
+        if (
+            (t4 and match_registered_corp_card_code(t4, archive_dir=archive_dir))
+            or (app_no and app_no in existing_corp_approvals)
+            or _has_corporate_card_text_evidence(probe)
+        ):
+            confirmed_corp_cards.add(c_num)
+
+    kept: List[Dict[str, Any]] = []
+    skipped_personal = 0
+    for o in orders:
+        own = classify_email_card_ownership(
+            o,
+            cursor=cursor,
+            confirmed_corp_card_numbers=confirmed_corp_cards,
+            existing_corp_approvals=existing_corp_approvals,
+            archive_dir=archive_dir,
+        )
+        if not own["is_corporate"]:
+            skipped_personal += 1
+            continue
+        enriched = dict(o)
+        if own["confirmed_corp_evidence"]:
+            enriched["법인카드확정여부"] = True
+        if own.get("card_last4") and own["card_last4"] != "0000":
+            enriched["결제카드코드"] = own["card_last4"]
+        kept.append(enriched)
+    return kept, skipped_personal
+
+
 def sync_imap_order_emails(
     cursor: sqlite3.Cursor,
     archive_dir: Optional[Path] = None,
@@ -2466,6 +3031,11 @@ def sync_imap_order_emails(
         not force_rescan
         and bool(processed_ids)
         and int(cfg.get("coupang_parser_version") or 0) < 2
+    )
+    need_card_rescan = (
+        not force_rescan
+        and bool(processed_ids)
+        and int(cfg.get("email_parser_version") or 0) < 3
     )
 
     if account_id:
@@ -2565,15 +3135,21 @@ def sync_imap_order_emails(
                             typ_r, data_r = imap.search(None, f"(SINCE {recent_since_dt})")
                         if typ_r == "OK" and data_r and data_r[0]:
                             always_rescan_nums = set(data_r[0].split())
-                    if need_coupang_rescan and use_uid:
-                        try:
-                            typ_cp, data_cp = imap.uid(
-                                "SEARCH", None, "FROM", '"coupang"', "SINCE", since_dt
-                            )
-                            if typ_cp == "OK" and data_cp and data_cp[0]:
-                                always_rescan_nums.update(data_cp[0].split())
-                        except Exception:
-                            pass
+                    if (need_coupang_rescan or need_card_rescan) and use_uid:
+                        rescan_senders = (
+                            ('"coupang"', '"naverpay"', '"navercorp"', '"inicis"', '"kcp"', '"easypay"')
+                            if need_card_rescan
+                            else ('"coupang"',)
+                        )
+                        for s_kw in rescan_senders:
+                            try:
+                                typ_cp, data_cp = imap.uid(
+                                    "SEARCH", None, "FROM", s_kw, "SINCE", since_dt
+                                )
+                                if typ_cp == "OK" and data_cp and data_cp[0]:
+                                    always_rescan_nums.update(data_cp[0].split())
+                            except Exception:
+                                pass
 
                     recent_nums = (
                         list(reversed(msg_nums[-max_messages:]))
@@ -2723,7 +3299,7 @@ def sync_imap_order_emails(
                                 new_processed.append(m_id)
                                 new_processed.append(u_id)
 
-                # Rescue Coupang order emails from Promotion/Smart folders (e.g. Naver Smart Mailboxes)
+                # Rescue payment/order emails (Coupang, NaverPay, Toss, PGs, Card Issuers) from Promotion folders
                 if use_uid and not any(
                     "all mail" in b.lower() or "전체보관함" in _decode_imap_utf7(b)
                     for b in mailboxes
@@ -2733,9 +3309,7 @@ def sync_imap_order_emails(
                         if imap.select(_quote_imap_mailbox(pmbox), readonly=True)[0] != "OK":
                             continue
                         try:
-                            typ_pm, data_pm = imap.uid(
-                                "SEARCH", None, "FROM", '"coupang"', "SINCE", since_dt
-                            )
+                            typ_pm, data_pm = imap.uid("SEARCH", None, "SINCE", since_dt)
                         except Exception:
                             continue
                         pm_uids = (
@@ -2746,15 +3320,52 @@ def sync_imap_order_emails(
                         if not pm_uids:
                             continue
                         pm_prefix = f"{user}:{pmbox}:uid:"
-                        pm_pending = [
+                        pm_unchecked = [
                             u
                             for u in reversed(pm_uids)
                             if force_rescan
                             or need_coupang_rescan
+                            or need_card_rescan
                             or f"{pm_prefix}{u.decode('ascii', errors='ignore')}" not in processed_ids
                         ]
-                        for b_start in range(0, len(pm_pending), 25):
-                            chunk_u = pm_pending[b_start : b_start + 25]
+                        pm_cand_uids: List[bytes] = []
+                        for b_start in range(0, len(pm_unchecked), 200):
+                            chunk_h = pm_unchecked[b_start : b_start + 200]
+                            acc_pages += 1
+                            total_scrolled_pages += 1
+                            typ_ph, ph_data = imap.uid(
+                                "FETCH",
+                                b",".join(chunk_h),
+                                "(UID BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE MESSAGE-ID)])",
+                            )
+                            if typ_ph != "OK" or not ph_data:
+                                continue
+                            for idx_ph, ph_item in enumerate(ph_data):
+                                if not (
+                                    isinstance(ph_item, tuple)
+                                    and len(ph_item) >= 2
+                                    and isinstance(ph_item[1], bytes)
+                                ):
+                                    continue
+                                u_tok_h = _extract_fetch_msg_token(ph_data, idx_ph, True, chunk_h[0])
+                                u_key_h = f"{pm_prefix}{u_tok_h.decode('ascii', errors='ignore')}"
+                                h_msg = email.message_from_bytes(ph_item[1])
+                                p_subj = _decode_mime_header(h_msg.get("Subject"))
+                                p_snd = _decode_mime_header(h_msg.get("From"))
+                                p_mid = str(h_msg.get("Message-ID") or "").strip()
+                                m_key_h = f"{user}:{p_mid}" if p_mid else u_key_h
+                                if m_key_h in seen_acc_msg_keys:
+                                    new_processed.append(u_key_h)
+                                    continue
+                                if _is_promo_payment_rescue_candidate(p_subj, p_snd):
+                                    pm_cand_uids.append(u_tok_h)
+                                else:
+                                    seen_acc_msg_keys.add(m_key_h)
+                                    new_processed.append(m_key_h)
+                                    new_processed.append(u_key_h)
+
+                        for b_start in range(0, len(pm_cand_uids), 25):
+                            chunk_u = pm_cand_uids[b_start : b_start + 25]
                             acc_pages += 1
                             total_scrolled_pages += 1
                             typ_pb, pb_data = imap.uid(
@@ -2781,7 +3392,27 @@ def sync_imap_order_emails(
                                     new_processed.append(u_key)
                                     continue
                                 seen_acc_msg_keys.add(m_key)
-                                if not _IGNORE_EMAIL_SUBJECT_RE.search(parts_p["subject"]):
+                                if include_toss_scroll and is_toss_payments_email(
+                                    parts_p["sender"],
+                                    parts_p["subject"],
+                                    parts_p["body_html"],
+                                    parts_p["body_text"],
+                                ):
+                                    p_toss = parse_toss_payments_email(
+                                        subject=parts_p["subject"],
+                                        sender=parts_p["sender"],
+                                        date_str=parts_p["date_str"],
+                                        body_text=parts_p["body_text"],
+                                        body_html=parts_p["body_html"],
+                                    )
+                                    if p_toss:
+                                        p_toss["recipient_email"] = recipient_addr
+                                        acc_toss_records.append(p_toss)
+                                        if p_toss.get("event_type") == "PAYMENT":
+                                            acc_scanned += 1
+                                elif _CANCELED_EMAIL_SUBJECT_RE.search(parts_p["subject"]):
+                                    canceled_apps.update(_extract_cancel_approval_nos_from_eml(p_item[1]))
+                                elif not _IGNORE_EMAIL_SUBJECT_RE.search(parts_p["subject"]):
                                     ext_p = extract_orders_from_email_content(
                                         subject=parts_p["subject"],
                                         sender=parts_p["sender"],
@@ -2926,14 +3557,22 @@ def sync_imap_order_emails(
         merged_orders = [
             o for o in merged_orders if str(o.get("승인번호") or "").strip() not in canceled_apps
         ]
+    corp_orders, pre_skipped_personal = _annotate_and_filter_corporate_orders(
+        cursor, merged_orders, archive_dir=archive_dir
+    )
 
     latest_stmt_dt = _latest_card_statement_date(cursor)
     rec_res = reconcile_scraped_ecommerce_orders(
         cursor,
-        raw_content=json.dumps(merged_orders, ensure_ascii=False),
+        raw_content=json.dumps(corp_orders, ensure_ascii=False),
         archive_dir=archive_dir,
-        orders_list=merged_orders,
+        orders_list=corp_orders,
         auto_create_after_date=latest_stmt_dt,
+    )
+    total_skipped_personal = (
+        int(toss_summary.get("skipped_personal_count") or 0)
+        + pre_skipped_personal
+        + int(rec_res.get("skipped_personal_count") or 0)
     )
 
     # 3. Combine unique reconciled transaction counts across Toss + general e-commerce pipelines
@@ -2994,10 +3633,9 @@ def sync_imap_order_emails(
             f"주문메일 {total_scanned_emails}통 분석 · 주문 {total_parsed_orders}건 확인 · "
             f"전표 {matched}건 거래명세서 반영 완료"
         )
-    if raw_toss_records:
+    if raw_toss_records or total_skipped_personal > 0:
         summary_msg += (
-            f" [토스 법인카드 {toss_summary['corp_total_count']}건 반영 · "
-            f"개인카드 {toss_summary['skipped_personal_count']}건 제외]"
+            f" [법인카드 {matched}건 반영 · 개인카드 {total_skipped_personal}건 제외]"
         )
     if error_messages:
         summary_msg += f" (일부 계정 오류 {len(error_messages)}건)"
@@ -3012,6 +3650,7 @@ def sync_imap_order_emails(
             "recent_matched_items": merged_history,
             "processed_ids": new_processed,
             "coupang_parser_version": 2,
+            "email_parser_version": 3,
         },
         archive_dir=archive_dir,
     )
@@ -3027,6 +3666,7 @@ def sync_imap_order_emails(
         "matched_count": matched,
         "created_count": created_cnt,
         "newly_stated_count": newly_stated_cnt,
+        "skipped_personal_count": total_skipped_personal,
         "created_tx_ids": combined_created_ids,
         "newly_stated_tx_ids": combined_newly_stated_ids,
         "updated_tx_ids": combined_updated_ids,
@@ -4612,5 +5252,467 @@ def scroll_imap_coupang_emails(
         "newly_stated_count": newly_cnt,
         "updated_tx_ids": rec_res.get("updated_tx_ids") or [],
         "items": matched_items,
+        "account_results": account_results,
+    }
+
+
+def _header_matches_scroll_portal(subject: str, sender: str, portal_mode: str, is_promo: bool) -> bool:
+    """Return True if an email header matches the requested corporate card scroll filter."""
+    if is_promo and not _is_promo_payment_rescue_candidate(subject, sender):
+        return False
+    if not is_promo and not is_card_payment_related_email_header(subject, sender):
+        return False
+
+    comb = f"{sender} {subject}".lower()
+    if portal_mode == "NAVERPAY":
+        return any(k in comb for k in ("네이버페이", "naverpay", "navercorp", "네이버파이낸셜", "네이버"))
+    if portal_mode == "TOSS":
+        return is_toss_payments_email(sender, subject)
+    if portal_mode == "COUPANG":
+        return any(
+            k in comb for k in ("쿠팡", "coupang", "쿠페이", "coupay", "kcp", "easypay", "inicis", "nice")
+        )
+    if portal_mode == "CARD_PG":
+        return not any(k in comb for k in ("쿠팡", "coupang", "토스페이먼츠", "tosspayments"))
+    return True
+
+
+def scroll_imap_corporate_card_emails(
+    cursor: sqlite3.Cursor,
+    archive_dir: Optional[Path] = None,
+    account_id: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    portal_filter: str = "ALL",
+    page_size: int = 50,
+    max_pages: int = 80,
+    verify_receipt_slip: bool = True,
+    auto_create_corp_tx: bool = True,
+) -> Dict[str, Any]:
+    """Unified corporate card email scroller across NaverPay, Toss, Coupang, PGs & Card Issuers."""
+    portal_mode = str(portal_filter or "ALL").strip().upper()
+    if portal_mode == "TOSS":
+        return scroll_imap_toss_payments_emails(
+            cursor,
+            archive_dir=archive_dir,
+            account_id=account_id,
+            start_date=start_date,
+            end_date=end_date,
+            page_size=page_size,
+            max_pages=max_pages,
+            verify_receipt_slip=verify_receipt_slip,
+            auto_create_corp_tx=auto_create_corp_tx,
+        )
+
+    cfg = load_email_watcher_config(archive_dir)
+    accounts: List[Dict[str, Any]] = list(cfg.get("accounts") or [])
+    targets = (
+        [a for a in accounts if a.get("account_id") == account_id]
+        if account_id
+        else [a for a in accounts if a.get("enabled", True)]
+    )
+    valid_targets = [
+        a
+        for a in targets
+        if str(a.get("imap_host") or "").strip()
+        and str(a.get("email_address") or "").strip()
+        and str(a.get("app_password") or "").strip()
+    ]
+    if not valid_targets:
+        return {
+            "status": "not_configured",
+            "message": "활성화된 이메일 계정(주소 및 IMAP 앱 비밀번호)을 먼저 등록해 주세요.",
+            "portal_filter": portal_mode,
+            "scrolled_pages": 0,
+            "scanned_messages": 0,
+            "parsed_total_count": 0,
+            "parsed_toss_count": 0,
+            "parsed_naverpay_count": 0,
+            "parsed_coupang_count": 0,
+            "parsed_other_count": 0,
+            "corp_total_count": 0,
+            "corp_matched_existing_count": 0,
+            "corp_created_count": 0,
+            "skipped_personal_count": 0,
+            "skipped_canceled_count": 0,
+            "items": [],
+            "account_results": [],
+        }
+
+    eff_page_size = max(10, min(200, int(page_size or 50)))
+    eff_max_pages = max(1, min(300, int(max_pages or 80)))
+    max_body_candidates = eff_page_size * eff_max_pages
+    norm_start = _normalize_datetime_str(start_date)[:10] if start_date else ""
+    norm_end = _normalize_datetime_str(end_date)[:10] if end_date else ""
+
+    total_pages = 0
+    total_scanned_msgs = 0
+    seen_msg_keys: set[str] = set()
+    raw_toss_records: List[Dict[str, Any]] = []
+    extracted_orders: List[Dict[str, Any]] = []
+    canceled_apps: set[str] = set()
+    account_results: List[Dict[str, Any]] = []
+    error_messages: List[str] = []
+    success_accounts = 0
+
+    for acc in valid_targets:
+        aid = str(acc["account_id"])
+        host = str(acc["imap_host"]).strip()
+        port = int(acc.get("imap_port") or 993)
+        user = str(acc["email_address"]).strip()
+        recipient_addr = _resolve_account_email_address(acc)
+        password = str(acc["app_password"]).strip()
+        conf_mbox = str(acc.get("mailbox") or "INBOX").strip() or "INBOX"
+        acc_pages = 0
+        acc_msgs = 0
+        acc_parsed = 0
+
+        try:
+            imap = imaplib.IMAP4_SSL(host, port, timeout=30.0)
+            try:
+                imap.login(user, password)
+                use_uid = hasattr(imap, "uid")
+                primary_boxes = _discover_imap_scroll_mailboxes(imap, conf_mbox)
+                promo_set: set[str] = set()
+                mailboxes = list(primary_boxes)
+                if not any(
+                    "all mail" in b.lower() or "전체보관함" in _decode_imap_utf7(b)
+                    for b in primary_boxes
+                ):
+                    for pb in _discover_imap_promotion_mailboxes(imap, exclude=primary_boxes):
+                        if pb not in mailboxes:
+                            mailboxes.append(pb)
+                            promo_set.add(pb)
+
+                for mbox in mailboxes:
+                    if imap.select(_quote_imap_mailbox(mbox), readonly=True)[0] != "OK":
+                        continue
+                    is_promo_box = mbox in promo_set
+
+                    search_tokens: List[str] = []
+                    if len(norm_start) == 10:
+                        search_tokens.extend(["SINCE", _format_imap_date_token(norm_start, 0)])
+                    if len(norm_end) == 10:
+                        search_tokens.extend(["BEFORE", _format_imap_date_token(norm_end, 1)])
+                    if not search_tokens:
+                        search_tokens = ["ALL"]
+
+                    if use_uid:
+                        typ_s, data_s = imap.uid("SEARCH", None, *search_tokens)
+                    else:
+                        crit_str = f"({' '.join(search_tokens)})" if len(search_tokens) > 1 else search_tokens[0]
+                        typ_s, data_s = imap.search(None, crit_str)
+                    uids = data_s[0].split() if (typ_s == "OK" and data_s and data_s[0]) else []
+                    if not uids:
+                        continue
+
+                    rev_uids = list(reversed(uids))
+                    matched_body_uids: List[bytes] = []
+                    hdr_q = (
+                        "(UID BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE MESSAGE-ID)])"
+                        if use_uid
+                        else "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE MESSAGE-ID)])"
+                    )
+                    for h_start in range(0, len(rev_uids), 200):
+                        if len(matched_body_uids) >= max_body_candidates:
+                            break
+                        h_chunk = rev_uids[h_start : h_start + 200]
+                        acc_pages += 1
+                        total_pages += 1
+                        if use_uid:
+                            typ_h, hdr_data = imap.uid("FETCH", b",".join(h_chunk), hdr_q)
+                        else:
+                            typ_h, hdr_data = imap.fetch(b",".join(h_chunk), hdr_q)
+                        if typ_h != "OK" or not hdr_data:
+                            continue
+                        for idx_h, h_item in enumerate(hdr_data):
+                            if not (
+                                isinstance(h_item, tuple)
+                                and len(h_item) >= 2
+                                and isinstance(h_item[1], bytes)
+                            ):
+                                continue
+                            tok_b = _extract_fetch_msg_token(hdr_data, idx_h, use_uid, h_chunk[0])
+                            h_msg = email.message_from_bytes(h_item[1])
+                            subj = _decode_mime_header(h_msg.get("Subject"))
+                            snd = _decode_mime_header(h_msg.get("From"))
+                            raw_mid = str(h_msg.get("Message-ID") or "").strip()
+                            dedup_h = f"{user}:{raw_mid}" if raw_mid else f"{user}:{mbox}:{tok_b!r}"
+                            if dedup_h in seen_msg_keys:
+                                continue
+                            if _header_matches_scroll_portal(subj, snd, portal_mode, is_promo_box):
+                                matched_body_uids.append(tok_b)
+
+                    for b_start in range(0, len(matched_body_uids), eff_page_size):
+                        batch_u = matched_body_uids[b_start : b_start + eff_page_size]
+                        acc_pages += 1
+                        total_pages += 1
+                        if use_uid:
+                            typ_f, fetch_data = imap.uid("FETCH", b",".join(batch_u), "(UID BODY.PEEK[])")
+                        else:
+                            typ_f, fetch_data = imap.fetch(b",".join(batch_u), "(BODY.PEEK[])")
+                        if typ_f != "OK" or not fetch_data:
+                            continue
+                        for f_item in fetch_data:
+                            if not (
+                                isinstance(f_item, tuple)
+                                and len(f_item) >= 2
+                                and isinstance(f_item[1], bytes)
+                            ):
+                                continue
+                            raw_eml = f_item[1]
+                            if not raw_eml:
+                                continue
+                            parts = _extract_eml_parts(raw_eml)
+                            dedup_k = (
+                                f"{user}:{parts['message_id']}"
+                                if parts["message_id"]
+                                else f"{user}:{hashlib.sha1(raw_eml[:2048]).hexdigest()}"
+                            )
+                            if dedup_k in seen_msg_keys:
+                                continue
+                            seen_msg_keys.add(dedup_k)
+                            acc_msgs += 1
+                            total_scanned_msgs += 1
+
+                            if is_toss_payments_email(
+                                parts["sender"],
+                                parts["subject"],
+                                parts["body_html"],
+                                parts["body_text"],
+                            ):
+                                if portal_mode not in ("ALL", "TOSS"):
+                                    continue
+                                p_toss = parse_toss_payments_email(
+                                    subject=parts["subject"],
+                                    sender=parts["sender"],
+                                    date_str=parts["date_str"],
+                                    body_text=parts["body_text"],
+                                    body_html=parts["body_html"],
+                                )
+                                if p_toss:
+                                    p_toss["recipient_email"] = recipient_addr
+                                    raw_toss_records.append(p_toss)
+                                    acc_parsed += 1
+                                continue
+
+                            if _CANCELED_EMAIL_SUBJECT_RE.search(parts["subject"]):
+                                canceled_apps.update(_extract_cancel_approval_nos_from_eml(raw_eml))
+                                continue
+
+                            ords = extract_orders_from_email_content(
+                                subject=parts["subject"],
+                                sender=parts["sender"],
+                                date_str=parts["date_str"],
+                                body_text=parts["body_text"],
+                                body_html=parts["body_html"],
+                            )
+                            for o in ords:
+                                dt_o = str(o.get("주문일자") or "")[:10]
+                                if len(norm_start) == 10 and dt_o and dt_o < norm_start:
+                                    continue
+                                if len(norm_end) == 10 and dt_o and dt_o > norm_end:
+                                    continue
+                                if portal_mode == "COUPANG" and not any(
+                                    k in f"{o.get('발신처', '')} {o.get('상점명', '')}".lower()
+                                    for k in ("쿠팡", "coupang", "쿠페이", "coupay")
+                                ):
+                                    continue
+                                if (
+                                    portal_mode == "NAVERPAY"
+                                    and "네이버" not in f"{o.get('발신처', '')} {parts['sender']}"
+                                ):
+                                    continue
+                                extracted_orders.append(o)
+                                acc_parsed += 1
+            finally:
+                try:
+                    imap.logout()
+                except Exception:
+                    pass
+
+            success_accounts += 1
+            account_results.append(
+                {
+                    "account_id": aid,
+                    "email_address": user,
+                    "status": "scrolled",
+                    "scrolled_pages": acc_pages,
+                    "scanned_messages": acc_msgs,
+                    "parsed_count": acc_parsed,
+                }
+            )
+        except Exception as exc:
+            err_str = f"{user} ({host}:{port}) 스크롤 실패: {exc}"
+            error_messages.append(err_str)
+            account_results.append(
+                {
+                    "account_id": aid,
+                    "email_address": user,
+                    "status": "error",
+                    "scrolled_pages": acc_pages,
+                    "scanned_messages": acc_msgs,
+                    "parsed_count": acc_parsed,
+                    "message": err_str,
+                }
+            )
+
+    if success_accounts == 0 and error_messages:
+        return {
+            "status": "error",
+            "message": " / ".join(error_messages),
+            "portal_filter": portal_mode,
+            "scrolled_pages": total_pages,
+            "scanned_messages": total_scanned_msgs,
+            "parsed_total_count": 0,
+            "parsed_toss_count": 0,
+            "parsed_naverpay_count": 0,
+            "parsed_coupang_count": 0,
+            "parsed_other_count": 0,
+            "corp_total_count": 0,
+            "corp_matched_existing_count": 0,
+            "corp_created_count": 0,
+            "skipped_personal_count": 0,
+            "skipped_canceled_count": 0,
+            "items": [],
+            "account_results": account_results,
+        }
+
+    # 1. Process Toss Payments records (SalesSlip metadata + corp/personal separation)
+    toss_res: Dict[str, Any] = {
+        "parsed_toss_count": 0,
+        "verified_slips_count": 0,
+        "corp_total_count": 0,
+        "corp_matched_existing_count": 0,
+        "corp_created_count": 0,
+        "skipped_personal_count": 0,
+        "skipped_canceled_count": 0,
+        "created_tx_ids": [],
+        "newly_stated_tx_ids": [],
+        "updated_tx_ids": [],
+        "items": [],
+    }
+    if raw_toss_records:
+        toss_res = _process_toss_records_batch(
+            cursor,
+            raw_toss_records,
+            norm_start=norm_start,
+            norm_end=norm_end,
+            verify_receipt_slip=verify_receipt_slip,
+            auto_create_corp_tx=auto_create_corp_tx,
+            archive_dir=archive_dir,
+        )
+
+    # 2. Process NaverPay / Coupang / PG / Card Issuer payment emails via body corporate card inspection
+    merged_orders = _merge_companion_email_orders(extracted_orders)
+    skipped_canceled_gen = 0
+    if canceled_apps:
+        placeholders = ",".join("?" for _ in canceled_apps)
+        cursor.execute(
+            f"""
+            UPDATE card_transactions
+            SET reconcile_status = 'CANCELED', updated_at = CURRENT_TIMESTAMP
+            WHERE reconcile_status = 'EMAIL_ORDER'
+              AND approval_no IN ({placeholders})
+            """,
+            tuple(canceled_apps),
+        )
+        before_c = len(merged_orders)
+        merged_orders = [
+            o for o in merged_orders if str(o.get("승인번호") or "").strip() not in canceled_apps
+        ]
+        skipped_canceled_gen = before_c - len(merged_orders)
+
+    np_cnt = sum(1 for o in merged_orders if "네이버" in str(o.get("발신처") or ""))
+    cp_cnt = sum(1 for o in merged_orders if "쿠팡" in str(o.get("발신처") or ""))
+    other_cnt = max(0, len(merged_orders) - np_cnt - cp_cnt)
+
+    corp_orders, pre_skipped_personal = _annotate_and_filter_corporate_orders(
+        cursor, merged_orders, archive_dir=archive_dir
+    )
+    latest_stmt_dt = _latest_card_statement_date(cursor)
+    rec_res = reconcile_scraped_ecommerce_orders(
+        cursor,
+        raw_content=json.dumps(corp_orders, ensure_ascii=False),
+        archive_dir=archive_dir,
+        orders_list=corp_orders,
+        auto_create_after_date=latest_stmt_dt if auto_create_corp_tx else None,
+        allow_corp_auto_create=auto_create_corp_tx,
+    )
+    if rec_res.get("matched_items"):
+        generate_electronic_slips_for_ledger(cursor, archive_dir=archive_dir)
+
+    combined_items = _merge_recent_matched_items(
+        toss_res.get("items") or [],
+        rec_res.get("matched_items") or [],
+    )
+    if combined_items:
+        merged_hist = _merge_recent_matched_items(
+            cfg.get("recent_matched_items") or [],
+            combined_items,
+        )
+        save_email_watcher_config(
+            {
+                "recent_matched_items": merged_hist,
+                "coupang_parser_version": 2,
+                "email_parser_version": 3,
+            },
+            archive_dir=archive_dir,
+        )
+
+    gen_matched_total = int(rec_res.get("matched_count") or 0)
+    gen_created = int(rec_res.get("created_count") or 0)
+    gen_matched_existing = max(0, gen_matched_total - gen_created)
+
+    corp_matched_existing = int(toss_res["corp_matched_existing_count"]) + gen_matched_existing
+    corp_created = int(toss_res["corp_created_count"]) + gen_created
+    corp_total = len(combined_items)
+    skipped_personal = (
+        int(toss_res["skipped_personal_count"])
+        + pre_skipped_personal
+        + int(rec_res.get("skipped_personal_count") or 0)
+    )
+    skipped_canceled = int(toss_res["skipped_canceled_count"]) + skipped_canceled_gen
+    toss_pay_cnt = sum(1 for r in raw_toss_records if r.get("event_type") == "PAYMENT")
+    parsed_total = toss_pay_cnt + len(merged_orders)
+
+    breakdown_parts: List[str] = []
+    if np_cnt > 0:
+        breakdown_parts.append(f"네이버페이 {np_cnt}건")
+    if toss_pay_cnt > 0:
+        breakdown_parts.append(f"토스 {toss_pay_cnt}건")
+    if cp_cnt > 0:
+        breakdown_parts.append(f"쿠팡 {cp_cnt}건")
+    if other_cnt > 0:
+        breakdown_parts.append(f"PG·카드결제 {other_cnt}건")
+    bd_note = f" ({' · '.join(breakdown_parts)})" if breakdown_parts else ""
+
+    summary_msg = (
+        f"법인카드 결제메일 통합 스크롤링 완료 ({total_pages}페이지 · 결제관련 메일 {total_scanned_msgs}통 본문확인 · "
+        f"결제내역 {parsed_total}건 분석{bd_note}): "
+        f"법인카드 {corp_total}건 반영 (기존매칭 {corp_matched_existing}건 · 신규생성 {corp_created}건), "
+        f"개인카드·미확인 {skipped_personal}건 제외"
+    )
+    if skipped_canceled > 0:
+        summary_msg += f", 취소 {skipped_canceled}건 제외"
+
+    return {
+        "status": "scrolled",
+        "portal_filter": portal_mode,
+        "message": summary_msg,
+        "scrolled_pages": total_pages,
+        "scanned_messages": total_scanned_msgs,
+        "parsed_total_count": parsed_total,
+        "parsed_toss_count": len(raw_toss_records),
+        "parsed_naverpay_count": np_cnt,
+        "parsed_coupang_count": cp_cnt,
+        "parsed_other_count": other_cnt,
+        "verified_slips_count": int(toss_res["verified_slips_count"]),
+        "corp_total_count": corp_total,
+        "corp_matched_existing_count": corp_matched_existing,
+        "corp_created_count": corp_created,
+        "skipped_personal_count": skipped_personal,
+        "skipped_canceled_count": skipped_canceled,
+        "items": combined_items,
         "account_results": account_results,
     }

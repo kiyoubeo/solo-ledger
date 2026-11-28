@@ -1644,6 +1644,9 @@ _ONLINE_OR_PG_MERCHANT_KEYWORDS = (
     "쿠팡",
     "쿠페이",
     "네이버",
+    "n페이",
+    "엔페이",
+    "naver",
     "카카오",
     "이니시스",
     "케이지이니시스",
@@ -1734,6 +1737,44 @@ _STALE_POLLUTED_MEMO_MARKERS = (
 )
 
 
+_CORP_CARD_HINT_KEYWORD_RE = re.compile(
+    r"(법인카드|기업카드|사업자카드|법인승인|기업승인|"
+    r"(?:우리비씨|우리|국민|KB|신한|삼성|현대|롯데|하나|농협|NH|기업|IBK|비씨|BC)\s*법인)",
+    re.IGNORECASE,
+)
+
+_CORP_CARD_BIN6_PREFIXES = (
+    "910020",  # 우리비씨 기업/법인카드
+    "9430",    # BC 기업/법인카드 계열
+    "9411",    # 기업카드 계열
+)
+
+_PERSONAL_CARD_BIN6_PREFIXES = (
+    "940915",  # 롯데 개인카드
+    "950001",  # 우리 개인카드
+    "379183",  # 삼성 개인 AMEX
+)
+
+_PG_INTERMEDIARY_BIZ_NOS_SET = frozenset(
+    {
+        "1058765162",  # 쿠팡페이
+        "5248601528",  # 네이버파이낸셜
+        "4118601799",  # 토스페이먼츠
+        "2208155597",  # KG이니시스
+        "1138621083",  # NHN KCP
+        "1138521083",  # NHN KCP
+        "1048150311",  # 한국정보통신(이지페이)
+        "1168119948",  # 나이스페이먼츠
+        "2208115770",  # 나이스정보통신
+        "5278800696",  # 카카오페이
+        "1208197322",  # KSNET
+        "2178114493",  # 스마트로
+        "1148628575",  # 다날
+        "5638100723",  # NHN페이코
+    }
+)
+
+
 def _extract_hint_card_last4(hint: str) -> str:
     """Extract masked/last-4 card digits from a payment method hint, preferring 4-group card tails."""
     text = str(hint or "").strip()
@@ -1745,8 +1786,47 @@ def _extract_hint_card_last4(hint: str) -> str:
     )
     if m_masked:
         return m_masked.group(1)
-    m_digits = re.search(r"(?:[()\-\s]|^)(\d[\d*]{3})(?:[()\s]|$)", text)
+    m_contig = re.search(
+        r"(?<!\d)\d{6}[\dXx*]{5,6}((?=\S*\d)[\d*]{4})(?!\d)",
+        text,
+    )
+    if m_contig:
+        return m_contig.group(1)
+    m_digits = re.search(
+        r"(?:[()\[\]\-\s]|카드|법인|체크|^)(\d[\d*]{3})(?:[()\[\]\s]|님|승인|결제|일시불|$)",
+        text,
+    )
     return m_digits.group(1) if m_digits else ""
+
+
+def _extract_hint_card_bin6(hint: str) -> str:
+    """Extract 6-digit BIN prefix from a masked card number inside a payment hint if present."""
+    text = str(hint or "").strip()
+    if not text:
+        return ""
+    m_hyph = re.search(
+        r"(?<!\d)(\d{4})[-\s]+(\d{2})[\dXx*]{0,2}[-\s]+[\dXx*]{2,4}[-\s]+[\d*]{4}",
+        text,
+    )
+    if m_hyph:
+        return f"{m_hyph.group(1)}{m_hyph.group(2)}"
+    m_contig = re.search(r"(?<!\d)(\d{6})[\dXx*]{5,6}[\d*]{4}(?!\d)", text)
+    if m_contig:
+        return m_contig.group(1)
+    return ""
+
+
+def _has_corporate_card_text_evidence(hint: str) -> bool:
+    """Return True if a payment/card string contains corporate BIN or explicit corporate card terms."""
+    text = str(hint or "").strip()
+    if not text:
+        return False
+    bin6 = _extract_hint_card_bin6(text)
+    if bin6 and any(bin6.startswith(p) for p in _PERSONAL_CARD_BIN6_PREFIXES):
+        return False
+    if bin6 and any(bin6.startswith(p) for p in _CORP_CARD_BIN6_PREFIXES):
+        return True
+    return bool(_CORP_CARD_HINT_KEYWORD_RE.search(text))
 
 
 def _resolve_card_last4_from_issuer(
@@ -1979,17 +2059,21 @@ def _tx_candidate_passes_filter(
                 return False
 
     is_shop_match = bool(
-        norm_shop and norm_cand and (norm_shop in norm_cand or norm_cand in norm_shop)
+        len(norm_shop) >= 2
+        and len(norm_cand) >= 2
+        and (norm_shop in norm_cand or norm_cand in norm_shop)
     )
     if is_app_match or is_shop_match:
         return True
 
+    cand_biz = re.sub(r"\D", "", str(cand["biz_reg_no"] or ""))
     if is_coupang_order:
-        cand_biz = re.sub(r"\D", "", str(cand["biz_reg_no"] or ""))
         if cand_biz in ("1208800767", "1058765162"):
             return True
         return any(kw in cand_merch_low for kw in _COUPANG_ELIGIBLE_MERCHANT_KEYWORDS)
 
+    if cand_biz in _PG_INTERMEDIARY_BIZ_NOS_SET:
+        return True
     if any(kw in cand_merch_low for kw in _ONLINE_OR_PG_MERCHANT_KEYWORDS):
         return True
     if str(cand["reconcile_status"] or "") == "EMAIL_ORDER":
@@ -2056,6 +2140,7 @@ def reconcile_scraped_ecommerce_orders(
     orders_list: Optional[List[Dict[str, Any]]] = None,
     auto_create_after_date: Optional[str] = None,
     auto_create_all: bool = False,
+    allow_corp_auto_create: bool = True,
 ) -> Dict[str, Any]:
     """Match scraped Coupang / NaverPay / KakaoPay / PG order items against card transactions."""
     content = (raw_content or "").strip()
@@ -2065,6 +2150,7 @@ def reconcile_scraped_ecommerce_orders(
             "matched_count": 0,
             "created_count": 0,
             "newly_stated_count": 0,
+            "skipped_personal_count": 0,
             "created_tx_ids": [],
             "newly_stated_tx_ids": [],
             "updated_tx_ids": [],
@@ -2080,6 +2166,7 @@ def reconcile_scraped_ecommerce_orders(
     newly_stated_tx_ids: List[int] = []
     matched_items: List[Dict[str, Any]] = []
     used_tx_ids: set[int] = set()
+    skipped_personal_count = 0
 
     # Pre-parse and partition into primary orders vs split-shipment sub-item fallbacks
     parsed_entries: List[Dict[str, Any]] = []
@@ -2104,29 +2191,44 @@ def reconcile_scraped_ecommerce_orders(
 
         pay_method_str = str(row.get("결제수단") or "").strip()
         card_col_str = str(row.get("카드사") or row.get("결제기관") or "").strip()
+        card_no_str = str(row.get("카드번호") or "").strip()
         if (
-            re.search(r"쿠페이\s*머니|coupay\s*money", pay_method_str, re.I)
+            re.search(
+                r"쿠페이\s*머니|coupay\s*money|네이버페이\s*(?:포인트|머니)|카카오페이\s*머니|무통장|계좌이체",
+                pay_method_str,
+                re.I,
+            )
             and not card_col_str
+            and not card_no_str
         ):
+            skipped_personal_count += 1
             continue
 
         shop_name = str(row.get("상점명") or row.get("가맹점명") or "").strip()
         portal_hint = str(row.get("발신처") or "").strip()
         app_no = str(row.get("승인번호") or "").strip()
         order_no = str(row.get("주문번호") or "").strip()
-        card_hint = f"{card_col_str} {pay_method_str}".strip()
-        hint_last4 = _extract_hint_card_last4(card_hint)
+        card_hint = f"{card_col_str} {card_no_str} {pay_method_str}".strip()
+        explicit_c4 = str(row.get("결제카드코드") or "").strip()
+        hint_last4 = explicit_c4 or _extract_hint_card_last4(card_hint)
+        hint_bin6 = _extract_hint_card_bin6(card_hint)
         hint_issuer = _extract_card_issuer_canonical(card_hint)
-        if (
-            corp_only
-            and hint_last4
-            and is_blocked_personal_card_code(hint_last4, archive_dir=archive_dir)
-        ):
-            continue
+        if corp_only:
+            if hint_last4 and is_blocked_personal_card_code(hint_last4, archive_dir=archive_dir):
+                skipped_personal_count += 1
+                continue
+            if hint_bin6 and any(hint_bin6.startswith(p) for p in _PERSONAL_CARD_BIN6_PREFIXES):
+                skipped_personal_count += 1
+                continue
         matched_corp_c4 = (
             match_registered_corp_card_code(hint_last4, archive_dir=archive_dir)
             if hint_last4
             else None
+        )
+        is_confirmed_corp = bool(
+            row.get("법인카드확정여부")
+            or matched_corp_c4
+            or _has_corporate_card_text_evidence(card_hint)
         )
         clean_biz_no = clean_valid_biz_reg_no(
             str(row.get("사업자번호") or row.get("biz_reg_no") or "")
@@ -2155,8 +2257,10 @@ def reconcile_scraped_ecommerce_orders(
                 "order_no": order_no,
                 "card_hint": card_hint,
                 "hint_last4": hint_last4,
+                "hint_bin6": hint_bin6,
                 "hint_issuer": hint_issuer,
                 "matched_corp_c4": matched_corp_c4,
+                "is_confirmed_corp": is_confirmed_corp,
                 "clean_biz_no": clean_biz_no,
                 "mp_seller": mp_seller,
                 "norm_shop": norm_shop,
@@ -2276,7 +2380,9 @@ def reconcile_scraped_ecommerce_orders(
         shop_name = entry["shop_name"]
         app_no = entry["app_no"]
         card_hint = entry["card_hint"]
+        hint_last4 = entry["hint_last4"]
         matched_corp_c4 = entry["matched_corp_c4"]
+        is_confirmed_corp = entry["is_confirmed_corp"]
         clean_biz_no = entry["clean_biz_no"]
         mp_seller = entry["mp_seller"]
         norm_shop = entry["norm_shop"]
@@ -2290,11 +2396,15 @@ def reconcile_scraped_ecommerce_orders(
                 corp_only
                 and corp_policy.get("block_unmatched_email_orders", True)
                 and not auto_create_all
-                and not matched_corp_c4
+                and not is_confirmed_corp
             ):
+                nonlocal skipped_personal_count
+                skipped_personal_count += 1
                 return False
-            should_auto_create = auto_create_all or (
-                auto_create_after_date is not None and date_prefix > auto_create_after_date
+            should_auto_create = (
+                auto_create_all
+                or (allow_corp_auto_create and is_confirmed_corp)
+                or (auto_create_after_date is not None and date_prefix > auto_create_after_date)
             )
             if not should_auto_create:
                 return False
@@ -2320,12 +2430,38 @@ def reconcile_scraped_ecommerce_orders(
             inferred_merchant = _infer_merchant_for_email_order(cursor, row)
             if clean_biz_no:
                 _ensure_merchant_master(cursor, clean_biz_no, shop_name or inferred_merchant)
-            resolved_card = matched_corp_c4 or _resolve_card_last4_from_issuer(
-                cursor, card_hint, inferred_merchant
+            resolved_card = (
+                matched_corp_c4
+                or (hint_last4 if (is_confirmed_corp and len(hint_last4) == 4) else "")
+                or _resolve_card_last4_from_issuer(cursor, card_hint, inferred_merchant)
             )
-            if corp_only and not is_allowed_corporate_card(
+            if (
+                is_confirmed_corp
+                and not matched_corp_c4
+                and len(hint_last4) == 4
+                and hint_last4 != "0000"
+                and corp_policy.get("auto_register_on_statement_upload", True)
+            ):
+                issuer_map = {
+                    "우리": "WOORI",
+                    "국민": "KB",
+                    "신한": "SHINHAN",
+                    "하나": "HANA",
+                    "삼성": "SAMSUNG",
+                    "현대": "HYUNDAI",
+                    "롯데": "LOTTE",
+                    "농협": "NH",
+                    "기업": "IBK",
+                }
+                register_corp_card(
+                    card_last4=hint_last4,
+                    issuer=issuer_map.get(entry["hint_issuer"], "CORP"),
+                    archive_dir=archive_dir,
+                )
+            elif corp_only and not is_confirmed_corp and not is_allowed_corporate_card(
                 resolved_card, raw_text=card_hint, archive_dir=archive_dir
             ):
+                skipped_personal_count += 1
                 return False
             rule_eval = evaluate_tax_rules(cursor, inferred_merchant, clean_biz_no)
             sup_val, vat_val = calculate_supply_and_vat(amount, rule_eval["vat_deduction_type"])
@@ -2502,21 +2638,30 @@ def reconcile_scraped_ecommerce_orders(
         )
         updated_tx_ids.append(tx_id)
         tx_biz_raw = str(tx_row["biz_reg_no"] or "").strip()
+        tx_c4 = str(tx_row["card_last4"] or "0000")
         matched_items.append(
             {
                 "tx_id": tx_id,
+                "action": "CREATED" if is_newly_created else "MATCHED",
                 "transacted_at": str(tx_row["transacted_at"]),
-                "card_label": format_card_label(str(tx_row["card_last4"] or "0000")),
+                "card_last4": tx_c4,
+                "card_label": format_card_label(tx_c4, archive_dir=archive_dir),
+                "approval_no": str(tx_row["approval_no"] or app_no or ""),
+                "order_no": entry["order_no"],
+                "portal_source": entry["portal_hint"] or "카드결제",
                 "raw_merchant_name": str(tx_row["raw_merchant_name"]),
                 "biz_reg_no": format_biz_reg_no_display(tx_biz_raw) if tx_biz_raw else "",
                 "marketplace_seller": effective_mp_seller,
                 "item_name": stmt_res["item_name"],
                 "line_items_count": len(stmt_res.get("line_items") or []),
                 "total_amount": int(tx_row["total_amount"]),
+                "supply_value": int(tx_row["supply_value"]),
+                "vat_amount": int(tx_row["vat_amount"]),
                 "account_code": stmt_res["account_code"],
                 "account_name": stmt_res["account_name"],
                 "archived_file_name": stmt_res["archived_file_name"],
                 "is_created": is_newly_created,
+                "is_newly_stated": tx_id in newly_stated_tx_ids,
             }
         )
         return True
@@ -2655,6 +2800,7 @@ def reconcile_scraped_ecommerce_orders(
         "matched_count": len(dedup_updated),
         "created_count": len(created_tx_ids),
         "newly_stated_count": len(newly_stated_tx_ids),
+        "skipped_personal_count": skipped_personal_count,
         "created_tx_ids": created_tx_ids,
         "newly_stated_tx_ids": newly_stated_tx_ids,
         "updated_tx_ids": dedup_updated,

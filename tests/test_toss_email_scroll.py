@@ -17,8 +17,10 @@ from sololedger.email_watcher import (
     _discover_imap_scroll_mailboxes,
     _extract_eml_parts,
     _resolve_account_email_address,
+    classify_email_card_ownership,
     classify_toss_card_ownership,
     extract_orders_from_email_content,
+    is_card_payment_related_email_header,
     load_email_watcher_config,
     parse_raw_email_bytes_or_text,
     parse_toss_payments_email,
@@ -1793,6 +1795,338 @@ def test_coupang_ssr_dedup_discount_shipping_wow_and_offline_protection(
     conn_i.commit()
     conn_i.close()
     assert ing_again["created_orders"] == 0
+
+
+def test_unified_corporate_card_email_scroll_includes_naverpay_and_card_subjects(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Verify unified corporate card scrolling inspects NaverPay & card-subject bodies and filters personal cards."""
+    db_file = tmp_path / "unified_corp_scroll.db"
+    arch_dir = tmp_path / "archive"
+    arch_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("SOLOLEDGER_DB_PATH", str(db_file))
+    monkeypatch.setenv("SOLOLEDGER_ARCHIVE_DIR", str(arch_dir))
+
+    init_db(str(db_file))
+    save_corp_card_policy(
+        {
+            "corp_only_mode": True,
+            "strict_registered_only": True,
+            "block_unmatched_email_orders": True,
+            "auto_register_on_statement_upload": True,
+            "blocked_personal_cards": ["6534", "6*4*", "8508"],
+        },
+        archive_dir=arch_dir,
+    )
+    register_corp_card("1175", card_label="우리법인(1175)", issuer="WOORI", archive_dir=arch_dir)
+    save_email_watcher_config(
+        {
+            "provider": "NAVER",
+            "imap_host": "imap.naver.com",
+            "imap_port": 993,
+            "email_address": "corp-owner@naver.com",
+            "app_password": "dummy-password",
+            "enabled": True,
+        },
+        archive_dir=arch_dir,
+    )
+
+    # Verify card-payment subject header detector
+    assert is_card_payment_related_email_header(
+        "[네이버페이] 결제하신 내역을 안내해드립니다.", "naverpay@navercorp.com"
+    )
+    assert is_card_payment_related_email_header("[우리카드] 법인카드 이용내역 안내", "webmaster@wooricard.com")
+    assert is_card_payment_related_email_header("[신한카드] 신용카드 승인내역입니다.", "no-reply@shinhancard.com")
+    assert not is_card_payment_related_email_header("[광고] 봄맞이 카드 혜택 안내", "event@card.com")
+    assert not is_card_payment_related_email_header("[우리카드] 10월 이용대금명세서 안내", "bill@wooricard.com")
+
+    conn = get_connection(str(db_file))
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO merchants (biz_reg_no, merchant_name, tax_type_code, biz_status, is_pg_provider)
+        VALUES ('5248601528', '네이버파이낸셜(주)', 'GENERAL', 'ACTIVE', 1)
+        """
+    )
+    # Seed:
+    # 1) Existing corporate NaverPay transaction on 2026-08-10 (28,900 KRW) with no item memo yet
+    cur.execute(
+        """
+        INSERT INTO card_transactions (
+            card_last4, approval_no, transacted_at, raw_merchant_name, biz_reg_no,
+            total_amount, supply_value, vat_amount, account_code, account_name,
+            vat_deduction_type, reconcile_status
+        ) VALUES (
+            '1175', '88110022', '2026-08-10 15:20:00', '네이버파이낸셜(주)', '5248601528',
+            28900, 26273, 2627, '999', '미분류', 'DEDUCTIBLE', 'HOMETAX_VERIFIED'
+        )
+        """
+    )
+    existing_np_tx_id = int(cur.lastrowid)
+    # 2) Later statement row on 2026-11-20 so latest_card_statement_date == '2026-11-20'
+    cur.execute(
+        """
+        INSERT INTO card_transactions (
+            card_last4, approval_no, transacted_at, raw_merchant_name, biz_reg_no,
+            total_amount, supply_value, vat_amount, account_code, account_name,
+            vat_deduction_type, counterparty_info, reconcile_status
+        ) VALUES (
+            '1175', '99001122', '2026-11-20 09:00:00', '네이버파이낸셜(주)', '5248601528',
+            11000, 10000, 1000, '830', '소모품비', 'DEDUCTIBLE', '기존 소모품', 'HOMETAX_VERIFIED'
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    # EML A (INBOX): NaverPay order with 0원 point row + 적립 예정 포인트 + 카드간편결제(우리카드 1175) on 2026-09-14
+    # Even though 2026-09-14 < latest_stmt_dt (2026-11-20), body confirms registered corp card 1175 -> auto-created!
+    np_corp_order_html = (
+        "<html><body>"
+        "<p>고객님께서 네이버페이로 주문하신 내역입니다.</p>"
+        "<table><tr><th>주문번호</th><td>20260914998877</td></tr>"
+        "<tr><th>주문일자</th><td>2026.09.14</td></tr></table>"
+        "<h3>결제상세</h3>"
+        "<table>"
+        "<tr><td>주문금액</td><td>45,000원</td></tr>"
+        "<tr><td>네이버페이 포인트</td><td>0원</td></tr>"
+        "<tr><td>적립 예정 포인트</td><td>450원</td></tr>"
+        "<tr><td>카드간편결제 (우리카드 1175)</td><td>45,000원</td></tr>"
+        "<tr><td>승인번호</td><td>55443322</td></tr>"
+        "</table>"
+        "<h3>주문상품</h3>"
+        "<table>"
+        "<tr><td>산업용 레이저 거리측정기 50m</td><td>주문금액</td><td>45,000원</td>"
+        "<td>수량</td><td>1개</td><td>공구마트 | 사업자명 : 주식회사 공구마트</td></tr>"
+        "</table>"
+        "</body></html>"
+    )
+
+    # EML B (Promotion folder): NaverPay order without card digits, matching existing_np_tx_id (28,900 KRW, 2026-08-10)
+    np_ledger_match_html = (
+        "<html><body>"
+        "<p>고객님께서 네이버페이로 주문하신 내역입니다.</p>"
+        "<table><tr><th>주문일자</th><td>2026.08.10</td></tr></table>"
+        "<h3>결제상세</h3>"
+        "<table>"
+        "<tr><td>주문금액</td><td>28,900원</td></tr>"
+        "<tr><td>네이버페이 포인트</td><td>0원</td></tr>"
+        "<tr><td>신용카드 간편결제</td><td>28,900원</td></tr>"
+        "</table>"
+        "<h3>주문상품</h3>"
+        "<table>"
+        "<tr><td>도면 출력용 트레이싱지 A3 100매</td><td>주문금액</td><td>28,900원</td>"
+        "<td>수량</td><td>1</td><td>화방넷 | 사업자명 : (주)화방넷</td></tr>"
+        "</table>"
+        "</body></html>"
+    )
+
+    # EML C (INBOX): NaverPay personal card purchase (우리 개인카드 6534) -> must be excluded!
+    np_personal_html = (
+        "<html><body>"
+        "<table>"
+        "<tr><th>결제일시</th><td>2026.09.18 20:15:00</td></tr>"
+        "<tr><th>가맹점명</th><td>개인패션몰</td></tr>"
+        "<tr><th>상품명</th><td>캐주얼 자켓</td></tr>"
+        "<tr><th>결제수단</th><td>우리카드 (6534) 일시불</td></tr>"
+        "<tr><th>최종결제금액</th><td>89,000원</td></tr>"
+        "</table>"
+        "</body></html>"
+    )
+
+    # EML D (INBOX): Direct Card Issuer corporate card approval email without '상품명' row (BIN 910020)
+    card_issuer_corp_html = (
+        "<html><body>"
+        "<table>"
+        "<tr><th>이용일시</th><td>2026-10-03 14:22:10</td></tr>"
+        "<tr><th>이용카드</th><td>우리비씨 법인카드 9100-2003-****-901*</td></tr>"
+        "<tr><th>이용가맹점</th><td>대한철물건재</td></tr>"
+        "<tr><th>사업자번호</th><td>120-81-02922</td></tr>"
+        "<tr><th>이용금액</th><td>66,000원</td></tr>"
+        "<tr><th>승인번호</th><td>71727374</td></tr>"
+        "</table>"
+        "</body></html>"
+    )
+
+    # EML E (INBOX): Direct Card Issuer personal card approval email (롯데 6*4*) -> must be excluded!
+    card_issuer_pers_html = (
+        "<html><body>"
+        "<table>"
+        "<tr><th>이용일시</th><td>2026-10-04 19:10:00</td></tr>"
+        "<tr><th>이용카드</th><td>롯데카드 (6*4*)</td></tr>"
+        "<tr><th>이용가맹점</th><td>동네슈퍼</td></tr>"
+        "<tr><th>이용금액</th><td>15,200원</td></tr>"
+        "<tr><th>승인번호</th><td>91929394</td></tr>"
+        "</table>"
+        "</body></html>"
+    )
+
+    promo_folder = "&1QS4XLqowVg-"  # "프로모션"
+
+    class _FakeUnifiedImapServer:
+        def __init__(self) -> None:
+            self.current_box = "INBOX"
+            self.inbox_msgs: Dict[bytes, bytes] = {
+                b"1": _build_simple_eml_bytes(
+                    message_id="<np-corp-1@navercorp.com>",
+                    sender="네이버페이 <naverpay@navercorp.com>",
+                    subject="[네이버페이] 주문이 완료되었습니다.",
+                    date_rfc="Mon, 14 Sep 2026 11:20:00 +0900",
+                    body_text="네이버페이 주문 안내",
+                    body_html=np_corp_order_html,
+                ),
+                b"2": _build_simple_eml_bytes(
+                    message_id="<np-pers-2@navercorp.com>",
+                    sender="네이버페이 <naverpay@navercorp.com>",
+                    subject="[네이버페이] 결제하신 내역을 안내해드립니다.",
+                    date_rfc="Fri, 18 Sep 2026 20:15:05 +0900",
+                    body_text="네이버페이 결제 안내",
+                    body_html=np_personal_html,
+                ),
+                b"3": _build_simple_eml_bytes(
+                    message_id="<card-corp-3@wooricard.com>",
+                    sender="우리카드 <webmaster@wooricard.com>",
+                    subject="[우리카드] 법인카드 승인내역 안내",
+                    date_rfc="Sat, 03 Oct 2026 14:22:15 +0900",
+                    body_text="법인카드 승인 안내",
+                    body_html=card_issuer_corp_html,
+                ),
+                b"4": _build_simple_eml_bytes(
+                    message_id="<card-pers-4@lottecard.co.kr>",
+                    sender="롯데카드 <noreply@lottecard.co.kr>",
+                    subject="[롯데카드] 신용카드 승인내역 안내",
+                    date_rfc="Sun, 04 Oct 2026 19:10:05 +0900",
+                    body_text="신용카드 승인 안내",
+                    body_html=card_issuer_pers_html,
+                ),
+            }
+            self.promo_msgs: Dict[bytes, bytes] = {
+                b"10": _build_simple_eml_bytes(
+                    message_id="<np-promo-10@navercorp.com>",
+                    sender="네이버페이 <naverpayadmin_noreply@navercorp.com>",
+                    subject="[네이버페이] 주문이 완료되었습니다.",
+                    date_rfc="Mon, 10 Aug 2026 15:20:30 +0900",
+                    body_text="네이버페이 주문 안내",
+                    body_html=np_ledger_match_html,
+                ),
+                b"11": _build_simple_eml_bytes(
+                    message_id="<promo-ad-11@shop.com>",
+                    sender="쇼핑몰 <event@shop.com>",
+                    subject="지금 결제 시 할인 쿠폰 특가 이벤트 안내",
+                    date_rfc="Tue, 11 Aug 2026 10:00:00 +0900",
+                    body_text="특가 세일 상품명 : 미끼상품 결제금액 : 10,000원",
+                ),
+            }
+
+        def login(self, user: str, password: str) -> tuple[str, List[bytes]]:
+            return "OK", [b"Logged in"]
+
+        def list(self) -> tuple[str, List[bytes]]:
+            return (
+                "OK",
+                [
+                    b'(\\HasNoChildren) "/" "INBOX"',
+                    f'(\\HasNoChildren) "/" "{promo_folder}"'.encode("ascii"),
+                ],
+            )
+
+        def select(self, mailbox: str = "INBOX", readonly: bool = True) -> tuple[str, List[bytes]]:
+            self.current_box = mailbox.strip('"')
+            return "OK", [b"4"]
+
+        def uid(self, command: str, *args: Any) -> tuple[str, List[Any]]:
+            cmd = command.upper()
+            store = self.promo_msgs if self.current_box == promo_folder else self.inbox_msgs
+            if cmd == "SEARCH":
+                return "OK", [b" ".join(sorted(store.keys(), key=lambda x: int(x)))]
+            if cmd == "FETCH":
+                uid_csv = args[0]
+                out: List[Any] = []
+                for u in uid_csv.split(b","):
+                    raw = store.get(u.strip())
+                    if raw:
+                        out.append(
+                            (b"1 (UID " + u + b" RFC822 {" + str(len(raw)).encode() + b"})", raw)
+                        )
+                return "OK", out
+            return "BAD", []
+
+        def logout(self) -> tuple[str, List[bytes]]:
+            return "BYE", [b"Logout"]
+
+    fake_imap = _FakeUnifiedImapServer()
+    client = TestClient(app)
+
+    with patch("sololedger.email_watcher.imaplib.IMAP4_SSL", return_value=fake_imap):
+        # 1) Test NAVERPAY filter first
+        np_resp = client.post(
+            "/api/v1/scraper/email-scroll",
+            headers={"X-API-Key": settings.api_key},
+            json={"portal_filter": "NAVERPAY", "start_date": "2026-01-01", "end_date": "2026-12-31"},
+        )
+        assert np_resp.status_code == 200
+        np_json = np_resp.json()
+        assert np_json["status"] == "scrolled"
+        assert np_json["parsed_naverpay_count"] == 3
+        # 2 corporate NaverPay orders (1 existing match + 1 newly created) and 1 personal excluded!
+        assert np_json["corp_total_count"] == 2
+        assert np_json["corp_matched_existing_count"] == 1
+        assert np_json["corp_created_count"] == 1
+        assert np_json["skipped_personal_count"] == 1
+
+        # 2) Test ALL unified corporate card scroll (Woori BC corp EML D included, Lotte personal EML E skipped)
+        all_resp = client.post(
+            "/api/v1/scraper/email-scroll",
+            headers={"X-API-Key": settings.api_key},
+            json={"portal_filter": "ALL", "start_date": "2026-01-01", "end_date": "2026-12-31"},
+        )
+        assert all_resp.status_code == 200
+        all_json = all_resp.json()
+        assert all_json["status"] == "scrolled"
+        assert all_json["corp_total_count"] == 3
+        assert all_json["corp_created_count"] == 1  # Only EML D newly created on second run (idempotent!)
+        assert all_json["skipped_personal_count"] == 2  # EML B personal + EML E personal
+
+    # Verify DB state
+    conn_v = get_connection(str(db_file))
+    cur_v = conn_v.cursor()
+    cur_v.execute("SELECT * FROM card_transactions WHERE tx_id = ?", (existing_np_tx_id,))
+    matched_np = dict(cur_v.fetchone())
+    assert "도면 출력용 트레이싱지" in str(matched_np["counterparty_info"] or "")
+
+    cur_v.execute("SELECT * FROM card_transactions WHERE approval_no = '55443322'")
+    created_np = dict(cur_v.fetchone())
+    assert created_np["card_last4"] == "1175"
+    assert created_np["total_amount"] == 45000
+    assert "산업용 레이저 거리측정기" in str(created_np["counterparty_info"] or "")
+
+    cur_v.execute("SELECT * FROM card_transactions WHERE approval_no = '71727374'")
+    created_card = dict(cur_v.fetchone())
+    assert created_card["card_last4"] == "901*"
+    assert created_card["biz_reg_no"] == "1208102922"
+    assert created_card["total_amount"] == 66000
+
+    # Personal card approvals must NOT exist in card_transactions
+    cur_v.execute("SELECT COUNT(*) AS cnt FROM card_transactions WHERE approval_no = '91929394'")
+    assert int(cur_v.fetchone()["cnt"]) == 0
+    cur_v.execute("SELECT COUNT(*) AS cnt FROM card_transactions WHERE total_amount = 89000")
+    assert int(cur_v.fetchone()["cnt"]) == 0
+
+    # Direct unit check on classify_email_card_ownership
+    own_check = classify_email_card_ownership(
+        {"카드사": "롯데카드 (6*4*)", "결제금액": 15200, "주문일자": "2026-10-04"},
+        cursor=cur_v,
+        archive_dir=arch_dir,
+    )
+    assert own_check["is_corporate"] is False
+    conn_v.close()
+
+    # Verify unified button & portal selector in Dashboard HTML
+    dash_html = client.get("/dashboard", headers={"X-API-Key": settings.api_key}).text
+    assert "이메일 주문 · 법인카드 내역 통합 연동" in dash_html
+    assert "email-scroll-portal-filter" in dash_html
+    assert "/api/v1/scraper/email-scroll" in dash_html
+
 
 
 
