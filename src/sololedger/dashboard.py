@@ -1212,8 +1212,7 @@ def render_dashboard_html(
         account_options_html.append(f"<option value='{a_val}' {sel}>{a_opt_lbl}</option>")
     account_select_html = "".join(account_options_html)
 
-    quarter_options_html = ["<option value=''>-- 분기별 선택 --</option>"]
-    quarter_chips_list = []
+    quarter_options_html = ["<option value=''>-- 분기 선택 --</option>"]
     for qp in summary.get("quarterly_periods", []):
         q_val = f"{qp['start_date']}|{qp['end_date']}"
         q_lbl = html.escape(str(qp["label"]))
@@ -1225,22 +1224,7 @@ def render_dashboard_html(
         quarter_options_html.append(f"<option value='{q_val}' {q_sel}>{q_lbl}</option>")
     quarter_select_html = "".join(quarter_options_html)
 
-    for qp in sorted(summary.get("quarterly_periods", []), key=lambda x: str(x["yq"])):
-        q_val = f"{qp['start_date']}|{qp['end_date']}"
-        sq_lbl = html.escape(f"{qp['short_label']}({qp['tx_count']})")
-        is_q_active = (
-            summary["start_date"] == qp["start_date"]
-            and summary["end_date"] == qp["end_date"]
-        )
-        q_btn_cls = "" if is_q_active else "secondary"
-        quarter_chips_list.append(
-            f"<button class='{q_btn_cls}' style='padding:4px 9px; font-size:12px; margin:2px;' "
-            f"onclick=\"selectQuarterRange('{q_val}')\">{sq_lbl}</button>"
-        )
-    quarter_chips_html = "".join(quarter_chips_list)
-
-    month_options_html = ["<option value=''>-- 달별 선택 --</option>"]
-    month_chips_list = []
+    month_options_html = ["<option value=''>-- 월 선택 --</option>"]
     for mp in summary.get("monthly_periods", []):
         m_val = f"{mp['start_date']}|{mp['end_date']}"
         m_lbl = html.escape(str(mp["label"]))
@@ -1251,20 +1235,6 @@ def render_dashboard_html(
         m_sel = "selected" if is_active else ""
         month_options_html.append(f"<option value='{m_val}' {m_sel}>{m_lbl}</option>")
     month_select_html = "".join(month_options_html)
-
-    for mp in sorted(summary.get("monthly_periods", []), key=lambda x: str(x["ym"])):
-        m_val = f"{mp['start_date']}|{mp['end_date']}"
-        s_lbl = html.escape(f"{mp['short_label']}({mp['tx_count']})")
-        is_active = (
-            summary["start_date"] == mp["start_date"]
-            and summary["end_date"] == mp["end_date"]
-        )
-        btn_cls = "" if is_active else "secondary"
-        month_chips_list.append(
-            f"<button class='{btn_cls}' style='padding:4px 9px; font-size:12px; margin:2px;' "
-            f"onclick=\"selectMonthRange('{m_val}')\">{s_lbl}</button>"
-        )
-    month_chips_html = "".join(month_chips_list)
 
     card_breakdown_rows = []
     for cb in summary.get("card_breakdown", []):
@@ -1549,50 +1519,27 @@ def render_dashboard_html(
     corp_policy = summary.get("corp_card_policy") or load_corp_card_policy()
     corp_only_active = bool(corp_policy.get("corp_only_mode", False))
     reg_cards = corp_policy.get("registered_corp_cards", [])
-    corp_mode_badge_html = (
-        '<span class="badge env" style="background:#dbeafe; color:#1e40af;">🏢 법인카드 전용 모드</span>'
-        if corp_only_active
+    app_env_lower = str(summary.get("app_env") or "").strip().lower()
+    env_badge_html = (
+        '<span class="badge env" style="background:#fef3c7; color:#92400e;">TEST MODE</span>'
+        if app_env_lower == "test"
         else ""
     )
     if corp_only_active:
-        if reg_cards:
-            reg_badges = " ".join(
-                f"<span class='badge card' style='background:#0f766e; color:#fff;'>"
-                f"{html.escape(str(c.get('label') or c.get('card_last4')))}</span>"
-                for c in reg_cards
-            )
-            reg_summary_html = f"등록된 법인카드({len(reg_cards)}장): {reg_badges}"
-        else:
-            reg_summary_html = (
-                "<span style='color:#b45309; font-weight:700;'>"
-                "⚠️ 아직 등록된 법인카드 번호가 없습니다. "
-                "우측 버튼으로 법인카드 끝 4자리를 등록하거나 법인카드 명세서(.xls/.xlsx/.csv)를 업로드하세요."
-                "</span>"
-            )
-        corp_banner_html = (
-            "<section class='section no-print' "
-            "style='background:#f0fdfa; border:2px solid #0d9488; margin-bottom:20px;'>"
-            "<div style='display:flex; justify-content:space-between; align-items:center; "
-            "flex-wrap:wrap; gap:10px;'>"
-            "<div>"
-            "<div style='font-size:15px; font-weight:800; color:#115e59; margin-bottom:4px;'>"
-            "🏢 법인카드 사용내역 전용 테스트 모드 활성화됨 "
-            "(개인카드 SMS·푸시 및 미매칭 개인 쇼핑메일 자동 차단)"
-            "</div>"
-            f"<div style='font-size:13px; color:#134e4a;'>{reg_summary_html}</div>"
-            "</div>"
-            "<div style='display:flex; gap:6px; flex-wrap:wrap;'>"
-            "<button style='background:#0f766e; font-weight:700;' onclick='openCorpCardModal()'>"
-            "💳 법인카드 번호 등록 · 정책 설정</button>"
-            "<button onclick=\"document.getElementById('csv-file-input').click()\">"
-            "📂 법인카드 명세서(.xls/.xlsx/.csv) 업로드</button>"
-            "<button class='secondary' onclick='seedDemoData()'>법인카드 샘플 6건 생성</button>"
-            "</div>"
-            "</div>"
-            "</section>"
+        reg_names = ", ".join(
+            str(c.get("label") or c.get("card_last4")) for c in reg_cards
+        )
+        cnt_suffix = f" ({len(reg_cards)}장)" if reg_cards else " (미등록)"
+        tip_attr = html.escape(
+            f"등록 법인카드: {reg_names}" if reg_names else "클릭하여 법인카드 번호 등록·설정"
+        )
+        corp_mode_badge_html = (
+            f'<span class="badge env" style="background:#dbeafe; color:#1e40af; cursor:pointer;" '
+            f'title="{tip_attr}" onclick="openCorpCardModal()">'
+            f"🏢 법인카드 전용 모드{html.escape(cnt_suffix)}</span>"
         )
     else:
-        corp_banner_html = ""
+        corp_mode_badge_html = ""
 
     db_path_obj = Path(summary["db_path"]).resolve()
     db_full_esc = html.escape(str(db_path_obj))
@@ -1624,12 +1571,14 @@ def render_dashboard_html(
                              align-items: center; flex-wrap: wrap; gap: 6px; }}
     .header-meta {{ font-size: 13px; color: #475569; }}
     .action-toolbar {{ display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }}
-    .action-toolbar button {{ margin-left: 0; }}
+    .action-toolbar button {{
+      margin-left: 0; padding: 6px 11px; font-size: 12.5px; font-weight: 600;
+    }}
     .filter-panel {{ background: #ffffff; border: 1px solid #e2e8f0; border-radius: 10px;
-                     padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; }}
-    .filter-row {{ display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }}
-    .filter-group {{ display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }}
-    .filter-group button {{ margin-left: 0; }}
+                     padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; }}
+    .filter-row {{ display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }}
+    .filter-group {{ display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }}
+    .filter-group button {{ margin-left: 0; padding: 5px 10px; font-size: 12.5px; }}
     .filter-label {{ font-size: 13px; font-weight: 700; color: #334155; white-space: nowrap; }}
     .filter-divider {{ width: 1px; height: 20px; background: #cbd5e1; }}
     .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
@@ -1901,7 +1850,7 @@ def render_dashboard_html(
     <div class="header-top">
       <div class="header-title-wrap">
         <h1>SoloLedger 경비·세무증빙 대시보드 (v{__version__})
-          <span class="badge env">{html.escape(summary['app_env'].upper())} MODE</span>
+          {env_badge_html}
           {corp_mode_badge_html}
         </h1>
         <div class="header-meta">
@@ -1917,62 +1866,92 @@ def render_dashboard_html(
                style="display:none" onchange="uploadReceiptFile(this)" />
         <input type="file" id="csv-file-input" accept=".csv,.txt,.xls,.xlsx,.html,.json"
                style="display:none" onchange="uploadCsvFile(this)" />
-        <button class="secondary" onclick="window.open('/manual', '_blank')">사용 매뉴얼(HTML)</button>
-        <button style="background:#0f766e; font-weight:700;"
-                onclick="openCorpCardModal()">💳 법인카드 등록·전용모드</button>
-        <button onclick="reapplyRules()">스마트 자동분류 실행</button>
-        <button onclick="generateElectronicSlips()">전자 매출전표 일괄 생성</button>
-        <button onclick="document.getElementById('receipt-file-input').click()">영수증 업로드(OCR)</button>
-        <button onclick="document.getElementById('csv-file-input').click()">카드사/홈택스 전표 업로드</button>
-        <button onclick="openCoupangModal()">🛒 쿠팡 주문·영수증 자동매칭</button>
-        <button style="background:#0284c7; font-weight:700;"
-                onclick="openEmailOrderModal()">📧 이메일 주문 · 법인카드 내역 통합 연동</button>
         <input type="file" id="eml-file-input" accept=".eml,.html,.htm,.txt"
                style="display:none" onchange="uploadEmlFile(this)" />
+        <button style="background:#0f766e;"
+                onclick="openCorpCardModal()">💳 법인카드 등록·설정</button>
+        <button onclick="document.getElementById('csv-file-input').click()">
+          카드사/홈택스 전표 업로드
+        </button>
+        <button onclick="document.getElementById('receipt-file-input').click()">
+          영수증 업로드(OCR)
+        </button>
+        <button style="background:#0284c7;"
+                onclick="openEmailOrderModal()">📧 이메일 주문 · 법인카드 내역 통합 연동</button>
+        <button onclick="openCoupangModal()">🛒 쿠팡 주문·영수증 자동매칭</button>
         <button onclick="importPhoneSms()">USB 휴대폰 문자 가져오기</button>
-        <button class="secondary" onclick="seedDemoData()">샘플 데이터 생성</button>
-        <button class="danger" onclick="resetTestLedger()">테스트 DB 초기화</button>
-        <button onclick="backupToNas()">NAS(Z:\\) 백업 동기화</button>
-        <button style="background:#7c3aed; font-weight:700;"
+        <button onclick="reapplyRules()">스마트 자동분류 실행</button>
+        <button onclick="generateElectronicSlips()">전자 매출전표 일괄 생성</button>
+        <button style="background:#7c3aed;"
                 onclick="openGraphAuditModal()">🕸️ 세무감사·지식그래프</button>
-        <button onclick="exportTaxPack('{summary['year_month']}')">세무사 제출용 ZIP+CSV 생성</button>
+        <button onclick="exportTaxPack('{summary['year_month']}')">
+          세무사 제출용 ZIP+CSV 생성
+        </button>
+        <button class="secondary" onclick="backupToNas()">NAS(Z:\\) 백업 동기화</button>
+        <button class="secondary" onclick="window.open('/manual', '_blank')">
+          사용 매뉴얼(HTML)
+        </button>
       </div>
     </div>
 
     <div class="filter-panel no-print">
       <div class="filter-row">
         <div class="filter-group">
-          <span class="filter-label">📆 조회 기간:</span>
+          <span class="filter-label">📆 기간:</span>
           <input type="date" id="start-date" value="{s_date}" />
           <span>~</span>
           <input type="date" id="end-date" value="{e_date}" />
-          <button onclick="applyFilters()">기간 조회</button>
+          <button onclick="applyFilters()">조회</button>
+        </div>
+        <div class="filter-divider"></div>
+        <div class="filter-group">
+          <span class="filter-label">📊 분기:</span>
+          <button class="secondary" style="padding:5px 8px;"
+                  onclick="shiftQuarter(-1)" title="이전 분기">◀</button>
+          <select id="quarter-filter" onchange="selectQuarterRange(this.value)">
+            {quarter_select_html}
+          </select>
+          <button class="secondary" style="padding:5px 8px;"
+                  onclick="shiftQuarter(1)" title="다음 분기">▶</button>
+        </div>
+        <div class="filter-divider"></div>
+        <div class="filter-group">
+          <span class="filter-label">📅 월별:</span>
+          <button class="secondary" style="padding:5px 8px;"
+                  onclick="shiftMonth(-1)" title="이전 달">◀</button>
+          <select id="month-filter" onchange="selectMonthRange(this.value)">
+            {month_select_html}
+          </select>
+          <button class="secondary" style="padding:5px 8px;"
+                  onclick="shiftMonth(1)" title="다음 달">▶</button>
         </div>
         <div class="filter-divider"></div>
         <div class="filter-group">
           <button class="secondary" onclick="setQuickRange('THIS_MONTH')">이번 달</button>
-          <button class="secondary" onclick="setQuickRange('LAST_MONTH')">지난 달</button>
           <button class="secondary" onclick="setQuickRange('THIS_QUARTER')">이번 분기</button>
           <button class="secondary" onclick="setQuickRange('LAST_QUARTER')">지난 분기</button>
-          <button class="secondary" onclick="setQuickRange('3M')">최근 3개월</button>
-          <button class="secondary" onclick="setQuickRange('THIS_YEAR')">올해 전체</button>
-          <button class="secondary" onclick="setQuickRange('ALL')">전체 기간</button>
+          <button class="secondary" onclick="setQuickRange('THIS_YEAR')">올해</button>
+          <button class="secondary" onclick="setQuickRange('ALL')">전체</button>
         </div>
-        <div class="filter-divider"></div>
-        <div class="filter-group">
-          <span class="filter-label">💳 카드 선택:</span>
-          <select id="card-filter" onchange="applyFilters()">
-            {card_select_html}
-          </select>
+      </div>
+
+      <div class="filter-row"
+           style="border-top:1px dashed #e2e8f0; padding-top:8px; justify-content:space-between;">
+        <div class="filter-row" style="gap: 8px 12px;">
+          <div class="filter-group">
+            <span class="filter-label">💳 카드 선택:</span>
+            <select id="card-filter" onchange="applyFilters()">
+              {card_select_html}
+            </select>
+          </div>
+          <div class="filter-divider"></div>
+          <div class="filter-group">
+            <span class="filter-label">📂 계정과목:</span>
+            <select id="account-filter" onchange="applyFilters()">
+              {account_select_html}
+            </select>
+          </div>
         </div>
-        <div class="filter-divider"></div>
-        <div class="filter-group">
-          <span class="filter-label">📂 계정과목:</span>
-          <select id="account-filter" onchange="applyFilters()">
-            {account_select_html}
-          </select>
-        </div>
-        <div class="filter-divider"></div>
         <div class="filter-group">
           <button type="button" style="background:#1e40af; font-weight:700;"
                   onclick="openCtrlFSearch()" title="화면 내 찾기 및 원장 전표 실시간 필터 (단축키: Ctrl+F)">
@@ -1985,42 +1964,8 @@ def render_dashboard_html(
           </button>
         </div>
       </div>
-
-      <div class="filter-row" style="border-top: 1px dashed #e2e8f0; padding-top: 8px;">
-        <div class="filter-group">
-          <span class="filter-label">📊 분기별 조회:</span>
-          <button class="secondary" onclick="shiftQuarter(-1)" title="이전 분기">◀ 이전 분기</button>
-          <select id="quarter-filter" onchange="selectQuarterRange(this.value)">
-            {quarter_select_html}
-          </select>
-          <button class="secondary" onclick="shiftQuarter(1)" title="다음 분기">다음 분기 ▶</button>
-        </div>
-        <div class="filter-divider"></div>
-        <div style="display:flex; align-items:center; flex-wrap:wrap; gap:3px;">
-          <span class="filter-label" style="margin-right:4px;">분기별 바로가기:</span>
-          {quarter_chips_html}
-        </div>
-      </div>
-
-      <div class="filter-row" style="border-top: 1px dashed #e2e8f0; padding-top: 8px;">
-        <div class="filter-group">
-          <span class="filter-label">📅 달별 조회:</span>
-          <button class="secondary" onclick="shiftMonth(-1)" title="이전 달">◀ 이전 달</button>
-          <select id="month-filter" onchange="selectMonthRange(this.value)">
-            {month_select_html}
-          </select>
-          <button class="secondary" onclick="shiftMonth(1)" title="다음 달">다음 달 ▶</button>
-        </div>
-        <div class="filter-divider"></div>
-        <div style="display:flex; align-items:center; flex-wrap:wrap; gap:3px;">
-          <span class="filter-label" style="margin-right:4px;">월별 바로가기:</span>
-          {month_chips_html}
-        </div>
-      </div>
     </div>
   </header>
-
-  {corp_banner_html}
 
   <section class="cards">
     <div class="card">
@@ -2200,9 +2145,6 @@ def render_dashboard_html(
         <button id="btn-filter-stmt-only" class="secondary"
                 onclick="toggleStatementRowsFilter({stmt_tx_count})">
           📄 거래명세서 발급 전표만 보기 ({stmt_tx_count}건)
-        </button>
-        <button class="secondary" onclick="openEmailOrderModal()">
-          📧 이메일 연동 결과 확인
         </button>
         <button type="button" id="btn-ledger-freeze-header" class="freeze-toggle-btn"
                 onclick="toggleFreezeHeaders()"
@@ -2591,7 +2533,7 @@ def render_dashboard_html(
   <div id="corp-card-modal-backdrop" class="modal-backdrop" onclick="onCorpCardBackdropClick(event)">
     <div class="modal-card" style="max-width:740px;">
       <div class="modal-header">
-        <strong>💳 법인카드 번호 등록 · 법인카드 전용 테스트 모드 설정</strong>
+        <strong>💳 법인카드 번호 등록 · 법인카드 전용 모드 설정</strong>
         <button class="secondary" onclick="closeCorpCardModal()">✕ 닫기</button>
       </div>
       <div class="slip-box" style="background:#f0fdfa; border-color:#5eead4; margin-bottom:12px;">
@@ -3640,28 +3582,6 @@ def render_dashboard_html(
       }});
       window.location.reload();
     }}
-    async function seedDemoData() {{
-      if (!window.confirm('테스트용 샘플 전표 6건(DEMO1001~DEMO1006)을 현재 원장에 추가하시겠습니까?')) {{
-        return;
-      }}
-      await fetch('/api/v1/system/seed-demo', {{
-        method: 'POST',
-        headers: API_HEADERS,
-        body: JSON.stringify({{ year_month: '{summary['year_month']}' }})
-      }});
-      window.location.reload();
-    }}
-    async function resetTestLedger() {{
-      if (!window.confirm('경고: 현재 연결된 DB의 모든 전표와 영수증을 초기화하시겠습니까?')) {{
-        return;
-      }}
-      await fetch('/api/v1/system/reset-test', {{
-        method: 'POST',
-        headers: API_HEADERS,
-        body: JSON.stringify({{}})
-      }});
-      window.location.reload();
-    }}
     function openCoupangModal() {{
       document.getElementById('coupang-modal-backdrop').classList.add('open');
     }}
@@ -4308,16 +4228,6 @@ def render_dashboard_html(
         if (btnEl) {{
           btnEl.disabled = false;
           btnEl.textContent = prevTxt;
-        }}
-      }}
-    }}
-    async function openTossScrollModal() {{
-      await openEmailOrderModal();
-      const pnl = document.getElementById('toss-scroll-panel');
-      if (pnl) {{
-        pnl.open = true;
-        if (pnl.scrollIntoView) {{
-          pnl.scrollIntoView({{ behavior: 'smooth', block: 'nearest' }});
         }}
       }}
     }}

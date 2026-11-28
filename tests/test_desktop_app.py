@@ -732,3 +732,49 @@ def test_ctrl_f_starts_from_current_viewport_in_headless_chromium(
         controller.stop(timeout=5.0)
 
 
+def test_dashboard_streamlined_ui_removes_test_and_duplicate_controls(monkeypatch) -> None:
+    """Verify unnecessary test/demo buttons, duplicate banners, and chip rows are removed."""
+    client = TestClient(app)
+
+    monkeypatch.setenv("SOLOLEDGER_ENV", "development")
+    dash_resp = client.get("/dashboard?year_month=ALL")
+    assert dash_resp.status_code == 200
+    html_text = dash_resp.text
+
+    for removed_token in (
+        "샘플 데이터 생성",
+        "테스트 DB 초기화",
+        "법인카드 샘플 6건 생성",
+        "DEVELOPMENT MODE",
+        "법인카드 사용내역 전용 테스트 모드",
+        "법인카드 전용 테스트 모드 설정",
+        "토스페이먼츠 법인카드 메일 스크롤링",
+        "분기별 바로가기",
+        "월별 바로가기",
+        "이메일 연동 결과 확인",
+        "function seedDemoData(",
+        "function resetTestLedger(",
+        "function openTossScrollModal(",
+    ):
+        assert removed_token not in html_text, f"Unexpected removed UI token found: {removed_token}"
+
+    for expected_token in (
+        "💳 법인카드 등록·설정",
+        "📧 이메일 주문 · 법인카드 내역 통합 연동",
+        'id="quarter-filter"',
+        'id="month-filter"',
+        'id="card-filter"',
+        'id="account-filter"',
+        "🔎 빠른 검색 (Ctrl+F)",
+        'id="btn-toggle-freeze-header"',
+    ):
+        assert expected_token in html_text
+
+    # Sandbox TEST MODE badge must still render when app_env is explicitly 'test'
+    monkeypatch.setenv("SOLOLEDGER_ENV", "test")
+    test_resp = client.get("/dashboard?year_month=ALL")
+    assert test_resp.status_code == 200
+    assert "TEST MODE" in test_resp.text
+
+
+

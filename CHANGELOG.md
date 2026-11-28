@@ -80,3 +80,4 @@
 | 2026-11-23 | `fix` | `docs/USER_MANUAL.html, docs/USER_MANUAL.md, logs/architecture_graph.json, logs/last_verification.json (+3 files)` | Ctrl+F 찾기 실행 시 페이지 최상단(1/N) 대신 현재 스크롤된 화면(뷰포트) 위치부터 검색하도록 수정 | `PASSED` |
 | 2026-11-28 | `feat` | `logs/architecture_graph.json, logs/last_verification.json, logs/verification_history.jsonl, sql/schema.sql (+13 files)` | 경비제외(900) 계정·분리출력, PG 덮어쓰기 방지·일괄편집 UI, 분류오탐·면세정합성 보정 및 가사경비 세무감사 추가 | `PASSED` |
 | 2026-11-28 | `feat` | `logs/architecture_graph.json, logs/last_verification.json, logs/verification_history.jsonl, src/sololedger/api.py (+4 files)` | 이메일 주문·법인카드 내역 기능 통합 및 네이버페이·카드결제 메일 본문 법인카드 판별 스크롤링 고도화 | `PASSED` |
+| 2026-11-28 | `refactor` | `docs/USER_MANUAL.html, docs/USER_MANUAL.md, logs/last_verification.json, logs/verification_history.jsonl (+2 files)` | 대시보드 불필요 테스트·중복 기능 제거 및 조회 필터 2줄 압축 정리 | `PASSED` |

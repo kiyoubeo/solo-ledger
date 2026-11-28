@@ -347,12 +347,12 @@ powershell -ExecutionPolicy Bypass -File scripts/server_service.ps1 stop-backgro
         <h3>2.2 웹 대시보드 (<code>http://127.0.0.1:8000/dashboard</code>) 상단 버튼 기능</h3>
         <div class="steps-grid">
           <div class="step-box">
-            <strong>① [샘플 데이터 생성]</strong>
-            연습용 법인카드 거래 6건(쿠팡, 네이버페이 모니터, 스타벅스, 한우명가, 주유소, 미분류 문구점)과 샘플 영수증을 즉시 생성합니다.
+            <strong>① [💳 법인카드 등록·설정]</strong>
+            법인카드 번호(끝 4자리) 등록·관리 및 개인카드 혼입 차단 전용 모드 정책을 설정합니다.
           </div>
           <div class="step-box">
-            <strong>② [테스트 DB 초기화]</strong>
-            연습 삼아 입력·수정한 테스트 전표와 영수증을 전부 지우고 백지(0건) 상태로 리셋합니다.
+            <strong>② [📧 이메일 주문 · 법인카드 내역 통합 연동]</strong>
+            네이버페이·토스페이먼츠·쿠팡·PG·카드사 결제메일을 통합 스캔·스크롤링하여 전자 거래명세서를 자동 작성합니다.
           </div>
           <div class="step-box">
             <strong>③ [NAS(Z:\) 백업 동기화]</strong>
